@@ -72,6 +72,7 @@ import { MemoryModule } from '../src/modules/memory.js'
 import { CriticModule } from '../src/modules/critic.js'
 import { WorkspaceModule } from '../src/modules/workspace.js'
 import { ReflectionModule, consolidateSession } from '../src/modules/reflection.js'
+import { detectProjectContext, formatProjectContext } from '../src/config/projectContext.js'
 import { createLoadSkillTool } from '../src/tools/loadSkill.js'
 import { tmuxLayout } from '../src/ui/tmuxLayout.js'
 
@@ -88,6 +89,8 @@ interface Args {
   cwd: string
   help: boolean
   version: boolean
+  loop: boolean
+  loopMaxIters: number
 }
 
 const MAX_RECENT_HISTORY_MESSAGES = 120
@@ -130,6 +133,8 @@ function parseArgs(argv: string[]): Args {
   let cwd = process.env.OVOGO_CWD ?? process.cwd()
   let help = false
   let version = false
+  let loop = false
+  let loopMaxIters = 12
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]
@@ -139,11 +144,13 @@ function parseArgs(argv: string[]): Args {
       case '--model': case '-m': model = args[++i] ?? model; break
       case '--max-iter': maxIter = parseInt(args[++i] ?? '30', 10); break
       case '--cwd': cwd = args[++i] ?? cwd; break
+      case '--loop': loop = true; break
+      case '--loop-max-iters': loopMaxIters = parseInt(args[++i] ?? '12', 10); break
       default:
         if (!arg.startsWith('-')) task = task ? task + ' ' + arg : arg
     }
   }
-  return { task, model, maxIter, cwd, help, version }
+  return { task, model, maxIter, cwd, help, version, loop, loopMaxIters }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -619,7 +626,7 @@ async function runTask(
 // ─────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  const { task, model, maxIter, cwd: rawCwd, help, version } = parseArgs(process.argv)
+  const { task, model, maxIter, cwd: rawCwd, help, version, loop, loopMaxIters } = parseArgs(process.argv)
   const cwd = resolve(rawCwd)
 
   // Load skills early so --help can list them
@@ -703,9 +710,16 @@ async function main(): Promise<void> {
     renderer.info(`Agent 监控: ${tmuxLayout.sessionHint()}`)
   }
 
+  // Detect project context (language, framework, git status, scripts)
+  const projectCtx = detectProjectContext(cwd)
+  const projectCtxSection = formatProjectContext(projectCtx)
+  if (projectCtx.git?.branch) {
+    renderer.info(`Git: ${projectCtx.git.branch} · ${projectCtx.git.modifiedCount ?? 0} modified · ${projectCtx.git.stagedCount ?? 0} staged`)
+  }
+
   // Build the full system prompt once (memory section injected by MemoryModule at boot)
   const skillIndex = formatSkillIndex(skills)
-  const systemPrompt = buildFullSystemPrompt(cwd, ovogoMdFiles, '', taskContext, sessionDir, skillIndex)
+  const systemPrompt = buildFullSystemPrompt(cwd, ovogoMdFiles, '', taskContext, sessionDir, skillIndex, projectCtxSection)
 
   // Initialize optimization components
   const eventLog = new EventLog(sessionDir)
@@ -785,6 +799,18 @@ async function main(): Promise<void> {
       await runTask(engine, renderer, piped, cwd)
       return
     }
+  }
+
+  // Loop mode?
+  if (loop) {
+    const { runLoop } = await import('../src/core/loopEngine.js')
+    renderer.info('Loop mode activated — reading .loop/ configuration')
+    await runLoop(engine, renderer, {
+      cwd,
+      loopDir: join(cwd, '.loop'),
+      maxIters: loopMaxIters,
+    })
+    return
   }
 
   // Single task from args?

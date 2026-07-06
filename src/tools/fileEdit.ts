@@ -93,9 +93,22 @@ export class FileEditTool implements Tool {
 
       await writeFile(file_path, newContent, 'utf8')
 
+      // Build a simple diff for display
+      const oldLines = old_string.split('\n')
+      const newLines = new_string.split('\n')
+      const diffLines: string[] = []
+      const maxLines = Math.max(oldLines.length, newLines.length)
+      for (let i = 0; i < maxLines; i++) {
+        const o = oldLines[i]
+        const n = newLines[i]
+        if (o !== undefined) diffLines.push(`- ${o}`)
+        if (n !== undefined && n !== o) diffLines.push(`+ ${n}`)
+      }
+      const diff = diffLines.length > 0 ? `\n${diffLines.join('\n')}` : ''
+
       const count = replace_all ? occurrences : 1
       return {
-        content: `Edited ${file_path}: replaced ${count} occurrence${count !== 1 ? 's' : ''}`,
+        content: `Edited ${file_path}: replaced ${count} occurrence${count !== 1 ? 's' : ''}${diff}`,
         isError: false,
       }
     } catch (err: unknown) {
