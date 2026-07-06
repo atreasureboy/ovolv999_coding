@@ -10,16 +10,34 @@
 import { exec, spawn } from 'child_process'
 import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/types.js'
 import { BASH_DESCRIPTION } from '../prompts/tools.js'
-import { mkdirSync } from 'fs'
+import { mkdirSync, accessSync, constants } from 'fs'
 import { join } from 'path'
 
 const MAX_OUTPUT_LENGTH = 30_000
 const DEFAULT_TIMEOUT_MS = 1_800_000  // 30 min — long-running commands default
 const MAX_TIMEOUT_MS = 14_400_000    // 4 h — max for very long tasks
 
-// Shell detection — OVOGO_SHELL env overrides; otherwise bash (resolves via PATH
-// on Windows if Git Bash/WSL is installed, /bin/bash on Unix).
-const SHELL = process.env.OVOGO_SHELL || 'bash'
+// Shell detection — prioritize user override, then platform default.
+// On Windows: prefer Git Bash if available, fall back to cmd.exe.
+// Claude Code approach: use the system's native shell, don't force bash.
+function detectShell(): string {
+  if (process.env.OVOGO_SHELL) return process.env.OVOGO_SHELL
+  if (process.platform === 'win32') {
+    // Try Git Bash (common on Windows dev machines)
+    const gitBashPaths = [
+      'C:\\Program Files\\Git\\bin\\bash.exe',
+      'C:\\Program Files (x86)\\Git\\bin\\bash.exe',
+    ]
+    for (const p of gitBashPaths) {
+      try { accessSync(p, constants.X_OK); return p } catch { /* not found */ }
+    }
+    // Fall back to cmd.exe — always available on Windows
+    return process.env.ComSpec || 'cmd.exe'
+  }
+  return '/bin/bash'
+}
+const SHELL = detectShell()
+const IS_WIN_CMD = SHELL.endsWith('cmd.exe')
 
 export interface BashInput {
   command: string
@@ -101,9 +119,9 @@ export class BashTool implements Tool {
       const alreadyRedirected = command.includes('>') || command.includes('2>&1') || command.includes('/dev/null')
       const actualCommand = alreadyRedirected ? command : `${command} >> "${logFile}" 2>&1`
 
-      const child = spawn(SHELL, ['-c', actualCommand], {
-        detached: true,
-        stdio: 'ignore',
+      // Use appropriate shell flags: bash uses -c, cmd.exe uses /c
+      const shellArgs = IS_WIN_CMD ? ['/c', actualCommand] : ['-c', actualCommand]
+      const child = spawn(SHELL, shellArgs, {
         cwd: context.cwd,
         env: process.env,
       })

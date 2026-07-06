@@ -761,12 +761,15 @@ export class ExecutionEngine {
       }
     } catch (err) {
       // Lifecycle hook: OnError
+      const errMsg = (err as Error).message || String(err)
       this.config.hookRunner?.runOnError?.(err as Error, {
         turnNumber: iterations,
         lastToolName,
       })
+      // Surface the error to the user — don't swallow it silently
+      this.renderer.error(`Engine error: ${errMsg}`)
       // Don't re-throw — construct error result so onComplete hooks still fire
-      result = { stopped: true, reason: 'error', output: finalOutput }
+      result = { stopped: true, reason: 'error', output: finalOutput || `[Error: ${errMsg}]` }
     } finally {
       this.currentTurnAbortController = null
     }
