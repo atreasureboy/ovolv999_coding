@@ -27,7 +27,7 @@
  */
 
 import { resolve, join, dirname } from 'path'
-import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'fs'
+import { writeFileSync, mkdirSync, readFileSync, existsSync, readdirSync } from 'fs'
 import { homedir } from 'os'
 import { fileURLToPath } from 'url'
 
@@ -91,6 +91,8 @@ interface Args {
   version: boolean
   loop: boolean
   loopMaxIters: number
+  continueSession: boolean
+  resumeSession?: string
 }
 
 const MAX_RECENT_HISTORY_MESSAGES = 120
@@ -135,6 +137,8 @@ function parseArgs(argv: string[]): Args {
   let version = false
   let loop = false
   let loopMaxIters = 12
+  let continueSession = false
+  let resumeSession: string | undefined
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]
@@ -146,11 +150,13 @@ function parseArgs(argv: string[]): Args {
       case '--cwd': cwd = args[++i] ?? cwd; break
       case '--loop': loop = true; break
       case '--loop-max-iters': loopMaxIters = parseInt(args[++i] ?? '12', 10); break
+      case '--continue': case '-c': continueSession = true; break
+      case '--resume': case '-r': resumeSession = args[++i]; break
       default:
         if (!arg.startsWith('-')) task = task ? task + ' ' + arg : arg
     }
   }
-  return { task, model, maxIter, cwd, help, version, loop, loopMaxIters }
+  return { task, model, maxIter, cwd, help, version, loop, loopMaxIters, continueSession, resumeSession }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -237,6 +243,63 @@ function createSessionDir(cwd: string): string {
 }
 
 // ─────────────────────────────────────────────────────────────
+// Session persistence — save/load conversation history
+// ─────────────────────────────────────────────────────────────
+
+function saveSession(sessionDir: string, history: OpenAIMessage[]): void {
+  try {
+    writeFileSync(join(sessionDir, 'history.json'), JSON.stringify(history, null, 2), 'utf8')
+  } catch { /* best-effort */ }
+}
+
+function loadSession(sessionDir: string): OpenAIMessage[] {
+  try {
+    const raw = readFileSync(join(sessionDir, 'history.json'), 'utf8')
+    return JSON.parse(raw) as OpenAIMessage[]
+  } catch {
+    return []
+  }
+}
+
+function findLatestSession(cwd: string): string | null {
+  const sessionsDir = join(cwd, 'sessions')
+  if (!existsSync(sessionsDir)) return null
+  try {
+    const entries = readdirSync(sessionsDir)
+      .filter(e => e.startsWith('session_'))
+      .sort()
+      .reverse()
+    for (const entry of entries) {
+      const histPath = join(sessionsDir, entry, 'history.json')
+      if (existsSync(histPath)) return join(sessionsDir, entry)
+    }
+    return entries.length > 0 ? join(sessionsDir, entries[0]) : null
+  } catch {
+    return null
+  }
+}
+
+function listSessions(cwd: string): Array<{ dir: string; name: string; messages: number }> {
+  const sessionsDir = join(cwd, 'sessions')
+  if (!existsSync(sessionsDir)) return []
+  try {
+    return readdirSync(sessionsDir)
+      .filter(e => e.startsWith('session_'))
+      .sort()
+      .reverse()
+      .map(name => {
+        const dir = join(sessionsDir, name)
+        let messages = 0
+        try {
+          const hist = JSON.parse(readFileSync(join(dir, 'history.json'), 'utf8')) as unknown[]
+          messages = hist.length
+        } catch { /* no history */ }
+        return { dir, name, messages }
+      })
+  } catch {
+    return []
+  }
+}
 // Progress log (断点续传)
 // ─────────────────────────────────────────────────────────────
 
@@ -343,6 +406,25 @@ function handleBuiltin(
       renderer.info(`Session: ${history.length} messages in history`)
       return true
 
+    case '/sessions': {
+      renderer.newline()
+      const sessions = listSessions(cwd)
+      if (sessions.length === 0) {
+        renderer.info('No saved sessions found.')
+      } else {
+        renderer.info(`Found ${sessions.length} session(s):`)
+        for (const s of sessions.slice(0, 10)) {
+          process.stdout.write(`  \x1b[36m${s.name}\x1b[0m \x1b[2m${s.messages} msgs\x1b[0m\n`)
+        }
+        if (sessions.length > 10) {
+          renderer.info(`  ... and ${sessions.length - 10} more`)
+        }
+        renderer.info(`\nResume with: ovolv999 --continue  or  ovolv999 --resume <session_name>`)
+      }
+      renderer.newline()
+      return true
+    }
+
     case '/model':
       renderer.info(`Model: ${engine.getModel()}`)
       return true
@@ -418,9 +500,11 @@ async function runRepl(
   skills: Map<string, Skill>,
   hookRunner: { runUserPromptSubmit: (p: string) => void },
   consolidate?: { config: EngineConfig; semanticMemory: SemanticMemory; episodicMemory: EpisodicMemory },
+  sessionDir?: string,
+  resumedHistory?: OpenAIMessage[],
 ): Promise<void> {
   const input = new InputHandler()
-  const history: OpenAIMessage[] = []
+  const history: OpenAIMessage[] = resumedHistory ? [...resumedHistory] : []
 
   renderer.info(`Type your task and press Enter · /plan /skills /help /exit`)
   renderer.info(`ESC to pause/inject · Ctrl+D to exit`)
@@ -481,6 +565,9 @@ async function runRepl(
         history.length = 0
         history.push(...trimHistoryForNextTurn(newHistory))
         currentHistory = [...history]
+
+        // Persist session after each turn
+        if (sessionDir) saveSession(sessionDir, history)
 
         if (result.reason === 'interrupted') {
           // ── Soft interrupt: ask user for guidance, then resume ──
@@ -626,7 +713,7 @@ async function runTask(
 // ─────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  const { task, model, maxIter, cwd: rawCwd, help, version, loop, loopMaxIters } = parseArgs(process.argv)
+  const { task, model, maxIter, cwd: rawCwd, help, version, loop, loopMaxIters, continueSession, resumeSession } = parseArgs(process.argv)
   const cwd = resolve(rawCwd)
 
   // Load skills early so --help can list them
@@ -699,8 +786,32 @@ async function main(): Promise<void> {
     }
   }
 
-  // Create per-session output directory
-  const sessionDir = createSessionDir(cwd)
+  // Create per-session output directory (or reuse existing for --continue/--resume)
+  let sessionDir: string
+  let resumedHistory: OpenAIMessage[] = []
+  if (resumeSession) {
+    sessionDir = resumeSession.startsWith('sessions/') || resumeSession.includes('session_')
+      ? resolve(cwd, resumeSession)
+      : resolve(cwd, 'sessions', resumeSession)
+    if (!existsSync(sessionDir)) {
+      renderer.error(`Session not found: ${sessionDir}`)
+      process.exit(1)
+    }
+    resumedHistory = loadSession(sessionDir)
+    renderer.info(`Resumed session: ${sessionDir} (${resumedHistory.length} messages)`)
+  } else if (continueSession) {
+    const latest = findLatestSession(cwd)
+    if (latest) {
+      sessionDir = latest
+      resumedHistory = loadSession(sessionDir)
+      renderer.info(`Continued session: ${sessionDir} (${resumedHistory.length} messages)`)
+    } else {
+      sessionDir = createSessionDir(cwd)
+      renderer.info(`No previous session found — starting new: ${sessionDir}`)
+    }
+  } else {
+    sessionDir = createSessionDir(cwd)
+  }
   renderer.info(`Session dir: ${sessionDir}`)
 
   // Initialize sub-agent tmux monitor
@@ -825,7 +936,7 @@ async function main(): Promise<void> {
   // Interactive REPL
   await runRepl(engine, planConfig, renderer, cwd, skills, hookRunner, {
     config, semanticMemory, episodicMemory,
-  })
+  }, sessionDir, resumedHistory)
 }
 
 main().catch((err: unknown) => {
