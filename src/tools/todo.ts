@@ -12,6 +12,7 @@ import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/type
 export interface TodoItem {
   id: string
   content: string
+  activeForm?: string
   status: 'pending' | 'in_progress' | 'completed'
   priority: 'high' | 'medium' | 'low'
 }
@@ -41,29 +42,54 @@ export class TodoWriteTool implements Tool {
       name: 'TodoWrite',
       description: `Manage a task checklist for the current session.
 
-Use this tool to:
-- Break a complex task into subtasks and track progress
-- Mark tasks as in_progress when starting them
-- Mark tasks as completed when done
+## When to Use This Tool
+Use this tool proactively in these scenarios:
+1. Complex multi-step tasks (3+ distinct steps)
+2. User provides multiple tasks (numbered or comma-separated)
+3. After receiving new instructions — immediately capture as todos
+4. When you start working on a task — mark it in_progress BEFORE beginning
+5. After completing a task — mark it completed and add any follow-up tasks
 
-The list is displayed to the user and helps them track what you're doing.
+## When NOT to Use
+1. Single straightforward task
+2. Trivial task (< 3 steps)
+3. Purely conversational or informational
+
+## Task States
+- pending: Not yet started
+- in_progress: Currently working on (**limit to ONE at a time**)
+- completed: Fully finished
+
+## Rules
+- Exactly ONE task must be in_progress at any time (not zero, not two)
+- Mark tasks complete IMMMEDIATELY after finishing (don't batch)
+- NEVER mark completed if: tests failing, implementation partial, errors unresolved
+- Remove tasks that are no longer relevant
+- Create specific, actionable items (not vague goals)
+- Break complex tasks into smaller steps
+
+## Fields
+- id: unique identifier (e.g. "1", "2", "fix-auth")
+- content: imperative form — what to do (e.g. "Fix authentication bug")
+- activeForm: present continuous — shown during execution (e.g. "Fixing authentication bug")
+- status: pending | in_progress | completed
+- priority: high | medium | low
 
 Operations:
-- "create": replace the entire list with new todos
-- "update": update status of specific todo(s) by id
-
-Always update status as you work: set in_progress before starting a task, completed when done.`,
+- Provide full list to replace all todos
+- Provide partial list with matching ids to update specific items`,
       parameters: {
         type: 'object',
         properties: {
           todos: {
             type: 'array',
-            description: 'List of todo items (for create operation, or updated items for update)',
+            description: 'Full todo list (replaces existing) or partial updates (matched by id)',
             items: {
               type: 'object',
               properties: {
-                id: { type: 'string', description: 'Unique ID (e.g. "1", "2", "setup-deps")' },
-                content: { type: 'string', description: 'Task description' },
+                id: { type: 'string', description: 'Unique ID' },
+                content: { type: 'string', description: 'Imperative: "Run tests"' },
+                activeForm: { type: 'string', description: 'Present continuous: "Running tests"' },
                 status: {
                   type: 'string',
                   enum: ['pending', 'in_progress', 'completed'],

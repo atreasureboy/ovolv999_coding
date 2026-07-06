@@ -137,12 +137,19 @@ interface ToolBatch {
  * Partition tool calls into scheduling batches:
  * - All safe tools → merged into one parallel batch (Promise.all)
  * - Stateful tools (Write, Edit, etc.) → each gets its own serial batch
+ *
+ * Uses per-input isConcurrencySafe(input) when available (Claude Code pattern),
+ * falls back to static CONCURRENCY_SAFE_TOOLS set.
  */
-function partitionToolCalls(calls: ParsedToolCall[]): ToolBatch[] {
+function partitionToolCalls(calls: ParsedToolCall[], tools?: Tool[]): ToolBatch[] {
   const batches: ToolBatch[] = []
 
   for (const call of calls) {
-    const safe = CONCURRENCY_SAFE_TOOLS.has(call.tc.name)
+    // Per-input check: if the tool implements isConcurrencySafe, use it
+    const tool = tools?.find(t => t.name === call.tc.name)
+    const safe = tool?.isConcurrencySafe
+      ? tool.isConcurrencySafe(call.input)
+      : CONCURRENCY_SAFE_TOOLS.has(call.tc.name)
     const last = batches[batches.length - 1]
 
     if (last && last.safe && safe) {
@@ -514,7 +521,7 @@ export class ExecutionEngine {
     messages: OpenAIMessage[],
     turnNumber: number,
   ): Promise<{ aborted: boolean }> {
-    const batches = partitionToolCalls(parsedCalls)
+    const batches = partitionToolCalls(parsedCalls, this.allTools)
 
     for (const batch of batches) {
       if (turnAbortSignal.aborted) return { aborted: true }

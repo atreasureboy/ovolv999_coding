@@ -45,6 +45,13 @@ export interface Tool {
   name: string
   definition: ToolDefinition
   execute(input: Record<string, unknown>, context: ToolContext): Promise<ToolResult>
+  /**
+   * Per-input concurrency check (Claude Code pattern).
+   * If implemented, engine uses this instead of the static CONCURRENCY_SAFE_TOOLS set.
+   * Returns true if this specific call can run in parallel with other safe calls.
+   * Default (not implemented) → falls back to static set.
+   */
+  isConcurrencySafe?(input: Record<string, unknown>): boolean
 }
 
 export interface ToolContext {

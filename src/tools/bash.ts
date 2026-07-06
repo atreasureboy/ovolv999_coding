@@ -92,6 +92,55 @@ export class BashTool implements Tool {
     },
   }
 
+  /**
+   * Per-input concurrency check (Claude Code pattern).
+   * Read-only / query commands are safe to parallelize.
+   * Mutating commands (install, build, write, git push) are NOT safe.
+   */
+  isConcurrencySafe(input: Record<string, unknown>): boolean {
+    const command = typeof input.command === 'string' ? input.command.toLowerCase() : ''
+    if (!command) return false
+
+    // Background and follow-mode always safe (they don't block)
+    if (input.run_in_background === true) return true
+
+    // Safe: read-only commands
+    const safePatterns = [
+      /^(ls|cat|head|tail|echo|pwd|whoami|date|which|whereis|file)\b/,
+      /^(git\s+(status|log|diff|branch|show|blame|remote|rev-parse|config\s+--get)\b)/,
+      /^(grep|rg|find|fd)\b/,
+      /^(npm\s+(list|ls|view|info|outdated)\b)/,
+      /^(pnpm\s+(list|ls|why)\b)/,
+      /^(node\s+--version|npm\s+--version|pnpm\s+--version|npx\s+--version)/,
+      /^(npx\s+tsc\s+--noemit)/,
+      /^(npx\s+eslint\s+.*--check)/,
+      /^(npx\s+prettier\s+.*--check)/,
+      /^(test\s|-d\s|-f\s|-e\s)/,
+    ]
+    for (const pattern of safePatterns) {
+      if (pattern.test(command)) return true
+    }
+
+    // Unsafe: commands that modify state
+    const unsafePatterns = [
+      /^(npm\s+(install|i|ci|uninstall|rm|publish)\b)/,
+      /^(pnpm\s+(install|add|remove|rm)\b)/,
+      /^(yarn\s+(add|remove|install)\b)/,
+      /^(git\s+(add|commit|push|pull|merge|rebase|reset|checkout|stash|cherry-pick)\b)/,
+      /^(rm\s|mv\s|cp\s|mkdir\s|rmdir\s|chmod\s|chown\s)/,
+      /^(curl\s|wget\s)/,
+      /^(docker\s|kubectl\s|terraform\s)/,
+      /^(npm\s+run\s|pnpm\s+run\s|yarn\s)/,
+      /(\|\||&&|;)/,  // chained commands — can't guarantee safety
+    ]
+    for (const pattern of unsafePatterns) {
+      if (pattern.test(command)) return false
+    }
+
+    // Default: conservative — treat unknown commands as unsafe
+    return false
+  }
+
   async execute(input: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
     const { command, timeout, run_in_background, follow_mode } = input as unknown as BashInput
 
