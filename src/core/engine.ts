@@ -751,7 +751,16 @@ export class ExecutionEngine {
         )
 
         if (aborted || turnAbortController.signal.aborted) {
-          result = { stopped: true, reason: 'error', output: finalOutput }
+          // Distinguish soft-abort (ESC → interrupted) from hard-abort (Ctrl+C → error)
+          result = {
+            stopped: true,
+            reason: this.softAbortRequested ? 'error' : 'error',
+            output: finalOutput,
+          }
+          // If soft-abort was the cause, report as interrupted so REPL can resume
+          if (aborted && !turnAbortController.signal.aborted) {
+            result = { stopped: true, reason: 'interrupted', output: finalOutput }
+          }
           break
         }
       }

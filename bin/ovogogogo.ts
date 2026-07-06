@@ -151,7 +151,13 @@ function parseArgs(argv: string[]): Args {
       case '--loop': loop = true; break
       case '--loop-max-iters': loopMaxIters = parseInt(args[++i] ?? '12', 10); break
       case '--continue': case '-c': continueSession = true; break
-      case '--resume': case '-r': resumeSession = args[++i]; break
+      case '--resume': case '-r':
+        resumeSession = args[++i]
+        if (!resumeSession) {
+          process.stderr.write('Error: --resume requires a session name\n')
+          process.exit(1)
+        }
+        break
       default:
         if (!arg.startsWith('-')) task = task ? task + ' ' + arg : arg
     }
@@ -199,6 +205,7 @@ REPL COMMANDS
   /plan <task>   Run task in plan mode (read-only analysis + confirm before execute)
   /skills        List available skills
   /<skill> [args] Run a built-in or custom skill
+  /sessions      List saved sessions (resume with --continue or --resume)
   /clear         Clear conversation history
   /history       Show message count
   /model         Show current model
@@ -273,7 +280,7 @@ function findLatestSession(cwd: string): string | null {
       const histPath = join(sessionsDir, entry, 'history.json')
       if (existsSync(histPath)) return join(sessionsDir, entry)
     }
-    return entries.length > 0 ? join(sessionsDir, entries[0]) : null
+    return null  // don't return sessions without history.json
   } catch {
     return null
   }
@@ -790,8 +797,9 @@ async function main(): Promise<void> {
   let sessionDir: string
   let resumedHistory: OpenAIMessage[] = []
   if (resumeSession) {
-    sessionDir = resumeSession.startsWith('sessions/') || resumeSession.includes('session_')
-      ? resolve(cwd, resumeSession)
+    // Always look under sessions/ unless the path already contains a separator
+    sessionDir = resumeSession.includes('/') || resumeSession.includes('\\')
+      ? resolve(resumeSession)
       : resolve(cwd, 'sessions', resumeSession)
     if (!existsSync(sessionDir)) {
       renderer.error(`Session not found: ${sessionDir}`)

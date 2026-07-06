@@ -148,7 +148,7 @@ describe('ModuleRegistry', () => {
     expect(modules[0].name).toBe('a')
   })
 
-  it('resves dependencies before dependents', () => {
+  it('resolves dependencies before dependents', () => {
     const reg = new ModuleRegistry()
     reg.register('child', () => makeModule('child', ['parent']))
     reg.register('parent', () => makeModule('parent'))
