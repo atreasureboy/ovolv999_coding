@@ -28,7 +28,11 @@ function renderTodoList(): string {
         item.status === 'completed' ? '✓' :
         item.status === 'in_progress' ? '◆' : '○'
       const pri = item.priority === 'high' ? '[H]' : item.priority === 'low' ? '[L]' : '   '
-      return `${icon} ${pri} ${item.content}`
+      // Show activeForm for in_progress tasks, content otherwise
+      const text = item.status === 'in_progress' && item.activeForm
+        ? item.activeForm
+        : item.content
+      return `${icon} ${pri} ${text}`
     })
     .join('\n')
 }

@@ -169,27 +169,27 @@ Never run interactive processes in foreground Bash (they block until timeout):
 }
 
 function getMultiAgentSection(): string {
-  return `# 子 Agent 委派（Agent 工具）
+  return `# Sub-Agent Delegation (Agent Tool)
 
-复杂任务可拆分给专注的子 agent。多个 Agent 调用在同一响应中**并发执行**（Promise.all）。
+Complex tasks can be split across focused sub-agents. Multiple Agent calls in one response run concurrently (Promise.all).
 
-## 指定子 Agent 配置
+## Specifying Agent Configuration
 
-方式 1 — 预设名称: subagent_type: "explore" | "plan" | "code-reviewer" | "general-purpose"
-方式 2 — 自定义配置: agent_config: { identity, modules, tools, maxIterations }
+Option 1 — Preset name: subagent_type: "explore" | "plan" | "code-reviewer" | "general-purpose"
+Option 2 — Custom config: agent_config: { identity, modules, tools, maxIterations }
 
-## 内置预设
+## Built-in Presets
 
-| 预设 | 权限 | 适用场景 |
-|------|------|----------|
-| explore | 只读 | 代码探索、结构分析、答疑 |
-| plan | 只读 | 输出可执行实现计划 |
-| code-reviewer | 只读 | 代码审查 |
-| general-purpose | 全工具 | 通用复杂子任务（带 memory + workspace） |
+| Preset | Access | Use case |
+|--------|--------|----------|
+| explore | read-only | Code exploration, structure analysis |
+| plan | read-only | Produce actionable implementation plan |
+| code-reviewer | read-only | Code review (correctness/security/performance) |
+| general-purpose | full tools | General complex subtasks (with memory + workspace) |
 
-## 并行 vs 串行决策
- - **无依赖**（如同时探索两个模块、同时审查多个文件）→ 一个响应里发多个 Agent，并发执行
- - **有依赖**（如需要 A 的结果才能让 B 干活）→ 串行，先 A 后 B
+## Parallel vs Serial
+ - **No dependency** (e.g. explore two modules simultaneously) → multiple Agent calls in one response
+ - **Has dependency** (e.g. need A's results before B can work) → serial, A then B
 
 ## Writing the Prompt
 Brief the agent like a smart colleague who just walked into the room — it hasn't seen this conversation.

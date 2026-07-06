@@ -102,7 +102,15 @@ function trimHistoryForNextTurn(messages: OpenAIMessage[]): OpenAIMessage[] {
   if (messages.length <= MAX_RECENT_HISTORY_MESSAGES) return [...messages]
 
   const keepIndexes = new Set<number>()
-  const recentStart = Math.max(0, messages.length - MAX_RECENT_HISTORY_MESSAGES)
+  let recentStart = Math.max(0, messages.length - MAX_RECENT_HISTORY_MESSAGES)
+
+  // Walk forward past orphaned tool results (prevents API 400 on resume)
+  if (recentStart > 0) {
+    const maxSplit = messages.length - 2
+    while (recentStart < maxSplit && messages[recentStart]?.role === 'tool') {
+      recentStart++
+    }
+  }
 
   for (let i = recentStart; i < messages.length; i++) {
     keepIndexes.add(i)

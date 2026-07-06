@@ -49,7 +49,7 @@ export class CriticModule implements AgentModule {
             { role: 'system', content: DEFAULT_CRITIC_SYSTEM_PROMPT },
             {
               role: 'user',
-              content: `以下是最近的操作历史，请检查是否存在失误：\n\n${formatMessagesForCritic(recent)}`,
+              content: `Review the following recent action history for mistakes:\n\n${formatMessagesForCritic(recent)}`,
             },
           ],
           temperature: 0,
@@ -63,7 +63,7 @@ export class CriticModule implements AgentModule {
 
       if (criticism) {
         return {
-          injectMessage: `[🔍 自动纠错检查]\n${criticism}\n\n请根据以上纠错提示立即调整行动。`,
+          injectMessage: `[Critic Check]\n${criticism}\n\nAdjust your actions based on the above feedback immediately.`,
         }
       }
     } catch {

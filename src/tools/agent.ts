@@ -112,7 +112,7 @@ async function runAgentTask(
   context: ToolContext,
 ): Promise<ToolResult> {
   if (!_engineFactory || !_currentConfig || !_currentRenderer) {
-    return { content: 'Error: AgentTool 未初始化', isError: true }
+    return { content: 'Error: AgentTool not initialized', isError: true }
   }
 
   // Call chain depth check (prevent infinite recursion)
@@ -163,28 +163,28 @@ async function runAgentTask(
   const normalizedPrompt = normalizeDelegatedPrompt(prompt, _currentConfig)
   const placeholdersReplaced = normalizedPrompt !== prompt
   const inheritedContextLines = [
-    `- session_dir: ${_currentConfig.sessionDir ?? '未设置'}`,
+    `- session_dir: ${_currentConfig.sessionDir ?? 'not set'}`,
     `- call_depth: ${_callDepth}`,
   ]
 
   const sessionDirHint = _currentConfig.sessionDir
-    ? `\n- 会话目录固定为: ${_currentConfig.sessionDir}`
+    ? `\n- Session dir: ${_currentConfig.sessionDir}`
     : ''
   const delegatedPrompt = [
-    '[任务委派契约]',
-    '- 严格执行下方"子任务指令"，不得擅自替换任务目标或范围。',
-    '- 若用户/主agent给了明确范围与约束，以该指令为最高优先级。',
-    '- 若信息缺失导致无法执行，先报告缺失并请求补充，不要自行假设。',
-    '- 如果子任务中仍出现占位符（SESSION_DIR），优先使用下面"继承上下文"中的值。',
+    '[Delegation Contract]',
+    '- Strictly follow the "Task Instructions" below. Do not change task scope.',
+    '- If user/main agent gave explicit constraints, treat them as highest priority.',
+    '- If information is missing and blocks execution, report what is missing. Do not guess.',
+    '- If SESSION_DIR placeholder appears, use the value from "Inherited Context" below.',
     sessionDirHint,
     '',
-    '[继承上下文]',
+    '[Inherited Context]',
     ...inheritedContextLines,
     '',
-    '[子任务描述]',
+    '[Task Description]',
     description,
     '',
-    '[子任务指令]',
+    '[Task Instructions]',
     normalizedPrompt,
   ].join('\n')
 
@@ -204,7 +204,7 @@ async function runAgentTask(
       _callDepth--
       mainRenderer.agentDone(description, false)
       if (paneSlot) tmuxLayout.releaseSlot(paneSlot.slot)
-      return { content: `[${agentLabel}] 已取消（父任务中止）`, isError: true }
+      return { content: `[${agentLabel}] Cancelled (parent task aborted)`, isError: true }
     }
     context.signal.addEventListener('abort', () => childEngine.abort(), { once: true })
   }
@@ -229,7 +229,7 @@ async function runAgentTask(
       const verifyResult = runVerification(context.cwd)
       if (verifyResult) {
         const icon = verifyResult.passed ? '✓' : '✗'
-        verifySection = `\n\n---\n[验证闸门] ${icon}\n${verifyResult.output}`
+        verifySection = `\n\n---\n[Verify Gate] ${icon}\n${verifyResult.output}`
         context.eventLog?.append('invoke_completed', agentLabel, {
           description,
           verified: true,
@@ -251,7 +251,7 @@ async function runAgentTask(
 
     if (!result.output) {
       return {
-        content: `[${agentLabel}] "${description}" 完成（${result.reason}），无文本输出。${verifySection}`,
+        content: `[${agentLabel}] "${description}" done (${result.reason}), no text output.${verifySection}`,
         isError: false,
       }
     }
@@ -284,7 +284,7 @@ async function runAgentTask(
       error: (err as Error).message,
     })
     return {
-      content: `[${agentLabel}] "${description}" 异常: ${(err as Error).message}`,
+      content: `[${agentLabel}] "${description}" error: ${(err as Error).message}`,
       isError: true,
     }
   }
@@ -299,31 +299,31 @@ export class AgentTool implements Tool {
     type: 'function',
     function: {
       name: 'Agent',
-      description: `启动专用 sub-agent 执行聚焦任务。多个 Agent 调用在同一响应中并发执行（Promise.all）。
+      description: `Spawn a specialized sub-agent for a focused task. Multiple Agent calls in one response run concurrently (Promise.all).
 
-## 指定 Agent 配置
+## Agent Configuration
 
-方式 1 — 预设名称: subagent_type: "explore" | "plan" | "code-reviewer" | "general-purpose"
-方式 2 — 自定义配置: agent_config: { identity, modules, tools, maxIterations }
+Option 1 — Preset name: subagent_type: "explore" | "plan" | "code-reviewer" | "general-purpose"
+Option 2 — Custom config: agent_config: { identity, modules, tools, maxIterations }
 
-## 验证闸门
+## Verification Gate
 
-设置 verify: true 后，子 agent 完成代码修改会自动运行 tsc --noEmit 验证类型安全。
-验证失败时结果中包含错误详情，便于主 agent 立即修复。
+Set verify: true to auto-run tsc --noEmit after the sub-agent completes code changes.
+Failed verification includes error details so you can fix immediately.
 
-## 关键规则
-- prompt 必须完全自包含
-- Sub-agent 不能再调用 Agent（禁止递归，最大调用深度 5 层）
-- 无依赖的多个子任务可并发执行`,
+## Rules
+- prompt must be fully self-contained (sub-agent has no parent context)
+- Sub-agent cannot call Agent (no recursion, max depth 5)
+- Independent tasks can run concurrently (multiple Agent calls in one response)`,
       parameters: {
         type: 'object',
         properties: {
-          description: { type: 'string', description: '任务标签' },
-          prompt: { type: 'string', description: '完整任务指令（必须自包含）' },
-          subagent_type: { type: 'string', enum: PRESET_NAMES, description: '预设名称（默认 general-purpose）' },
-          agent_config: { type: 'object', description: '自定义配置（覆盖 subagent_type）' },
-          max_iterations: { type: 'number', description: '最大执行轮数（覆盖预设默认值）' },
-          verify: { type: 'boolean', description: '验证闸门：完成后自动跑 tsc --noEmit 检查类型安全（默认 false）' },
+          description: { type: 'string', description: 'Task label' },
+          prompt: { type: 'string', description: 'Full task instructions (must be self-contained)' },
+          subagent_type: { type: 'string', enum: PRESET_NAMES, description: 'Preset name (default: general-purpose)' },
+          agent_config: { type: 'object', description: 'Custom config (overrides subagent_type)' },
+          max_iterations: { type: 'number', description: 'Max iterations (overrides preset default)' },
+          verify: { type: 'boolean', description: 'Verification gate: auto-run tsc --noEmit after completion (default false)' },
         },
         required: ['description', 'prompt'],
       },
@@ -336,11 +336,11 @@ export class AgentTool implements Tool {
     const verify      = input.verify === true
 
     if (!prompt.trim()) {
-      return { content: 'Error: prompt 不能为空', isError: true }
+      return { content: 'Error: prompt cannot be empty', isError: true }
     }
 
     if (!_engineFactory || !_currentConfig || !_currentRenderer) {
-      return { content: 'Error: AgentTool 未初始化，请先调用 registerAgentFactory。', isError: true }
+      return { content: 'Error: AgentTool not initialized. Call registerAgentFactory first.', isError: true }
     }
 
     const presetName = str(input.subagent_type, '') || undefined

@@ -63,23 +63,23 @@ export class TmuxSessionTool implements Tool {
     type: 'function',
     function: {
       name: 'TmuxSession',
-      description: `管理本地交互式终端会话（tmux），用于控制需要双向交互的进程（Python REPL、Node.js、交互式 CLI 等）。
+      description: `Manage local interactive terminal sessions (tmux) for processes requiring two-way interaction (Python REPL, Node.js, interactive CLIs).
 
-## 操作类型
+## Actions
 
-| action    | 用途 |
-|-----------|------|
-| new       | 创建 tmux 后台会话，可指定初始命令（如 python3） |
-| send      | 向会话发送文本（自动追加 Enter），长文本自动分块防溢出 |
-| keys      | 发送特殊按键（C-c / C-d / Escape / Enter 等） |
-| capture   | 捕获会话当前屏幕或完整历史（最近 N 行） |
-| wait_for  | 轮询直到输出匹配正则模式（等待提示符/关键字） |
-| list      | 列出所有 tmux 会话 |
-| kill      | 销毁指定会话 |
+| action   | purpose |
+|----------|---------|
+| new      | Create a tmux session with optional initial command |
+| send     | Send text to session (auto-appends Enter, chunks long text) |
+| keys     | Send special keys (C-c / C-d / Escape / Enter) |
+| capture  | Capture session screen or history (last N lines) |
+| wait_for | Poll until output matches a regex pattern (wait for prompt) |
+| list     | List all tmux sessions |
+| kill     | Destroy a session |
 
-## 标准工作流
+## Standard Workflow
 
-### Python REPL 交互
+### Python REPL
 \`\`\`
 TmuxSession({ action: "new", session: "py", command: "python3" })
 TmuxSession({ action: "wait_for", session: "py", pattern: ">>>" })
@@ -87,18 +87,10 @@ TmuxSession({ action: "send", session: "py", text: "import os; print(os.getcwd()
 TmuxSession({ action: "capture", session: "py", lines: 10 })
 \`\`\`
 
-### Node.js 交互
+### Interrupt stuck process
 \`\`\`
-TmuxSession({ action: "new", session: "node", command: "node" })
-TmuxSession({ action: "wait_for", session: "node", pattern: ">" })
-TmuxSession({ action: "send", session: "node", text: "console.log('hello')" })
-TmuxSession({ action: "capture", session: "node", lines: 10 })
-\`\`\`
-
-### 中断卡住的进程
-\`\`\`
-TmuxSession({ action: "keys", session: "py", key: "C-c" })   # 中断当前命令
-TmuxSession({ action: "capture", session: "py", lines: 5 })  # 确认恢复到提示符
+TmuxSession({ action: "keys", session: "py", key: "C-c" })
+TmuxSession({ action: "capture", session: "py", lines: 5 })
 \`\`\``,
       parameters: {
         type: 'object',

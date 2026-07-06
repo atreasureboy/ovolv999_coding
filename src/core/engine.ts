@@ -52,8 +52,6 @@ import { clearFileState } from './fileState.js'
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const MAX_TOOL_RESULT_LENGTH = 20_000
-/** Results exceeding this get persisted to session dir and replaced with a preview */
-const TOOL_RESULT_PERSIST_THRESHOLD = 10_000
 
 /**
  * Truncate or persist a tool result to stay within context budget.
@@ -62,8 +60,8 @@ const TOOL_RESULT_PERSIST_THRESHOLD = 10_000
 function truncateToolResult(result: string, sessionDir?: string): string {
   if (result.length <= MAX_TOOL_RESULT_LENGTH) return result
 
-  // Try persisting to disk if sessionDir available (Claude Code pattern)
-  if (sessionDir && result.length > TOOL_RESULT_PERSIST_THRESHOLD) {
+  // Persist to disk if sessionDir available (saves context tokens)
+  if (sessionDir) {
     try {
       const dir = join(sessionDir, 'tool-results')
       mkdirSync(dir, { recursive: true })
@@ -811,15 +809,13 @@ export class ExecutionEngine {
         )
 
         if (aborted || turnAbortController.signal.aborted) {
-          // Distinguish soft-abort (ESC → interrupted) from hard-abort (Ctrl+C → error)
+          // Soft-abort (ESC during tools): 'interrupted' so REPL can resume
+          // Hard-abort (Ctrl+C): 'error'
+          const isSoftAbort = aborted && !turnAbortController.signal.aborted
           result = {
             stopped: true,
-            reason: this.softAbortRequested ? 'error' : 'error',
+            reason: isSoftAbort ? 'interrupted' : 'error',
             output: finalOutput,
-          }
-          // If soft-abort was the cause, report as interrupted so REPL can resume
-          if (aborted && !turnAbortController.signal.aborted) {
-            result = { stopped: true, reason: 'interrupted', output: finalOutput }
           }
           break
         }
