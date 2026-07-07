@@ -212,7 +212,12 @@ export class BashTool implements Tool {
         const followLogFile = join(followLogDir, `${ts}_${safeCmd}_follow.log`)
 
         // Wrap command: tee duplicates output so the LLM captures it AND the follow log gets it
-        actualCommand = `{ ${command}; } 2>&1 | tee -a "${followLogFile}"`
+        // Use platform-appropriate syntax
+        if (IS_WIN_CMD) {
+          actualCommand = `${command} 1>"${followLogFile}" 2>&1`
+        } else {
+          actualCommand = `{ ${command}; } 2>&1 | tee -a "${followLogFile}"`
+        }
 
         // Launch a tmux session with tail -f for user viewing
         const tmuxSessionName = `ovogo-follow-${ts}`

@@ -45,7 +45,11 @@ import { fileURLToPath } from 'url'
         const eq = t.indexOf('=')
         if (eq <= 0) continue
         const key = t.slice(0, eq).trim()
-        const val = t.slice(eq + 1).trim()
+        let val = t.slice(eq + 1).trim()
+        // Strip surrounding quotes (dotenv convention: KEY="value")
+        if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+          val = val.slice(1, -1)
+        }
         if (!process.env[key]) process.env[key] = val
       }
     } catch { /* best-effort */ }
@@ -140,6 +144,7 @@ function parseArgs(argv: string[]): Args {
   let task: string | undefined
   let model = process.env.OVOGO_MODEL ?? 'gpt-4o'
   let maxIter = parseInt(process.env.OVOGO_MAX_ITER ?? '200', 10)
+  if (isNaN(maxIter) || maxIter <= 0) maxIter = 200
   let cwd = process.env.OVOGO_CWD ?? process.cwd()
   let help = false
   let version = false
@@ -696,6 +701,7 @@ async function runRepl(
   // Session consolidation (AgentOS §8 — close the learning loop)
   if (consolidate) {
     try {
+      renderer.info('Consolidating memory...')
       const OpenAI = (await import('openai')).default
       const client = new OpenAI({ apiKey: consolidate.config.apiKey, baseURL: consolidate.config.baseURL })
       const result = await consolidateSession(

@@ -378,7 +378,7 @@ export class ExecutionEngine {
               tools: toolDefs,
               tool_choice: 'auto',
               temperature: this.config.temperature ?? 0,
-              max_tokens: this.config.maxOutputTokens ?? 8192,
+          max_tokens: this.config.maxOutputTokens ?? 16_384,  // higher default: reasoning models (deepseek-reasoner) include reasoning in max_tokens
               stream: true,
             },
             { signal: turnAbortSignal },
@@ -409,12 +409,15 @@ export class ExecutionEngine {
     // Stream-level timeout — if no chunk arrives for 120s, abort (prevents API hang)
     const STREAM_TIMEOUT_MS = 120_000
     let lastChunkTime = Date.now()
+    const turnController = this.currentTurnAbortController
 
     // Watchdog: checks every 10s if stream has stalled
     const watchdog = setInterval(() => {
       if (Date.now() - lastChunkTime > STREAM_TIMEOUT_MS) {
-        // Stream stalled — force-break the for-await by aborting
-        turnAbortSignal.dispatchEvent(new Event('abort'))
+        // Force-abort the AbortController (not just dispatch event)
+        if (turnController) {
+          turnController.abort('stream_timeout')
+        }
       }
     }, 10_000)
 
@@ -804,6 +807,9 @@ export class ExecutionEngine {
           try {
             input = JSON.parse(tc.arguments || '{}') as Record<string, unknown>
           } catch {
+            // Malformed JSON (likely truncated by token limit) — diagnose
+            this.renderer.warn(`Warning: malformed tool arguments for ${tc.name} (JSON parse failed, likely truncated). Args: ${tc.arguments.slice(0, 100)}...`)
+            this.eventLog?.append('tool_call', tc.name, { parse_error: true, raw_args: tc.arguments.slice(0, 200) })
             input = {}
           }
           return { tc, input }

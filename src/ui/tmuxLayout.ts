@@ -68,12 +68,23 @@ export class TmuxLayout {
     const check = spawnSync('tmux', ['-V'], { stdio: 'pipe' })
     if (check.status !== 0) return false
 
-    // 清理上次残留的 ovogo-* sessions（Ctrl+Z 等情况下无法正常 cleanup）
+    // Only clean up THIS instance's sessions (identified by unique timestamp suffix)
+    // Don't kill other ovolv999 instances' tmux sessions
+    this.sessionName = `ovogo-${Date.now()}`
+    const myPrefix = this.sessionName.slice(0, -4)  // first 10 chars of timestamp = unique enough for this session
     try {
-      const out = execSync('tmux ls -F "#{session_name}"', { stdio: 'pipe' }).toString()
+      // Kill only sessions older than 1 hour (stale from crashed processes)
+      const out = execSync('tmux ls -F "#{session_name}" 2>/dev/null', { stdio: 'pipe' }).toString()
       for (const name of out.trim().split('\n')) {
-        if (name.startsWith('ovogo-')) {
-          try { execSync(`tmux kill-session -t ${sq(name)}`, { stdio: 'pipe' }) } catch { /* ok */ }
+        if (name.startsWith('ovogo-') && !name.includes(myPrefix)) {
+          // Only kill sessions older than 1 hour
+          try {
+            const created = execSync(`tmux display-message -p -t ${sq(name)} '#{session_created}'`, { stdio: 'pipe' }).toString().trim()
+            const ageSec = Date.now() / 1000 - parseInt(created, 10)
+            if (ageSec > 3600) {
+              execSync(`tmux kill-session -t ${sq(name)}`, { stdio: 'pipe' })
+            }
+          } catch { /* skip */ }
         }
       }
     } catch { /* no existing sessions */ }
@@ -85,7 +96,7 @@ export class TmuxLayout {
     }
 
     this.logDir = logDir
-    this.sessionName = `ovogo-${Date.now()}`
+    // sessionName was already set above during stale cleanup
 
     try {
       // 创建后台 tmux session（不 attach，不影响主终端）
