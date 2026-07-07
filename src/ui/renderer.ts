@@ -86,8 +86,11 @@ export class Renderer {
   private out: (s: string) => void
   private streaming = false
 
+  private stream: NodeJS.WritableStream | null = null
+
   constructor(opts?: { stream?: NodeJS.WritableStream }) {
     const s = opts?.stream ?? process.stdout
+    this.stream = s
     this.out = (str: string) => { s.write(str) }
     this.tty = (s as NodeJS.WriteStream).isTTY === true
     this.width = this.tty ? ((s as NodeJS.WriteStream).columns ?? 100) : 100
@@ -102,6 +105,14 @@ export class Renderer {
     const fs = createWriteStream(path, { flags: 'a' })
     fs.on('error', () => {})
     return new Renderer({ stream: fs as unknown as NodeJS.WritableStream })
+  }
+
+  /** Close the underlying stream if it's a file stream (prevents fd leak) */
+  destroy(): void {
+    if (this.stream && typeof (this.stream as { end?: () => void }).end === 'function') {
+      (this.stream as { end: () => void }).end()
+    }
+    this.stream = null
   }
 
   private w(s: string): void { this.out(s) }

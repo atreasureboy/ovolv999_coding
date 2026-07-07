@@ -203,7 +203,7 @@ async function runAgentTask(
     if (context.signal.aborted) {
       _callDepth--
       mainRenderer.agentDone(description, false)
-      if (paneSlot) tmuxLayout.releaseSlot(paneSlot.slot)
+      if (paneSlot) { tmuxLayout.releaseSlot(paneSlot.slot); childRenderer.destroy() }
       return { content: `[${agentLabel}] Cancelled (parent task aborted)`, isError: true }
     }
     context.signal.addEventListener('abort', () => childEngine.abort(), { once: true })
@@ -221,7 +221,7 @@ async function runAgentTask(
     const durationMs = Date.now() - agentStartTime
 
     mainRenderer.agentDone(description, result.reason !== 'error')
-    if (paneSlot) tmuxLayout.releaseSlot(paneSlot.slot)
+    if (paneSlot) { tmuxLayout.releaseSlot(paneSlot.slot); childRenderer.destroy() }
 
     // ── Verification Gate (AgentOS "No Tuple, No Merge") ──
     let verifySection = ''
@@ -274,7 +274,7 @@ async function runAgentTask(
     clearInterval(heartbeatTimer)
     _callDepth--
     mainRenderer.agentDone(description, false)
-    if (paneSlot) tmuxLayout.releaseSlot(paneSlot.slot)
+    if (paneSlot) { tmuxLayout.releaseSlot(paneSlot.slot); childRenderer.destroy() }
     appendAgentEvent(_currentConfig, {
       event: 'delegation.error',
       agent_label: agentLabel,

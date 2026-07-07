@@ -193,20 +193,35 @@ export async function maybeCompact(
   const originalTokens = estimateTokens(messages)
 
   // Keep the most recent messages verbatim — they're the freshest context.
-  // Ensure we don't split between an assistant message with tool_calls and its
-  // tool result messages (OpenAI API requires them to stay together).
+  // CRITICAL: The recent window must START with a valid message type:
+  //   - 'user' or 'assistant' (with or without tool_calls)
+  //   - NEVER start with 'tool' (orphan result → API 400)
+  //
+  // Strategy: find a split point where recentMessages[0] is NOT a tool message.
+  // Walk BACKWARD from the initial split point until we find a safe boundary.
   let splitPoint = messages.length - KEEP_RECENT_MESSAGES
   if (splitPoint > 0) {
-    // Walk forward from split point — if we're in the middle of tool results,
-    // extend to include all results for the last assistant tool_calls.
-    // Cap at messages.length - 2 to always keep at least 2 recent messages.
-    const maxSplit = messages.length - 2
+    // Walk FORWARD past tool results first (like before)
     while (
-      splitPoint < maxSplit &&
+      splitPoint < messages.length &&
       messages[splitPoint]?.role === 'tool'
     ) {
       splitPoint++
     }
+    // If we walked past everything, recent is empty — walk BACKWARD instead
+    // to find the last non-tool message before the tool batch
+    if (splitPoint >= messages.length) {
+      splitPoint = messages.length - KEEP_RECENT_MESSAGES
+      while (splitPoint > 0 && messages[splitPoint]?.role === 'tool') {
+        splitPoint--
+      }
+      // Ensure splitPoint is at a non-tool message
+      if (messages[splitPoint]?.role === 'tool' && splitPoint > 0) {
+        splitPoint--
+      }
+    }
+    // Final safety: splitPoint must be >= 0 and point to a non-tool message
+    splitPoint = Math.max(0, splitPoint)
   }
   const recentMessages = messages.slice(splitPoint)
   const olderMessages = messages.slice(0, splitPoint)
