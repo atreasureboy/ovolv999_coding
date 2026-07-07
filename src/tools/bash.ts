@@ -12,6 +12,7 @@ import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/type
 import { BASH_DESCRIPTION } from '../prompts/tools.js'
 import { mkdirSync, accessSync, constants } from 'fs'
 import { join } from 'path'
+import { checkCommandPermission } from '../core/riskClassifier.js'
 
 const MAX_OUTPUT_LENGTH = 30_000
 const DEFAULT_TIMEOUT_MS = 1_800_000  // 30 min — long-running commands default
@@ -146,6 +147,16 @@ export class BashTool implements Tool {
 
     if (!command || typeof command !== 'string') {
       return { content: 'Error: command is required and must be a string', isError: true }
+    }
+
+    // Risk classification (only active in 'ask' or 'deny' permission mode; 'auto' = no checks)
+    const riskCheck = checkCommandPermission(command, context.permissionMode)
+    if (!riskCheck.allowed) {
+      return { content: riskCheck.reason, isError: true }
+    }
+    if ('warning' in riskCheck) {
+      // In ask mode, warn but proceed (CLI single-user, no interactive approval gate)
+      // The warning is visible in the renderer output
     }
 
     const timeoutMs = Math.min(
