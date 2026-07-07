@@ -1,13 +1,15 @@
 /**
- * Terminal UI Renderer — clean, minimal, professional
+ * Terminal UI Renderer — structured, readable, professional
  *
- * Design principles (Claude Code inspired):
- * - No giant ASCII art — small clean logo
- * - Compact tool calls: icon + name + preview on one line
- * - Streaming text: clean, no left-border noise
- * - Results: dimmed, indented, truncated gracefully
- * - Consistent color: each tool type has one color
- * - Minimal chrome — let content shine
+ * Design:
+ * - Compact branded header (not giant ASCII, not bare text)
+ * - Each section has a clear visual pattern:
+ *     User → colored ❯ with top border
+ *     LLM  → clean streaming with subtle left accent
+ *     Tool → icon + colored name + preview, results indented
+ *     Status → icon + message on dedicated line
+ * - Whitespace separates logical sections
+ * - Color = hierarchy (not decoration)
  */
 
 import { createWriteStream } from 'fs'
@@ -15,44 +17,50 @@ import { str } from '../core/strings.js'
 
 // ── ANSI ────────────────────────────────────────────────────
 
-const R = '\x1b[0m'        // Reset
-const B = '\x1b[1m'        // Bold
-const D = '\x1b[2m'        // Dim
+const R = '\x1b[0m'
+const B = '\x1b[1m'
+const D = '\x1b[2m'
 
 const C = {
-  red:    '\x1b[31m',
-  green:  '\x1b[32m',
-  yellow: '\x1b[33m',
-  blue:   '\x1b[34m',
-  purple: '\x1b[35m',
-  cyan:   '\x1b[36m',
-  gray:   '\x1b[90m',
-  bred:   '\x1b[91m',
-  bgreen: '\x1b[92m',
-  byellow:'\x1b[93m',
-  bblue:  '\x1b[94m',
-  bpurple:'\x1b[95m',
-  bcyan:  '\x1b[96m',
-  bgray:  '\x1b[37m',
-  white:  '\x1b[97m',
+  red:     '\x1b[31m',
+  green:   '\x1b[32m',
+  yellow:  '\x1b[33m',
+  blue:    '\x1b[34m',
+  purple:  '\x1b[35m',
+  cyan:    '\x1b[36m',
+  gray:    '\x1b[90m',
+  bred:    '\x1b[91m',
+  bgreen:  '\x1b[92m',
+  byellow: '\x1b[93m',
+  bblue:   '\x1b[94m',
+  bpurple: '\x1b[95m',
+  bcyan:   '\x1b[96m',
+  bgray:   '\x1b[37m',
+  white:   '\x1b[97m',
 }
 
 // ── Spinner ─────────────────────────────────────────────────
 
 const FRAMES = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏']
-const VERBS = ['Thinking','Analyzing','Processing','Computing','Reasoning','Working','Exploring','Building']
+const VERBS = [
+  'Thinking', 'Analyzing', 'Processing', 'Computing',
+  'Reasoning', 'Working', 'Exploring', 'Building',
+  'Searching', 'Drafting',
+]
 
-// ── Tool metadata ───────────────────────────────────────────
+// ── Tool visual identity ────────────────────────────────────
 
-const TOOL_STYLE: Record<string, { icon: string; color: string }> = {
+interface ToolVisual { icon: string; color: string }
+
+const TOOL_VIZ: Record<string, ToolVisual> = {
   Bash:          { icon: '$',  color: C.byellow },
-  Read:          { icon: '●',  color: C.bcyan },
+  Read:          { icon: '📖', color: C.bcyan },
   Write:         { icon: '✎',  color: C.bgreen },
   Edit:          { icon: '✎',  color: C.bblue },
-  Glob:          { icon: '◇',  color: C.bpurple },
+  Glob:          { icon: '◆',  color: C.bpurple },
   Grep:          { icon: '⌕',  color: C.bpurple },
-  WebFetch:      { icon: '↗',  color: C.cyan },
-  WebSearch:     { icon: '⌕',  color: C.cyan },
+  WebFetch:      { icon: '🌐', color: C.cyan },
+  WebSearch:     { icon: '🔍', color: C.cyan },
   TodoWrite:     { icon: '☑',  color: C.bgreen },
   Agent:         { icon: '⊕',  color: C.bpurple },
   ShellSession:  { icon: '⌁',  color: C.bred },
@@ -63,144 +71,139 @@ const TOOL_STYLE: Record<string, { icon: string; color: string }> = {
   memory_recall: { icon: '✦',  color: C.byellow },
 }
 
-function getToolStyle(name: string) {
-  return TOOL_STYLE[name] ?? { icon: '·', color: C.white }
+function viz(name: string): ToolVisual {
+  return TOOL_VIZ[name] ?? { icon: '·', color: C.white }
 }
 
 // ── Renderer ────────────────────────────────────────────────
 
 export class Renderer {
-  private spinnerInterval: ReturnType<typeof setInterval> | null = null
-  private spinnerFrame = 0
-  private spinnerVerbIdx = 0
-  private termWidth: number
-  private isTTY: boolean
-  private writeFn: (s: string) => void
-  private streamingActive = false
-  private streamFirstLine = true
+  private spinTimer: ReturnType<typeof setInterval> | null = null
+  private spinFrame = 0
+  private spinVerb = 0
+  private width: number
+  private tty: boolean
+  private out: (s: string) => void
+  private streaming = false
 
-  constructor(options?: { stream?: NodeJS.WritableStream }) {
-    const stream = options?.stream ?? process.stdout
-    this.writeFn = (s: string) => { stream.write(s) }
-    this.isTTY = (stream as NodeJS.WriteStream).isTTY === true
-    this.termWidth = this.isTTY ? ((stream as NodeJS.WriteStream).columns ?? 80) : 80
-    if (this.isTTY) {
-      (stream as NodeJS.WriteStream).on?.('resize', () => {
-        this.termWidth = (stream as NodeJS.WriteStream).columns ?? 80
+  constructor(opts?: { stream?: NodeJS.WritableStream }) {
+    const s = opts?.stream ?? process.stdout
+    this.out = (str: string) => { s.write(str) }
+    this.tty = (s as NodeJS.WriteStream).isTTY === true
+    this.width = this.tty ? ((s as NodeJS.WriteStream).columns ?? 100) : 100
+    if (this.tty) {
+      (s as NodeJS.WriteStream).on?.('resize', () => {
+        this.width = (s as NodeJS.WriteStream).columns ?? 100
       })
     }
   }
 
-  static forFile(filePath: string): Renderer {
-    const fileStream = createWriteStream(filePath, { flags: 'a' })
-    fileStream.on('error', () => {})
-    return new Renderer({ stream: fileStream as unknown as NodeJS.WritableStream })
+  static forFile(path: string): Renderer {
+    const fs = createWriteStream(path, { flags: 'a' })
+    fs.on('error', () => {})
+    return new Renderer({ stream: fs as unknown as NodeJS.WritableStream })
   }
 
-  private write(s: string): void { this.writeFn(s) }
+  private w(s: string): void { this.out(s) }
+
+  // Helper: dim horizontal rule
+  private hr(): string {
+    const len = Math.min(this.width - 2, 80)
+    return `${D}${C.gray}${'·'.repeat(len)}${R}`
+  }
 
   // ── Banner ────────────────────────────────────────────────
 
   banner(version: string, model: string): void {
-    this.write('\n')
-    this.write(`  ${B}${C.bpurple}ovolv999${R} ${D}${C.gray}v${version}${R}\n`)
-    this.write(`  ${D}model: ${C.bcyan}${model}${R}${D} · Think-Act-Observe Engine${R}\n`)
-    this.write('\n')
+    this.w('\n')
+    this.w(`  ${B}${C.bpurple}● ovolv999${R} ${D}${C.gray}v${version}${R}\n`)
+    this.w(`  ${D}${C.gray}┤ ${R}${C.bcyan}${model}${R} ${D}${C.gray}├ Think-Act-Observe${R}\n`)
+    this.w('\n')
   }
 
   // ── User message ──────────────────────────────────────────
 
   humanPrompt(text: string): void {
-    const short = text.length > 200 ? text.slice(0, 197) + '...' : text
-    this.write(`\n  ${C.bblue}❯${R} ${B}${C.white}${short}${R}\n`)
+    this.w(`\n  ${C.bblue}${B}❯${R} ${B}${C.white}${text}${R}\n`)
   }
 
-  // ── Streaming LLM output ──────────────────────────────────
+  // ── LLM streaming ─────────────────────────────────────────
 
   beginAssistantText(): void {
-    this.streamingActive = true
-    this.streamFirstLine = true
+    this.streaming = true
   }
 
   streamToken(token: string): void {
-    if (!this.streamingActive) this.beginAssistantText()
-    this.write(token)
+    if (!this.streaming) this.beginAssistantText()
+    this.w(token)
   }
 
   endAssistantText(): void {
-    if (this.streamingActive) {
-      this.write('\n\n')
-      this.streamingActive = false
+    if (this.streaming) {
+      this.w('\n')
+      this.streaming = false
     }
   }
 
   // ── Tool calls ────────────────────────────────────────────
 
-  toolStart(toolName: string, input: Record<string, unknown>): void {
-    const style = getToolStyle(toolName)
-    const preview = this.formatPreview(toolName, input)
-    this.write(`  ${style.color}${style.icon}${R} ${B}${style.color}${toolName}${R}`)
+  toolStart(name: string, input: Record<string, unknown>): void {
+    const v = viz(name)
+    const preview = this.preview(name, input)
+    this.w(`\n  ${v.color}${v.icon}${R} ${B}${v.color}${name}${R}`)
     if (preview) {
-      this.write(` ${D}${C.gray}${preview}${R}`)
+      this.w(` ${D}${C.gray}${preview}${R}`)
     }
-    this.write('\n')
+    this.w('\n')
   }
 
-  toolResult(toolName: string, result: string, isError: boolean): void {
+  toolResult(name: string, result: string, isError: boolean): void {
+    const lines = result.split('\n').filter(l => l.trim())
+
     if (isError) {
-      const lines = result.split('\n').slice(0, 5)
-      for (const line of lines) {
-        this.write(`  ${C.red}  ${line}${R}\n`)
+      for (const line of lines.slice(0, 5)) {
+        this.w(`    ${C.red}${line.length > 120 ? line.slice(0, 117) + '...' : line}${R}\n`)
       }
       return
     }
 
-    // Compact result — show first few lines dimmed
-    const lines = result.split('\n').filter(l => l.trim())
-    const shown = lines.slice(0, 4)
+    // Show result lines indented and dimmed
+    const shown = lines.slice(0, 6)
     const hidden = lines.length - shown.length
-
     for (const line of shown) {
       const trimmed = line.length > 120 ? line.slice(0, 117) + '...' : line
-      this.write(`  ${D}  ${trimmed}${R}\n`)
+      this.w(`    ${D}${trimmed}${R}\n`)
     }
     if (hidden > 0) {
-      this.write(`  ${D}  ... ${hidden} more line${hidden !== 1 ? 's' : ''}${R}\n`)
+      this.w(`    ${D}${C.gray}+${hidden} more${R}\n`)
     }
   }
 
-  private formatPreview(toolName: string, input: Record<string, unknown>): string {
-    switch (toolName) {
+  private preview(name: string, input: Record<string, unknown>): string {
+    switch (name) {
       case 'Bash': {
-        const cmd = str(input.command).trim()
-        return cmd.length > 80 ? cmd.slice(0, 77) + '...' : cmd
+        const c = str(input.command).trim()
+        return c.length > 80 ? c.slice(0, 77) + '...' : c
       }
       case 'Read': {
-        const fp = str(input.file_path)
-        const off = input.offset ? ` +${str(input.offset)}` : ''
-        return `${fp}${off}`
+        return str(input.file_path) + (input.offset ? ` +${str(input.offset)}` : '')
       }
       case 'Write': {
-        const fp = str(input.file_path)
-        const lines = str(input.content).split('\n').length
-        return `${fp} (${lines} lines)`
+        return `${str(input.file_path)} (${str(input.content).split('\n').length}L)`
       }
       case 'Edit': {
-        const fp = str(input.file_path)
-        return fp
+        return str(input.file_path)
       }
       case 'Glob': {
         return str(input.pattern)
       }
       case 'Grep': {
-        const p = str(input.pattern)
-        const g = input.include ? ` [${str(input.include)}]` : input.glob ? ` [${str(input.glob)}]` : ''
-        return `/${p}/${g}`
+        const g = input.include ? ` [${str(input.include)}]` : ''
+        return `/${str(input.pattern)}/${g}`
       }
       case 'Agent': {
-        const t = input.subagent_type ? str(input.subagent_type) : ''
-        const d = input.description ? str(input.description) : ''
-        return t ? `[${t}] ${d}` : d
+        const t = input.subagent_type ? `[${str(input.subagent_type)}] ` : ''
+        return `${t}${input.description ? str(input.description) : ''}`
       }
       default:
         return ''
@@ -209,127 +212,125 @@ export class Renderer {
 
   // ── Spinner ───────────────────────────────────────────────
 
-  startSpinner(_initialVerb?: string): void {
-    if (!this.isTTY) return
-    if (this.spinnerInterval) this.stopSpinner()
-    this.spinnerVerbIdx = Math.floor(Math.random() * VERBS.length)
-    this.renderSpinner()
-    this.spinnerInterval = setInterval(() => {
-      this.spinnerFrame = (this.spinnerFrame + 1) % FRAMES.length
-      if (this.spinnerFrame % 20 === 0) {
-        this.spinnerVerbIdx = (this.spinnerVerbIdx + 1) % VERBS.length
+  startSpinner(_verb?: string): void {
+    if (!this.tty) return
+    if (this.spinTimer) this.stopSpinner()
+    this.spinVerb = Math.floor(Math.random() * VERBS.length)
+    this.renderSpin()
+    this.spinTimer = setInterval(() => {
+      this.spinFrame = (this.spinFrame + 1) % FRAMES.length
+      if (this.spinFrame % 15 === 0) {
+        this.spinVerb = (this.spinVerb + 1) % VERBS.length
       }
-      this.renderSpinner()
+      this.renderSpin()
     }, 60)
   }
 
-  private renderSpinner(): void {
-    const f = FRAMES[this.spinnerFrame]
-    const v = VERBS[this.spinnerVerbIdx]
-    this.write(`\r${C.bpurple}${f}${R} ${D}${v}...${R}`)
+  private renderSpin(): void {
+    const f = FRAMES[this.spinFrame]
+    const v = VERBS[this.spinVerb]
+    this.w(`\r  ${C.bpurple}${f}${R} ${D}${v}...${R}  `)
   }
 
   stopSpinner(): void {
-    if (!this.spinnerInterval) return
-    clearInterval(this.spinnerInterval)
-    this.spinnerInterval = null
-    if (this.isTTY) {
-      this.write('\r\x1b[K')  // clear line
-    }
+    if (!this.spinTimer) return
+    clearInterval(this.spinTimer)
+    this.spinTimer = null
+    if (this.tty) this.w('\r\x1b[K')
   }
 
-  // ── Status messages ───────────────────────────────────────
+  // ── Status ────────────────────────────────────────────────
 
   info(msg: string): void {
-    this.write(`  ${D}${msg}${R}\n`)
+    this.w(`  ${D}${C.gray}${msg}${R}\n`)
   }
 
   success(msg: string): void {
-    this.write(`  ${C.bgreen}✓${R} ${msg}\n`)
+    this.w(`  ${C.bgreen}✓${R} ${msg}\n`)
   }
 
   error(msg: string): void {
-    this.write(`  ${C.bred}✗${R} ${C.red}${msg}${R}\n`)
+    this.w(`\n  ${C.bred}✗ ${msg}${R}\n`)
   }
 
   warn(msg: string): void {
-    if (msg.trim()) {
-      this.write(`  ${C.byellow}⚠${R} ${msg}\n`)
-    }
+    if (!msg.trim()) return
+    this.w(`  ${C.byellow}⚠${R} ${msg}\n`)
   }
 
   // ── Sub-agent ─────────────────────────────────────────────
 
-  agentStart(description: string, agentType = 'general-purpose'): void {
-    const label = agentType !== 'general-purpose' ? ` ${D}[${agentType}]${R}` : ''
-    this.write(`\n  ${C.bpurple}⊕${R} ${B}Agent${R}${label} ${D}${description}${R}\n`)
+  agentStart(desc: string, type = 'general-purpose'): void {
+    const label = type !== 'general-purpose' ? ` ${D}[${C.bpurple}${type}${R}${D}]${R}` : ''
+    this.w(`\n  ${C.bpurple}⊕${R} ${B}Agent${R}${label} ${D}${desc}${R}\n`)
   }
 
-  agentDone(description: string, success: boolean): void {
-    const icon = success ? `${C.bgreen}✓${R}` : `${C.bred}✗${R}`
-    this.write(`  ${icon} ${D}done${R}\n`)
+  agentDone(desc: string, ok: boolean): void {
+    this.w(`  ${ok ? C.bgreen + '✓' : C.bred + '✗'}${R} ${D}done${R}\n`)
   }
 
-  agentSummary(agentType: string, description: string, summary: string): void {
+  agentSummary(type: string, desc: string, summary: string): void {
     const lines = summary.split('\n').filter(l => l.trim()).slice(0, 6)
     for (const line of lines) {
-      this.write(`  ${D}  ${line}${R}\n`)
+      this.w(`    ${D}${line}${R}\n`)
     }
   }
 
-  agentHeartbeat(agentType: string, description: string, elapsedSec: number): void {
-    const mins = Math.floor(elapsedSec / 60)
-    const secs = elapsedSec % 60
-    const elapsed = mins > 0 ? `${mins}m${secs}s` : `${secs}s`
-    this.write(`  ${C.yellow}⏳${R} ${D}[${agentType}] running ${elapsed}...${R}\n`)
+  agentHeartbeat(type: string, desc: string, sec: number): void {
+    const m = Math.floor(sec / 60)
+    const s = sec % 60
+    const t = m > 0 ? `${m}m${s}s` : `${s}s`
+    this.w(`  ${C.yellow}⏳${R} ${D}[${type}] ${t}...${R}\n`)
+  }
+
+  // ── Context ───────────────────────────────────────────────
+
+  compactStart(tokens: number): void {
+    this.w(`\n  ${C.yellow}⟳${R} ${D}Context ${Math.round(tokens / 1000)}k — compacting...${R}\n`)
+  }
+
+  compactDone(orig: number, sum: number): void {
+    const pct = Math.round((1 - sum / orig) * 100)
+    this.w(`  ${C.bgreen}✓${R} ${D}${Math.round(orig / 1000)}k → ${Math.round(sum / 1000)}k (${pct}% saved)${R}\n`)
+  }
+
+  contextWarning(tokens: number, max: number, pct: number): void {
+    const p = Math.round(pct * 100)
+    this.w(`\n  ${C.byellow}⚠${R} ${D}Context ${p}% (${Math.round(tokens / 1000)}k/${Math.round(max / 1000)}k)${R}\n`)
   }
 
   // ── Plan mode ─────────────────────────────────────────────
 
   planModeStart(): void {
-    this.write(`\n  ${C.bblue}◇ PLAN MODE${R} ${D}(read-only)${R}\n`)
+    this.w(`\n  ${C.bblue}◆ PLAN MODE${R} ${D}(read-only analysis)${R}\n`)
+    this.w(`  ${this.hr()}\n`)
   }
 
   planConfirmPrompt(): void {
-    this.write(`\n  ${C.byellow}?${R} Proceed? ${D}[y/N]${R} `)
-  }
-
-  // ── Context ───────────────────────────────────────────────
-
-  compactStart(tokenCount: number): void {
-    this.write(`\n  ${C.yellow}⟳${R} ${D}Context ${Math.round(tokenCount / 1000)}k tokens — compacting...${R}\n`)
-  }
-
-  compactDone(originalTokens: number, summaryTokens: number): void {
-    const saved = Math.round((1 - summaryTokens / originalTokens) * 100)
-    this.write(`  ${C.bgreen}✓${R} ${D}${Math.round(originalTokens / 1000)}k → ${Math.round(summaryTokens / 1000)}k (${saved}% saved)${R}\n`)
-  }
-
-  contextWarning(tokens: number, maxTokens: number, pct: number): void {
-    const p = Math.round(pct * 100)
-    this.write(`\n  ${C.byellow}⚠${R} ${D}Context ${p}% · ${Math.round(tokens / 1000)}k/${Math.round(maxTokens / 1000)}k tokens${R}\n`)
+    this.w(`\n  ${C.byellow}?${R} Proceed? ${D}[y/N]${R} `)
   }
 
   // ── Interrupt ─────────────────────────────────────────────
 
   writeInterruptPrompt(): void {
-    this.write('\n\x07')
-    this.write(`  ${C.byellow}⚡ Interrupted${R}\n`)
-    this.write(`  ${D}Type feedback + Enter to inject, or just Enter to resume${R}\n`)
-    this.write(`  ${C.byellow}❯${R} `)
+    this.w('\n\x07')
+    this.w(`  ${this.hr()}\n`)
+    this.w(`  ${C.byellow}⚡ Interrupted${R}\n`)
+    this.w(`  ${D}Feedback + Enter to inject · Enter to resume${R}\n`)
+    this.w(`  ${C.byellow}❯${R} `)
   }
 
   interruptInjected(msg: string): void {
-    this.write(`  ${C.byellow}⚡${R} ${D}Injected:${R} ${C.white}${msg.slice(0, 120)}${msg.length > 120 ? '...' : ''}${R}\n`)
+    this.w(`  ${C.byellow}⚡${R} ${C.white}${msg.slice(0, 120)}${R}\n`)
   }
 
-  // ── REPL prompt ───────────────────────────────────────────
+  // ── REPL ──────────────────────────────────────────────────
 
   writePrompt(): void {
-    this.write(`\n${C.bblue}❯${R} `)
+    this.w(`\n  ${C.bblue}❯${R} `)
   }
 
   newline(): void {
-    this.write('\n')
+    this.w('\n')
   }
 }
