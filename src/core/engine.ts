@@ -758,13 +758,10 @@ export class ExecutionEngine {
           })
           if (iterResult?.injectMessage) {
             const msg = iterResult.injectMessage
-            // Show full critic output to user (not just first line)
-            this.renderer.warn('')  // blank line separator
-            const lines = msg.split('\n')
+            // Show full critic output to user via renderer (not raw stdout)
+            const lines = msg.split('\n').filter(l => l.trim())
             for (const line of lines) {
-              if (line.trim()) {
-                process.stdout.write(`  \x1b[33m│ ${line}\x1b[0m\n`)
-              }
+              this.renderer.warn(`[${module.name}] ${line}`)
             }
             this.eventLog?.append('module_flag', module.name, {
               message: msg.slice(0, 500),

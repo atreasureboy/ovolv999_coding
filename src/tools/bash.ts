@@ -187,7 +187,7 @@ export class BashTool implements Tool {
       })
       child.unref()
 
-      const redirectInfo = alreadyRedirected ? '' : `\n输出自动重定向到: ${logFile}`
+      const redirectInfo = alreadyRedirected ? '' : `\nOutput redirected to: ${logFile}`
       return {
         content: `Command started in background (PID: ${child.pid})${redirectInfo}`,
         isError: false,
@@ -242,8 +242,8 @@ export class BashTool implements Tool {
           } catch { /* best-effort: user can manually attach */ }
 
           followModeHint = paneJoined
-            ? '[观战面板已嵌入当前 tmux 窗口底部]'
-            : `[观战面板: tmux attach -t ${tmuxSessionName}]`
+            ? '[Spectator pane embedded in tmux]'
+            : `[Spectator: tmux attach -t ${tmuxSessionName}]`
 
           followCleanup = () => {
             try { spawn('tmux', ['kill-session', '-t', tmuxSessionName], { detached: true }) } catch { /* ignore */ }

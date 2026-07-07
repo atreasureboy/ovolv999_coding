@@ -159,7 +159,7 @@ function parseArgs(argv: string[]): Args {
       case '--help': case '-h': help = true; break
       case '--version': case '-v': case '-V': version = true; break
       case '--model': case '-m': model = args[++i] ?? model; break
-      case '--max-iter': maxIter = parseInt(args[++i] ?? '200', 10); break
+      case '--max-iter': maxIter = parseInt(args[++i] ?? '200', 10); if (isNaN(maxIter) || maxIter <= 0) maxIter = 200; break
       case '--cwd': cwd = args[++i] ?? cwd; break
       case '--loop': loop = true; break
       case '--loop-max-iters': loopMaxIters = parseInt(args[++i] ?? '12', 10); break
@@ -726,12 +726,13 @@ async function runTask(
   renderer: Renderer,
   task: string,
   cwd: string,
+  history?: OpenAIMessage[],
 ): Promise<void> {
   renderer.humanPrompt(task)
   updateProgressLog(cwd, 'running', task.slice(0, 100))
 
   const startMs = Date.now()
-  const { result } = await engine.runTurn(task, [])
+  const { result } = await engine.runTurn(task, history ?? [])
   const elapsed = ((Date.now() - startMs) / 1000).toFixed(1)
 
   renderer.info(`Done in ${elapsed}s · ${result.reason}`)
@@ -960,7 +961,7 @@ async function main(): Promise<void> {
   // Single task from args?
   if (task) {
     hookRunner.runUserPromptSubmit(task)
-    await runTask(engine, renderer, task, cwd)
+    await runTask(engine, renderer, task, cwd, resumedHistory)
     return
   }
 

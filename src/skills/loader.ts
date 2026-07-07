@@ -303,7 +303,7 @@ export function loadSkills(cwd: string): Map<string, Skill> {
  */
 export function formatSkillIndex(skills: Map<string, Skill>): string {
   if (skills.size === 0) return ''
-  const lines: string[] = ['## 可用技能 (Skills)', '', '使用 load_skill 工具加载完整 prompt:']
+  const lines: string[] = ['## Skills', '', 'Use load_skill tool to load full prompt:']
   for (const skill of skills.values()) {
     const tools = skill.tools?.length ? ` [需要: ${skill.tools.join(', ')}]` : ''
     lines.push(`- **${skill.name}** — ${skill.description}${tools}`)
