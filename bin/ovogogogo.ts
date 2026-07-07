@@ -529,35 +529,42 @@ async function runRepl(
   // (prevents a second ESC from re-triggering softAbort while reading feedback)
   let awaitingInput = false
 
-  // ── ESC key: soft pause ───────────────────────────────────────
-  // readline in terminal mode calls readline.emitKeypressEvents(stdin) internally,
-  // so stdin already emits 'keypress' events by the time we get here.
-  // Debounce: only one soft abort per 800ms to prevent rapid repeated triggers.
+  // ── ESC key: soft pause — now interrupts immediately ──────────
   let lastEscMs = 0
   process.stdin.on('keypress', (_str: unknown, key: { name?: string }) => {
     if (key?.name === 'escape' && running && !awaitingInput) {
       const now = Date.now()
       if (now - lastEscMs < 800) return
       lastEscMs = now
-      engine.softAbort()
+      // Hard-abort the current tool/API call immediately (don't wait for it to finish)
+      engine.abort()
       renderer.stopSpinner()
       process.stdout.write('\n')
-      renderer.warn('⚡ 正在暂停... 当前工具完成后停止，请稍候')
+      renderer.warn('Interrupted. Type feedback or press Enter to resume.')
     }
   })
 
-  // ── Ctrl+C: hard kill (no two-stage logic) ───────────────────
+  // ── Ctrl+C: exit ─────────────────────────────────────────────
+  let sigintCount = 0
   process.on('SIGINT', () => {
+    sigintCount++
     if (running) {
       engine.abort()
       renderer.stopSpinner()
-      renderer.warn('已取消。')
+      renderer.warn('Cancelled.')
       running = false
-    } else {
-      // 不在运行中：第二次 Ctrl+C = 真正退出（cleanup 由 process.on('exit') 处理）
+      return
+    }
+    // Not running
+    if (sigintCount >= 2) {
+      // Double Ctrl+C = force exit
       renderer.newline()
       renderer.info('Goodbye.')
       process.exit(0)
+    } else {
+      // First Ctrl+C when idle — warn, second exits
+      renderer.warn('Press Ctrl+C again to exit, or type a command.')
+      setTimeout(() => { sigintCount = 0 }, 2000)
     }
   })
 
@@ -584,8 +591,8 @@ async function runRepl(
         // Persist session after each turn
         if (sessionDir) saveSession(sessionDir, history)
 
-        if (result.reason === 'interrupted') {
-          // ── Soft interrupt: ask user for guidance, then resume ──
+        if (result.reason === 'interrupted' || result.reason === 'error') {
+          // ESC interrupted or error — ask for feedback, then resume
           renderer.writeInterruptPrompt()
           awaitingInput = true
           const { text: feedback, eof } = await input.readLine('')
@@ -599,10 +606,10 @@ async function runRepl(
           const trimmedFeedback = feedback.trim()
           if (trimmedFeedback) {
             renderer.interruptInjected(trimmedFeedback)
-            currentPrompt = `[用户中途介入]\n${trimmedFeedback}\n\n请根据以上建议继续执行任务。`
+            currentPrompt = `[User Interrupt]\n${trimmedFeedback}\n\nAdjust your actions based on the above feedback and continue the task.`
           } else {
             // Empty Enter = resume silently
-            currentPrompt = '[继续] 请继续自主推进任务，无需等待进一步指示。'
+            currentPrompt = '[Resume] Continue the task autonomously. Do not wait for further instructions.'
           }
           // Continue the while loop → runTurn again with new message
           continue
@@ -654,6 +661,8 @@ async function runRepl(
       const result = handleBuiltin(trimmed, history, engine, renderer, cwd, skills)
 
       if (result === 'exit') {
+        // Save session before exiting
+        if (sessionDir) saveSession(sessionDir, history)
         input.close()
         break
       }
