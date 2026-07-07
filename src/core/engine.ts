@@ -406,9 +406,23 @@ export class ExecutionEngine {
     const toolCallsMap = new Map<number, StreamingToolCall>()
     let firstToken = true
 
+    // Stream-level timeout — if no chunk arrives for 120s, abort (prevents API hang)
+    const STREAM_TIMEOUT_MS = 120_000
+    let lastChunkTime = Date.now()
+
+    // Watchdog: checks every 10s if stream has stalled
+    const watchdog = setInterval(() => {
+      if (Date.now() - lastChunkTime > STREAM_TIMEOUT_MS) {
+        // Stream stalled — force-break the for-await by aborting
+        turnAbortSignal.dispatchEvent(new Event('abort'))
+      }
+    }, 10_000)
+
     try {
       for await (const chunk of stream) {
         if (turnAbortSignal.aborted) break
+
+        lastChunkTime = Date.now()  // reset watchdog on each chunk
 
         const delta = chunk.choices[0]?.delta
         if (!delta) continue
@@ -446,10 +460,12 @@ export class ExecutionEngine {
         }
       }
     } catch (err: unknown) {
+      clearInterval(watchdog)
       this.renderer.stopSpinner()
       throw err
     }
 
+    clearInterval(watchdog)
     this.renderer.stopSpinner()
 
     if (assistantText) {

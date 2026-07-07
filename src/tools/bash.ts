@@ -7,7 +7,7 @@
  * (SIGTERM → SIGKILL after 5 s)
  */
 
-import { exec, spawn } from 'child_process'
+import { exec, spawn, execSync } from 'child_process'
 import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/types.js'
 import { BASH_DESCRIPTION } from '../prompts/tools.js'
 import { mkdirSync, accessSync, constants } from 'fs'
@@ -324,24 +324,29 @@ export class BashTool implements Tool {
         },
       )
 
-      // ── Abort handler — kill entire process group ────────────
-      // Send SIGTERM to process group
+      // ── Abort handler — kill process (platform-aware) ─────────
       const onAbort = () => {
         if (settled) return
         settled = true
 
         const pid = child.pid
         if (pid !== undefined) {
-          // Kill the process group (includes any subshells spawned by the command)
-          try { process.kill(-pid, 'SIGTERM') } catch {
-            try { child.kill('SIGTERM') } catch { /* ignore */ }
-          }
-          // SIGKILL fallback after 5 s for stubborn processes
-          setTimeout(() => {
-            try { process.kill(-pid, 'SIGKILL') } catch {
-              try { child.kill('SIGKILL') } catch { /* ignore */ }
+          if (process.platform === 'win32') {
+            // Windows: taskkill /F /T /PID kills the process tree
+            try { execSync(`taskkill /F /T /PID ${pid}`, { stdio: 'ignore', timeout: 5000 }) } catch { /* best-effort */ }
+            try { child.kill() } catch { /* ignore */ }
+          } else {
+            // Unix: kill process group (includes subshells)
+            try { process.kill(-pid, 'SIGTERM') } catch {
+              try { child.kill('SIGTERM') } catch { /* ignore */ }
             }
-          }, 5_000)
+            // SIGKILL fallback after 5s for stubborn processes
+            setTimeout(() => {
+              try { process.kill(-pid, 'SIGKILL') } catch {
+                try { child.kill('SIGKILL') } catch { /* ignore */ }
+              }
+            }, 5_000)
+          }
         }
 
         resolve({ content: 'Command cancelled.', isError: true })
