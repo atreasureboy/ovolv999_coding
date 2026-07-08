@@ -14,7 +14,7 @@ import type { AgentConfig } from '../core/agentPresets.js'
 import { resolveAgentConfig, validateAgentConfig, PRESET_NAMES } from '../core/agentPresets.js'
 import { Renderer } from '../ui/renderer.js'
 import { tmuxLayout } from '../ui/tmuxLayout.js'
-import { appendFileSync, existsSync } from 'fs'
+import { appendFileSync, existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { execSync } from 'child_process'
 import { str } from '../core/strings.js'
@@ -26,18 +26,34 @@ const MAX_CALL_DEPTH = 5
 
 // ── Verification gate (AgentOS §6 "No Tuple, No Merge") ─────────────────────
 
+function packageManagerCommand(cwd: string, script: string): string {
+  if (existsSync(join(cwd, 'pnpm-lock.yaml'))) return `pnpm run ${script} 2>&1`
+  if (existsSync(join(cwd, 'yarn.lock'))) return `yarn ${script} 2>&1`
+  return script === 'test' ? 'npm test 2>&1' : `npm run ${script} 2>&1`
+}
+
+function readPackageScripts(cwd: string): Record<string, string> {
+  try {
+    const raw = readFileSync(join(cwd, 'package.json'), 'utf8')
+    const parsed = JSON.parse(raw) as { scripts?: Record<string, string> }
+    return parsed.scripts ?? {}
+  } catch {
+    return {}
+  }
+}
+
 /**
- * Detect appropriate verification command based on project files.
- * Falls back to tsc for TypeScript projects (the most common case).
+ * Detect appropriate verification commands based on project files.
+ * Project scripts win over generic guesses so verification follows local intent.
  */
-function detectVerifyCommands(cwd: string): string[] {
+export function detectVerifyCommands(cwd: string): string[] {
   const has = (f: string): boolean => {
     try { return existsSync(join(cwd, f)) } catch { return false }
   }
 
   // Python
   if (has('pyproject.toml') || has('setup.py') || has('requirements.txt')) {
-    return ['python -m py_compile $(find . -name "*.py" -not -path "./.venv/*" | head -20) 2>&1 || ruff check . 2>&1 || true']
+    return ['python -m compileall -q . 2>&1']
   }
   // Go
   if (has('go.mod')) {
@@ -47,8 +63,17 @@ function detectVerifyCommands(cwd: string): string[] {
   if (has('Cargo.toml')) {
     return ['cargo check 2>&1']
   }
-  // TypeScript / JavaScript (default)
-  if (has('tsconfig.json') || has('package.json')) {
+  // TypeScript / JavaScript
+  if (has('package.json')) {
+    const scripts = readPackageScripts(cwd)
+    const commands: string[] = []
+    const firstTypecheck = scripts.typecheck ? 'typecheck' : scripts.build ? 'build' : null
+    if (firstTypecheck) commands.push(packageManagerCommand(cwd, firstTypecheck))
+    if (scripts.lint) commands.push(packageManagerCommand(cwd, 'lint'))
+    if (scripts.test) commands.push(packageManagerCommand(cwd, 'test'))
+    if (commands.length > 0) return commands
+  }
+  if (has('tsconfig.json')) {
     return ['npx tsc --noEmit 2>&1']
   }
   // No known project type — skip verification

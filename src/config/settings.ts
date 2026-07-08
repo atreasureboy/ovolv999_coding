@@ -26,9 +26,10 @@
  *   UserPromptSubmit:  OVOGO_PROMPT
  */
 
-import { readFileSync, existsSync } from 'fs'
-import { resolve, join } from 'path'
+import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'fs'
+import { resolve, join, dirname } from 'path'
 import { homedir } from 'os'
+import type { PermissionMode, PermissionRule } from '../core/permissionSystem.js'
 
 export interface HookEntry {
   /** Comma-separated tool names to match, or "*" / omit for all. Supports trailing "*" wildcard. */
@@ -44,6 +45,13 @@ export interface HooksConfig {
   OnError?: HookEntry[]
   OnComplete?: HookEntry[]
   OnContextOverflow?: HookEntry[]
+}
+
+export interface PermissionsConfig {
+  /** Runtime permission mode. Defaults to bypassPermissions for local personal use. */
+  mode?: PermissionMode
+  /** Ordered allow/deny rules. Later-loaded project settings append after global settings. */
+  rules?: PermissionRule[]
 }
 
 /**
@@ -65,6 +73,7 @@ export interface TaskContext {
 export interface OvogoSettings {
   hooks?: HooksConfig
   taskContext?: TaskContext
+  permissions?: PermissionsConfig
 }
 
 function tryParse(path: string): OvogoSettings {
@@ -84,6 +93,13 @@ function mergeSettings(a: OvogoSettings, b: OvogoSettings): OvogoSettings {
       }
     : a.taskContext
 
+  const mergedPermissions = (a.permissions || b.permissions)
+    ? {
+        mode: b.permissions?.mode ?? a.permissions?.mode,
+        rules: [...(a.permissions?.rules ?? []), ...(b.permissions?.rules ?? [])],
+      }
+    : undefined
+
   return {
     hooks: {
       PreToolCall: [...(a.hooks?.PreToolCall ?? []), ...(b.hooks?.PreToolCall ?? [])],
@@ -94,12 +110,44 @@ function mergeSettings(a: OvogoSettings, b: OvogoSettings): OvogoSettings {
       OnContextOverflow: [...(a.hooks?.OnContextOverflow ?? []), ...(b.hooks?.OnContextOverflow ?? [])],
     },
     taskContext: mergedTaskContext,
+    permissions: mergedPermissions,
   }
+}
+
+export function getProjectSettingsPath(cwd: string): string {
+  return resolve(cwd, '.ovogo', 'settings.json')
+}
+
+export function loadProjectSettings(cwd: string): OvogoSettings {
+  const projectPath = getProjectSettingsPath(cwd)
+  return existsSync(projectPath) ? tryParse(projectPath) : {}
+}
+
+export function saveProjectSettings(cwd: string, patch: OvogoSettings): OvogoSettings {
+  const projectPath = getProjectSettingsPath(cwd)
+  const current = loadProjectSettings(cwd)
+  const next: OvogoSettings = {
+    ...current,
+    ...patch,
+    hooks: patch.hooks ?? current.hooks,
+    taskContext: patch.taskContext ?? current.taskContext,
+    permissions: patch.permissions
+      ? {
+          ...(current.permissions ?? {}),
+          ...patch.permissions,
+          rules: patch.permissions.rules ?? current.permissions?.rules,
+        }
+      : current.permissions,
+  }
+
+  mkdirSync(dirname(projectPath), { recursive: true })
+  writeFileSync(projectPath, JSON.stringify(next, null, 2) + '\n', 'utf8')
+  return next
 }
 
 export function loadSettings(cwd: string): OvogoSettings {
   const globalPath = join(homedir(), '.ovogo', 'settings.json')
-  const projectPath = resolve(cwd, '.ovogo', 'settings.json')
+  const projectPath = getProjectSettingsPath(cwd)
 
   let settings: OvogoSettings = {}
   if (existsSync(globalPath)) settings = mergeSettings(settings, tryParse(globalPath))

@@ -6,7 +6,7 @@
  */
 
 import { registerCommand } from './index.js'
-import type { SlashCommandResult } from './index.js'
+import type { SlashCommandContext, SlashCommandResult } from './index.js'
 import { listCommands } from './index.js'
 import { getCurrentMode, setCurrentMode, cycleMode, getAllModes, type Mode } from '../core/modes.js'
 import type { PermissionMode } from '../core/permissionSystem.js'
@@ -20,6 +20,14 @@ import { homedir } from 'os'
 
 const text = (value: string): SlashCommandResult => ({ type: 'text', value })
 const exit = (): SlashCommandResult => ({ type: 'exit' })
+
+function persistPermissionState(ctx: SlashCommandContext): string {
+  const path = ctx.persistPermissions?.(
+    ctx.engine.getPermissionManager().getMode(),
+    ctx.engine.getPermissionManager().getRules(),
+  )
+  return path ? '\nSaved to: ' + path : ''
+}
 
 // ── Session & History ──────────────────────────────────────────────────────
 
@@ -153,7 +161,7 @@ registerCommand({
   name: 'permissions',
   description: 'Show permission configuration (default: full access, no restrictions)',
   aliases: ['perms'],
-  usage: '/permissions [mode|cycle|rules|allow <Tool> <pattern>|deny <Tool> <pattern>]',
+  usage: '/permissions [mode|cycle|rules|allow <Tool> <pattern>|deny <Tool> <pattern>|remove <index>|clear]',
   handler: (args, ctx) => {
     const mgr = ctx.engine.getPermissionManager()
     const parts = args.trim().split(/\s+/).filter(Boolean)
@@ -165,9 +173,22 @@ registerCommand({
     if (action === 'rules') {
       return text(mgr.formatRules())
     }
+    if (action === 'clear') {
+      const count = mgr.getRules().length
+      for (let i = count - 1; i >= 0; i--) mgr.removeRule(i)
+      return text('Cleared ' + count + ' permission rule(s).' + persistPermissionState(ctx))
+    }
+    if (action === 'remove') {
+      const index = Number.parseInt(parts[1] ?? '', 10)
+      if (!Number.isInteger(index) || index < 0 || index >= mgr.getRules().length) {
+        return text('Usage: /permissions remove <index>')
+      }
+      mgr.removeRule(index)
+      return text('Removed permission rule [' + index + '].\n' + mgr.formatRules() + persistPermissionState(ctx))
+    }
     if (action === 'cycle') {
       const next = mgr.cycleMode()
-      return text('Permission mode: ' + mgr.formatMode() + `\nSwitched to ${next}.`)
+      return text('Permission mode: ' + mgr.formatMode() + `\nSwitched to ${next}.` + persistPermissionState(ctx))
     }
     if (action === 'mode') {
       const mode = parts[1] as PermissionMode | undefined
@@ -176,7 +197,7 @@ registerCommand({
         return text('Unknown permission mode: ' + mode)
       }
       mgr.setMode(mode)
-      return text('Permission mode: ' + mgr.formatMode())
+      return text('Permission mode: ' + mgr.formatMode() + persistPermissionState(ctx))
     }
     if (action === 'allow' || action === 'deny') {
       const toolName = parts[1]
@@ -190,10 +211,10 @@ registerCommand({
         behavior: action,
         source: 'user',
       })
-      return text('Added permission rule:\n' + mgr.formatRules())
+      return text('Added permission rule:\n' + mgr.formatRules() + persistPermissionState(ctx))
     }
 
-    return text('Usage: /permissions [mode|cycle|rules|allow <Tool> <pattern>|deny <Tool> <pattern>]')
+    return text('Usage: /permissions [mode|cycle|rules|allow <Tool> <pattern>|deny <Tool> <pattern>|remove <index>|clear]')
   },
 })
 

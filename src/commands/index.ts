@@ -14,6 +14,7 @@
 import type { ExecutionEngine } from '../core/engine.js'
 import type { Renderer } from '../ui/renderer.js'
 import type { OpenAIMessage } from '../core/types.js'
+import type { PermissionMode, PermissionRule } from '../core/permissionSystem.js'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -30,6 +31,8 @@ export interface SlashCommandContext {
   /** Optional REPL-provided dynamic text renderers */
   getSkillsText?: () => string
   getSessionsText?: () => string
+  /** Persist current permission state; returns destination path when available. */
+  persistPermissions?: (mode: PermissionMode, rules: PermissionRule[]) => string | undefined
 }
 
 export type SlashCommandResult =

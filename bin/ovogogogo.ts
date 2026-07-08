@@ -61,7 +61,7 @@ import { Renderer } from '../src/ui/renderer.js'
 import { InputHandler, readStdin } from '../src/ui/input.js'
 import type { EngineConfig, OpenAIMessage } from '../src/core/types.js'
 import { registerAgentFactory } from '../src/tools/agent.js'
-import { loadSettings } from '../src/config/settings.js'
+import { getProjectSettingsPath, loadSettings, saveProjectSettings } from '../src/config/settings.js'
 import { HookRunner, NoopHookRunner } from '../src/config/hooks.js'
 import { loadSkills, expandSkillPrompt, formatSkillIndex } from '../src/skills/loader.js'
 import type { Skill } from '../src/skills/loader.js'
@@ -83,6 +83,7 @@ import { createTerminalAskUserHandler } from '../src/tools/askUser.js'
 import { dispatchSlashCommand, type SlashCommandContext } from '../src/commands/index.js'
 import '../src/commands/builtin.js' // register all built-in commands
 import { tmuxLayout } from '../src/ui/tmuxLayout.js'
+import { PermissionManager } from '../src/core/permissionSystem.js'
 
 const VERSION = '0.1.0'
 
@@ -767,6 +768,10 @@ async function runRepl(
         },
         getSkillsText,
         getSessionsText,
+        persistPermissions: (mode, rules) => {
+          saveProjectSettings(cwd, { permissions: { mode, rules } })
+          return getProjectSettingsPath(cwd)
+        },
       }
 
       const slashResult = await dispatchSlashCommand(trimmed, slashCtx)
@@ -953,6 +958,15 @@ async function main(): Promise<void> {
     }
   }
 
+  const permissionManager = new PermissionManager()
+  permissionManager.setMode(settings.permissions?.mode ?? 'bypassPermissions')
+  for (const rule of settings.permissions?.rules ?? []) {
+    permissionManager.addRule(rule)
+  }
+  if (settings.permissions?.mode || (settings.permissions?.rules?.length ?? 0) > 0) {
+    renderer.info(`Permissions: ${permissionManager.formatMode()}`)
+  }
+
   // Create per-session output directory (or reuse existing for --continue/--resume)
   let sessionDir: string
   let resumedHistory: OpenAIMessage[] = []
@@ -1037,6 +1051,7 @@ async function main(): Promise<void> {
     maxIterations: maxIter,
     cwd,
     permissionMode: 'auto',
+    permissionManager,
     hookRunner,
     systemPrompt,
     sessionDir,
@@ -1065,9 +1080,12 @@ async function main(): Promise<void> {
   }
 
   // Plan-mode config: read-only analysis, no reflection (plans aren't completed work)
+  const planPermissionManager = new PermissionManager()
+  planPermissionManager.setMode('plan')
   const planConfig: EngineConfig = {
     ...config,
     planMode: true,
+    permissionManager: planPermissionManager,
     enabledModules: ['memory', 'workspace'],
   }
 

@@ -7,7 +7,7 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript)](https://www.typescriptlang.org/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/Node-%3E%3D20-339933?logo=node.js)](https://nodejs.org/)
-[![Tests](https://img.shields.io/badge/Tests-311%20passed-brightgreen)]()
+[![Tests](https://img.shields.io/badge/Tests-316%20passed-brightgreen)]()
 
 > `ovolv999 "任何你需要它完成的任务"`
 
@@ -24,13 +24,13 @@ ovolv999 是一个**纯 Agent 基座框架**，仿 Claude Code，核心设计参
 - **配置驱动角色** — 探索者、规划者、审查者 = 不同 AgentConfig 配置实例，零代码新增角色
 - **Memory 三原语** — `memory_write` / `memory_search` / `memory_recall`，Agent 主动操作长时记忆
 - **来源归因 + 冲突解决** — `user_stated > agent_inferred > tool_observed` 优先级链
-- **验证闸门** — 子 agent 完成代码修改后自动跑 `tsc --noEmit` 验证（No Tuple, No Merge）
+- **验证闸门** — 子 agent 完成代码修改后自动按项目 scripts / 语言工具验证（No Tuple, No Merge）
 - **Session 整合** — REPL 退出时自动总结 episodic 经验写入 SemanticMemory（关闭学习闭环）
 - **调用链追踪** — 子 agent spawn 深度追踪（max 5），防递归 + 审计
 - **Skill 懒加载** — Boot 时注入技能索引，LLM 按需通过 `load_skill` 加载
 - **生命周期 Hooks** — 6 种：PreToolCall / PostToolCall / OnError / OnComplete / OnContextOverflow / UserPromptSubmit
 - **工具元信息** — Tool 自声明 readOnly / concurrencySafe / mutatesState / longRunning / requiresNetwork，运行时据此过滤与调度
-- **统一权限管理** — PermissionManager 接入 Engine 执行路径，`/permissions` 可查看、切换模式、添加 allow/deny 规则
+- **统一权限管理** — PermissionManager 接入 Engine 执行路径，`/permissions` 可查看、切换模式、添加 allow/deny 规则并持久化到 `.ovogo/settings.json`
 - **并发调度** — 只读/安全工具并行 (Promise.all)，状态工具串行，支持 per-input `isConcurrencySafe`
 - **后台任务生命周期** — Bash 后台任务统一进入 TaskCreate/TaskGet/TaskList/TaskStop 管理
 - **流式引擎** — Streaming LLM API，tool_call 解析 → 分区调度 → 结果注入 → 循环
@@ -43,7 +43,7 @@ ovolv999 是一个**纯 Agent 基座框架**，仿 Claude Code，核心设计参
 ```
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║                        ovolv999 — 统一 Harness + 模块化 Agent 基座             ║
-║               build OK · eslint OK · 15 test files · 311 tests passed        ║
+║               build OK · eslint OK · 17 test files · 316 tests passed        ║
 ║               Runtime deps: openai · glob · zod (仅 3 个)                     ║
 ║               API retry: 5x exponential backoff · 120s timeout                ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
@@ -98,7 +98,7 @@ ovolv999 是一个**纯 Agent 基座框架**，仿 Claude Code，核心设计参
 ║  │  └ boot: sessionDir│                              │ Agent (invoke):     │   ║
 ║  │ reflection         │  ┌─ Verification Gate ───┐   │  AgentConfig 驱动   │   ║
 ║  │  ├ dep: memory     │  │ verify:true           │   │  callDepth max 5   │   ║
-║  │  └ onComplete:     │  │  → 自动 tsc --noEmit  │   │  verify 闸门       │   ║
+║  │  └ onComplete:     │  │  → scripts/语言检查    │   │  verify 闸门       │   ║
 ║  │     LLM 知识提取   │  │  → 结果附带验证状态    │   │  EventLog 审计     │   ║
 ║  └────────────────────┘  └───────────────────────┘  └─────────────────────┘   ║
 ║                                                                              ║
@@ -170,13 +170,15 @@ Agent({
   description: "实现登录功能",
   prompt: "...",
   subagent_type: "general-purpose",
-  verify: true   // ← 完成后自动跑 tsc --noEmit
+  verify: true   // ← 完成后自动跑 package scripts 或语言检查
 })
 // 结果包含:
-// [验证闸门] ✓ tsc — passed
+// [验证闸门] ✓ build/lint/test — passed
 // 或
-// [验证闸门] ✗ tsc — FAILED + 错误详情
+// [验证闸门] ✗ lint — FAILED + 错误详情
 ```
+
+验证命令优先读取 `package.json` scripts：`typecheck` 或 `build`、`lint`、`test`。没有 scripts 时按项目类型回退到 `npx tsc --noEmit`、`go vet ./...`、`cargo check` 或 `python -m compileall -q .`。
 
 ### Agent Communication — 调用链追踪
 
@@ -292,8 +294,8 @@ LLM 可通过 `load_skill("deploy")` 按需加载。
 ### 安装
 
 ```bash
-git clone https://github.com/atreasureboy/ovolv999.git
-cd ovolv999
+git clone https://github.com/atreasureboy/ovolv999_coding.git
+cd ovolv999_coding
 pnpm install
 ```
 
@@ -358,7 +360,7 @@ ovolv999/
 │   │   └── critic.ts                   # Critic 纠错提示词
 │   ├── config/                         # 配置 (3 files)
 │   │   ├── hooks.ts                    # 6 种 Hook + HookRunner + NoopHookRunner
-│   │   ├── settings.ts                 # JSON 解析 + TaskContext
+│   │   ├── settings.ts                 # JSON 解析 + TaskContext + 权限持久化
 │   │   └── ovogomd.ts                  # OVOGO.md 多级加载
 │   ├── ui/                             # 终端 UI (3 files)
 │   │   ├── renderer.ts                 # 流式输出 + 工具卡片 + spinner
@@ -368,7 +370,7 @@ ovolv999/
 │   │   └── loader.ts                   # frontmatter 解析 + formatSkillIndex
 │   └── memory/                         # 记忆桥接
 │       └── index.ts                    # SemanticMemory → 系统提示词注入
-├── tests/                              # 15 test files · 311 tests
+├── tests/                              # 17 test files · 316 tests
 │   ├── engine.test.ts                  # partitionToolCalls + compact + critic
 │   ├── presets.test.ts                 # AgentConfig + preset 解析 + applyAgent
 │   ├── modules.test.ts                 # SemanticMemory + EpisodicMemory + ModuleRegistry
@@ -390,13 +392,13 @@ ovolv999/
 | Boot 时相关性检索 | `extractKeywords` + `scoreRelevance` → top-10 |
 | Memory 整合 | `consolidateSession` — REPL 退出时 LLM 总结 |
 | Skill 懒加载 | `load_skill` + `formatSkillIndex` + 权限检查 |
-| 验证闸门 (No Tuple No Merge) | `verify:true` → 自动 `tsc --noEmit` |
+| 验证闸门 (No Tuple No Merge) | `verify:true` → 自动 package scripts / 语言检查 |
 | 调用链追踪 + 循环检测 | `_callDepth` max 5 + EventLog |
 | 生命周期 Hooks | 6 种 Hook 类型 |
 | Trajectory 捕获 | `boot_context` + `invoke_sent/completed` + EventLog |
 | Context 压缩 + 策略 | 统一 70%/85% + **含系统提示词 token** + tool_call 对保护 |
 | Tool metadata | `readOnly` / `concurrencySafe` / `mutatesState` / `longRunning` / `requiresNetwork` |
-| 权限系统 | `PermissionManager` 接入 Engine + `/permissions` 运行时规则 |
+| 权限系统 | `PermissionManager` 接入 Engine + `/permissions` 持久化规则 |
 | 后台任务 | `TaskCreate/Get/List/Update/Stop` + Bash background 统一接入 |
 | API 重试 | SDK maxRetries=5 指数退避 (429/5xx/ECONNRESET) + 120s timeout |
 | Module-driven Tools | MemoryModule 通过 `boot().tools` 提供 3 个工具 |
