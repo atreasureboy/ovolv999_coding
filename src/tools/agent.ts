@@ -321,6 +321,7 @@ async function runAgentTask(
 
 export class AgentTool implements Tool {
   name = 'Agent'
+  metadata = { concurrencySafe: true, longRunning: true }
 
   definition: ToolDefinition = {
     type: 'function',

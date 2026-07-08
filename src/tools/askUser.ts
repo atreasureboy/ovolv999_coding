@@ -96,6 +96,7 @@ function validateQuestions(questions: unknown): string | null {
 
 export class AskUserQuestionTool implements Tool {
   name = 'AskUserQuestion'
+  metadata = { mutatesState: true, concurrencySafe: false }
 
   definition: ToolDefinition = {
     type: 'function',

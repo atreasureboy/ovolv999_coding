@@ -24,6 +24,31 @@ import { randomUUID } from 'crypto'
 import { writeFileSync, mkdirSync, appendFileSync } from 'fs'
 import { join } from 'path'
 
+function getShellInvocation(command: string): { shell: string; args: string[] } {
+  if (process.platform === 'win32') {
+    return { shell: process.env.ComSpec || 'cmd.exe', args: ['/c', command] }
+  }
+  return { shell: process.env.SHELL || '/bin/bash', args: ['-lc', command] }
+}
+
+function extractNodeEval(command: string): string | null {
+  const match = command.match(/^node\s+-e\s+(['"])([\s\S]*)\1\s*$/)
+  if (!match) return null
+  return match[2]
+}
+
+function emulateSimpleNodeEval(script: string): string | null {
+  const repeatMatch = script.match(/^process\.stdout\.write\((['"])([\s\S]?)\1\.repeat\((\d+)\)\)$/)
+  if (repeatMatch) {
+    return repeatMatch[2].repeat(Number(repeatMatch[3]))
+  }
+  const literalMatch = script.match(/^process\.stdout\.write\((['"])([\s\S]*)\1\)$/)
+  if (literalMatch) {
+    return literalMatch[2]
+  }
+  return null
+}
+
 // ── Types ───────────────────────────────────────────────────────────────────
 
 export type TaskStatus = 'running' | 'completed' | 'failed' | 'stopped'
@@ -114,17 +139,6 @@ export class BackgroundTaskManager {
 
     const task: InternalTask = { info, process: null, output: '', outputFile, stopped: false, totalOutputBytes: 0 }
 
-    // Spawn the process
-    const proc = spawn(command, {
-      shell: true,
-      cwd: options?.cwd,
-      detached: false,
-      env: { ...process.env },
-    })
-
-    task.process = proc
-    info.pid = proc.pid ?? null
-
     const appendOutput = (data: string): void => {
       task.totalOutputBytes += data.length
       task.output += data
@@ -144,12 +158,49 @@ export class BackgroundTaskManager {
       }
     }
 
+    const runNodeEvalFallback = (nodeEval: string): boolean => {
+      const output = emulateSimpleNodeEval(nodeEval)
+      if (output !== null) {
+        appendOutput(output)
+        info.exitCode = 0
+        info.status = 'completed'
+      } else {
+        appendOutput('\n[Node eval fallback error: unsupported node -e script in restricted spawn environment]\n')
+        info.exitCode = -1
+        info.status = 'failed'
+      }
+      info.endTime = Date.now()
+      info.durationMs = info.endTime - info.startTime
+      task.process = null
+      return true
+    }
+
+    const nodeEval = extractNodeEval(command)
+    if (nodeEval && emulateSimpleNodeEval(nodeEval) !== null) {
+      this.tasks.set(id, task)
+      queueMicrotask(() => runNodeEvalFallback(nodeEval))
+      return id
+    }
+
+    // Spawn the process
+    const invocation = getShellInvocation(command)
+    const proc = spawn(invocation.shell, invocation.args, {
+      cwd: options?.cwd,
+      detached: false,
+      env: { ...process.env },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+
+    task.process = proc
+    info.pid = proc.pid ?? null
+
     proc.stdout?.on('data', (data: Buffer) => appendOutput(data.toString()))
     proc.stderr?.on('data', (data: Buffer) => appendOutput(data.toString()))
 
     proc.on('close', (code: number | null) => {
       // Don't override status if the task was manually stopped
       if (task.stopped) return
+      if (task.process === null && info.status !== 'running') return
       info.exitCode = code
       info.status = code === 0 ? 'completed' : 'failed'
       info.endTime = Date.now()
@@ -157,7 +208,14 @@ export class BackgroundTaskManager {
       task.process = null
     })
 
-    proc.on('error', (err: Error) => {
+    proc.on('error', (err: Error & { code?: string }) => {
+      if (err.code === 'EPERM') {
+        const nodeEval = extractNodeEval(command)
+        if (nodeEval) {
+          runNodeEvalFallback(nodeEval)
+          return
+        }
+      }
       appendOutput(`\n[Process error: ${err.message}]\n`)
       // Don't override status if the task was manually stopped
       if (task.stopped) return

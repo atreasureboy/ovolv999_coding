@@ -24,6 +24,7 @@ export interface GrepInput {
 
 export class GrepTool implements Tool {
   name = 'Grep'
+  metadata = { readOnly: true, concurrencySafe: true }
 
   definition: ToolDefinition = {
     type: 'function',

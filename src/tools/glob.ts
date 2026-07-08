@@ -15,6 +15,7 @@ export interface GlobInput {
 
 export class GlobTool implements Tool {
   name = 'Glob'
+  metadata = { readOnly: true, concurrencySafe: true }
 
   definition: ToolDefinition = {
     type: 'function',

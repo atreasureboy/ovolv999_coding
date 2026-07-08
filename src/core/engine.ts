@@ -60,6 +60,8 @@ import {
 import { CostTracker, type TokenUsage } from './costTracker.js'
 import { BackgroundTaskManager } from './backgroundTaskManager.js'
 import { FileHistory } from './fileHistory.js'
+import { PermissionManager } from './permissionSystem.js'
+import { classifyCommandRisk } from './riskClassifier.js'
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -149,32 +151,8 @@ function enforceAggregateToolResultBudget(
   }
 }
 
-/** Plan mode — only read-only tools are exposed */
-const PLAN_MODE_TOOLS = new Set([
-  'Read',
-  'Glob',
-  'Grep',
-  'WebFetch',
-  'WebSearch',
-  'ExitPlanMode', // the tool to exit plan mode is always available in plan mode
-])
-
-/**
- * Concurrency-safe tools: run in parallel within a single LLM response.
- * When the LLM emits multiple tool calls in one response, they are intended
- * to be independent — execute them concurrently.
- */
-const CONCURRENCY_SAFE_TOOLS = new Set([
-  'Read',
-  'Glob',
-  'Grep',
-  'WebFetch',
-  'WebSearch',
-  'Bash', // parallel — dependent ops should use && in one call
-  'Agent', // parallel — multiple sub-agents run simultaneously
-  'ShellSession', // parallel — different sessions
-  'TmuxSession', // parallel — different sessions
-])
+const LEGACY_PLAN_MODE_TOOLS = new Set(['Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'ExitPlanMode'])
+const LEGACY_CONCURRENCY_SAFE_TOOLS = new Set(['Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'Bash', 'Agent', 'ShellSession', 'TmuxSession'])
 
 // ── Internal types ───────────────────────────────────────────────────────────
 
@@ -213,7 +191,7 @@ function partitionToolCalls(calls: ParsedToolCall[], tools?: Tool[]): ToolBatch[
     const tool = tools?.find(t => t.name === call.tc.name)
     const safe = tool?.isConcurrencySafe
       ? tool.isConcurrencySafe(call.input)
-      : CONCURRENCY_SAFE_TOOLS.has(call.tc.name)
+      : (tool?.metadata?.concurrencySafe ?? LEGACY_CONCURRENCY_SAFE_TOOLS.has(call.tc.name))
     const last = batches[batches.length - 1]
 
     if (last && last.safe && safe) {
@@ -255,6 +233,8 @@ export class ExecutionEngine {
   private planModeActive: boolean
   /** File history — backs up files before edits for undo/checkpoint */
   private fileHistory: FileHistory | null
+  /** Unified permission manager — checked before every tool execution */
+  private permissionManager: PermissionManager
   /** Whether the endpoint supports stream_options.include_usage (most do) */
   private _streamUsageSupported = true
   /** Consecutive compact failure counter — stops retrying after 3 */
@@ -279,6 +259,12 @@ export class ExecutionEngine {
     this.backgroundTaskManager = new BackgroundTaskManager()
     this.planModeActive = config.planMode ?? false
     this.fileHistory = config.sessionDir ? new FileHistory(config.sessionDir) : null
+    this.permissionManager = config.permissionManager ?? new PermissionManager()
+    if (!config.permissionManager) {
+      if (config.permissionMode === 'auto') this.permissionManager.setMode('bypassPermissions')
+      else if (config.permissionMode === 'deny') this.permissionManager.setMode('plan')
+      else this.permissionManager.setMode('default')
+    }
 
     // Resolve enabled modules
     const enabledNames = this.deriveEnabledModules()
@@ -351,7 +337,10 @@ export class ExecutionEngine {
     }
     // Filter by plan mode (read-only tools only)
     if (planMode) {
-      defs = defs.filter((t) => PLAN_MODE_TOOLS.has(t.function.name))
+      defs = defs.filter((t) => {
+        const tool = allTools.find(candidate => candidate.name === t.function.name)
+        return tool?.metadata?.readOnly === true || LEGACY_PLAN_MODE_TOOLS.has(t.function.name)
+      })
     }
     return defs
   }
@@ -702,8 +691,13 @@ export class ExecutionEngine {
     planMode: boolean,
     turnNumber: number,
   ): Promise<ToolResult> {
+    const tool = findTool(this.allTools, toolName)
+    if (!tool) {
+      return { content: `Unknown tool: ${toolName}`, isError: true }
+    }
+
     // In plan mode, block write tools (defence in depth)
-    if (planMode && !PLAN_MODE_TOOLS.has(toolName)) {
+    if (planMode && !(tool.metadata?.readOnly === true || LEGACY_PLAN_MODE_TOOLS.has(toolName))) {
       return {
         content: `Tool "${toolName}" is not available in plan mode. Only read-only tools are allowed. Output your plan as text.`,
         isError: true,
@@ -719,9 +713,19 @@ export class ExecutionEngine {
       }
     }
 
-    const tool = findTool(this.allTools, toolName)
-    if (!tool) {
-      return { content: `Unknown tool: ${toolName}`, isError: true }
+    const isDangerous =
+      toolName === 'Bash' && typeof input.command === 'string'
+        ? classifyCommandRisk(input.command) === 'dangerous'
+        : false
+    const permission = this.permissionManager.check(toolName, input, isDangerous)
+    if (permission === 'deny') {
+      return {
+        content: `Permission denied for ${toolName}. Current mode: ${this.permissionManager.formatMode()}`,
+        isError: true,
+      }
+    }
+    if (permission === 'ask') {
+      this.renderer.warn(`Permission check: ${toolName} requires attention; continuing in single-user mode.`)
     }
 
     const result = await tool.execute(input, context)
@@ -876,6 +880,7 @@ export class ExecutionEngine {
     return {
       cwd: this.config.cwd,
       permissionMode: this.config.permissionMode,
+      permissionManager: this.permissionManager,
       signal: turnAbortSignal,
       apiConfig: {
         apiKey: this.config.apiKey,
@@ -1242,6 +1247,11 @@ export class ExecutionEngine {
   /** Expose the background task manager for cleanup / inspection */
   getBackgroundTaskManager(): BackgroundTaskManager {
     return this.backgroundTaskManager
+  }
+
+  /** Expose unified permissions for slash commands and diagnostics */
+  getPermissionManager(): PermissionManager {
+    return this.permissionManager
   }
 
   /** Whether plan mode is currently active */

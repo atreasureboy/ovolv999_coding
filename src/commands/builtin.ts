@@ -9,6 +9,7 @@ import { registerCommand } from './index.js'
 import type { SlashCommandResult } from './index.js'
 import { listCommands } from './index.js'
 import { getCurrentMode, setCurrentMode, cycleMode, getAllModes, type Mode } from '../core/modes.js'
+import type { PermissionMode } from '../core/permissionSystem.js'
 import { estimateTokens, calculateContextState, microCompact } from '../core/compact.js'
 import { existsSync, writeFileSync } from 'fs'
 import { join } from 'path'
@@ -152,20 +153,47 @@ registerCommand({
   name: 'permissions',
   description: 'Show permission configuration (default: full access, no restrictions)',
   aliases: ['perms'],
-  usage: '/permissions  or  /permissions rules',
-  handler: (args, _ctx) => {
-    if (args === 'rules') {
-      return text('Permission rules: None configured.\n\nTo restrict the agent, add deny rules in OVOGO.md:\n  - "Deny: rm -rf"\n  - "Deny: git push --force"\n  - "Deny: curl *"\n\nBy default the agent has full access and never asks for permission.')
+  usage: '/permissions [mode|cycle|rules|allow <Tool> <pattern>|deny <Tool> <pattern>]',
+  handler: (args, ctx) => {
+    const mgr = ctx.engine.getPermissionManager()
+    const parts = args.trim().split(/\s+/).filter(Boolean)
+    const action = parts[0]
+
+    if (!action) {
+      return text(mgr.formatMode() + '\n\n' + mgr.formatRules())
     }
-    return text(
-      'Permission: FULL ACCESS (default)\n' +
-      '  - Agent executes all tools and commands automatically\n' +
-      '  - No confirmation prompts\n' +
-      '  - Dangerous command patterns are logged but NOT blocked\n' +
-      '\n' +
-      'To add restrictions, edit OVOGO.md or use /permissions rules.\n' +
-      'Plan mode: use /plan <task> for read-only analysis.'
-    )
+    if (action === 'rules') {
+      return text(mgr.formatRules())
+    }
+    if (action === 'cycle') {
+      const next = mgr.cycleMode()
+      return text('Permission mode: ' + mgr.formatMode() + `\nSwitched to ${next}.`)
+    }
+    if (action === 'mode') {
+      const mode = parts[1] as PermissionMode | undefined
+      if (!mode) return text(mgr.formatMode())
+      if (!['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions'].includes(mode)) {
+        return text('Unknown permission mode: ' + mode)
+      }
+      mgr.setMode(mode)
+      return text('Permission mode: ' + mgr.formatMode())
+    }
+    if (action === 'allow' || action === 'deny') {
+      const toolName = parts[1]
+      const ruleContent = parts.slice(2).join(' ')
+      if (!toolName || !ruleContent) {
+        return text('Usage: /permissions ' + action + ' <ToolName> <pattern>')
+      }
+      mgr.addRule({
+        toolName,
+        ruleContent,
+        behavior: action,
+        source: 'user',
+      })
+      return text('Added permission rule:\n' + mgr.formatRules())
+    }
+
+    return text('Usage: /permissions [mode|cycle|rules|allow <Tool> <pattern>|deny <Tool> <pattern>]')
   },
 })
 
@@ -354,11 +382,7 @@ Describe your project here.
 registerCommand({
   name: 'skills',
   description: 'List available skills',
-  handler: (_args, _ctx) => {
-    // This is a stub — the actual skills listing is handled in the REPL
-    // because skills are loaded in bin/ovogogogo.ts
-    return text('Use the REPL /skills command to list loaded skills.')
-  },
+  handler: (_args, ctx) => text(ctx.getSkillsText?.() ?? 'No skills available.'),
 })
 
 // ── /help — show available commands ─────────────────────────────────────────
@@ -492,9 +516,7 @@ registerCommand({
 registerCommand({
   name: 'sessions',
   description: 'List saved sessions for this project',
-  handler: (_args, _ctx) => {
-    return text('__LIST_SESSIONS__')
-  },
+  handler: (_args, ctx) => text(ctx.getSessionsText?.() ?? 'No saved sessions found.'),
 })
 
 // ── /status — show session status ───────────────────────────────────────────

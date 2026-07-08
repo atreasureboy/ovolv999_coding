@@ -539,6 +539,36 @@ async function runRepl(
   const input = new InputHandler()
   const history: OpenAIMessage[] = resumedHistory ? [...resumedHistory] : []
 
+  const getSkillsText = (): string => {
+    if (skills.size === 0) return 'No skills available.'
+    const bySource = new Map<string, Skill[]>()
+    for (const s of skills.values()) {
+      const list = bySource.get(s.source) ?? []
+      list.push(s)
+      bySource.set(s.source, list)
+    }
+    const lines: string[] = []
+    for (const [source, list] of bySource) {
+      lines.push(`-- ${source} --`)
+      for (const s of list) {
+        lines.push(`/${s.name.padEnd(16)} ${s.description}`)
+      }
+    }
+    return lines.join('\n')
+  }
+
+  const getSessionsText = (): string => {
+    const sessions = listSessions(cwd)
+    if (sessions.length === 0) return 'No saved sessions found.'
+    const lines = [`Found ${sessions.length} session(s):`]
+    for (const s of sessions.slice(0, 10)) {
+      lines.push(`  ${s.name}  ${s.messages} msgs`)
+    }
+    if (sessions.length > 10) lines.push(`  ... and ${sessions.length - 10} more`)
+    lines.push('', 'Resume with: ovolv999 --continue  or  ovolv999 --resume <session_name>')
+    return lines.join('\n')
+  }
+
   renderer.info(`Commands: /compact /cost /context /mode /doctor /rewind /tasks /diff /commit /init /help`)
   renderer.info(`ESC to interrupt · Ctrl+D to exit`)
 
@@ -694,34 +724,25 @@ async function runRepl(
       const { getCommand: _getCmd, listCommands: _listCmds } = await import('../src/commands/index.js')
       const exactCmd = _getCmd(partialName)
       if (!exactCmd && partialName && !trimmed.includes(' ')) {
-        // Check old handler for skills first
-        const oldResult = handleBuiltin(trimmed, history, engine, renderer, cwd, skills)
-        if (oldResult === true || oldResult === 'exit' || typeof oldResult === 'object') {
-          if (oldResult === 'exit') {
-            if (sessionDir) saveSession(sessionDir, history)
-            input.close()
-            break
-          }
-          if (typeof oldResult === 'object') {
-            const { skill, args } = oldResult
-            const expandedPrompt = expandSkillPrompt(skill, args)
-            renderer.info('Running skill: /' + skill.name + (args ? ' ' + args : ''))
-            hookRunner.runUserPromptSubmit(trimmed)
-            renderer.humanPrompt(expandedPrompt.split('\n')[0] + (expandedPrompt.includes('\n') ? ' ...' : ''))
-            updateProgressLog(cwd, 'running', '/' + skill.name)
-            await runTask(expandedPrompt, [...history], Date.now())
-            updateProgressLog(cwd, 'idle', 'waiting for next task')
-          }
-          continue
-        }
         // Show matching commands
         const allCmds = _listCmds()
         const matches = allCmds.filter(c => c.name.startsWith(partialName) || (c.aliases ?? []).some(a => a.startsWith(partialName)))
+        const skillMatches = [...skills.values()].filter(s => s.name.startsWith(partialName))
         if (matches.length > 0) {
           renderer.newline()
           process.stdout.write('  \x1b[2mDid you mean?\x1b[0m\n')
           for (const m of matches) {
             process.stdout.write('  \x1b[36m/' + m.name.padEnd(16) + '\x1b[0m \x1b[2m' + m.description + '\x1b[0m\n')
+          }
+          for (const s of skillMatches) {
+            process.stdout.write('  \x1b[36m/' + s.name.padEnd(16) + '\x1b[0m \x1b[2m' + s.description + '\x1b[0m\n')
+          }
+          renderer.newline()
+        } else if (skillMatches.length > 0) {
+          renderer.newline()
+          process.stdout.write('  \x1b[2mDid you mean?\x1b[0m\n')
+          for (const s of skillMatches) {
+            process.stdout.write('  \x1b[36m/' + s.name.padEnd(16) + '\x1b[0m \x1b[2m' + s.description + '\x1b[0m\n')
           }
           renderer.newline()
         } else {
@@ -744,6 +765,8 @@ async function runRepl(
         runPrompt: (p: string) => {
           pendingPrompt = p
         },
+        getSkillsText,
+        getSessionsText,
       }
 
       const slashResult = await dispatchSlashCommand(trimmed, slashCtx)

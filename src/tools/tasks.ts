@@ -30,6 +30,7 @@ function getManager(ctx: ToolContext): BackgroundTaskManager | undefined {
 
 export class TaskCreateTool implements Tool {
   name = 'TaskCreate'
+  metadata = { mutatesState: true, longRunning: true, concurrencySafe: false }
 
   definition: ToolDefinition = {
     type: 'function',
@@ -104,6 +105,7 @@ The task runs detached. Use TaskGet with block=true to wait for completion.`,
 
 export class TaskGetTool implements Tool {
   name = 'TaskGet'
+  metadata = { readOnly: true, longRunning: true, concurrencySafe: true }
 
   definition: ToolDefinition = {
     type: 'function',
@@ -187,6 +189,7 @@ export class TaskGetTool implements Tool {
 
 export class TaskListTool implements Tool {
   name = 'TaskList'
+  metadata = { readOnly: true, concurrencySafe: true }
 
   definition: ToolDefinition = {
     type: 'function',
@@ -222,6 +225,7 @@ export class TaskListTool implements Tool {
 
 export class TaskUpdateTool implements Tool {
   name = 'TaskUpdate'
+  metadata = { mutatesState: true, concurrencySafe: false }
 
   definition: ToolDefinition = {
     type: 'function',
@@ -286,6 +290,7 @@ export class TaskUpdateTool implements Tool {
 
 export class TaskStopTool implements Tool {
   name = 'TaskStop'
+  metadata = { mutatesState: true, concurrencySafe: false }
 
   definition: ToolDefinition = {
     type: 'function',

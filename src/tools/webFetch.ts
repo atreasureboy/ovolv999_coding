@@ -45,6 +45,7 @@ function htmlToText(html: string): string {
 
 export class WebFetchTool implements Tool {
   name = 'WebFetch'
+  metadata = { readOnly: true, concurrencySafe: true, requiresNetwork: true }
 
   definition: ToolDefinition = {
     type: 'function',

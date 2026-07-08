@@ -13,8 +13,7 @@
     "declarationMap": true,
     "sourceMap": true,
     "resolveJsonModule": true,
-    "allowImportingTsExtensions": false,
-    "baseUrl": "."
+    "allowImportingTsExtensions": false
   },
   "include": ["bin/**/*.ts", "src/**/*.ts", "tests/**/*.ts"],
   "exclude": ["node_modules", "dist"]

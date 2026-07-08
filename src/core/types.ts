@@ -6,6 +6,7 @@ import type { EpisodicMemory } from './episodicMemory.js'
 import type { AgentConfig } from './agentPresets.js'
 import type { BackgroundTaskManager } from './backgroundTaskManager.js'
 import type { FileHistory } from './fileHistory.js'
+import type { PermissionManager } from './permissionSystem.js'
 
 // OpenAI-compatible tool call format
 export interface ToolCall {
@@ -43,8 +44,22 @@ export interface ToolResult {
   isError: boolean
 }
 
+export interface ToolMetadata {
+  /** Safe to expose in plan/read-only mode. */
+  readOnly?: boolean
+  /** Default concurrency behavior when isConcurrencySafe is not implemented. */
+  concurrencySafe?: boolean
+  /** Tool may mutate workspace files or local state. */
+  mutatesState?: boolean
+  /** Tool can run for a long time or create async work. */
+  longRunning?: boolean
+  /** Tool may access network resources. */
+  requiresNetwork?: boolean
+}
+
 export interface Tool {
   name: string
+  metadata?: ToolMetadata
   definition: ToolDefinition
   execute(input: Record<string, unknown>, context: ToolContext): Promise<ToolResult>
   /**
@@ -59,6 +74,8 @@ export interface Tool {
 export interface ToolContext {
   cwd: string
   permissionMode: 'auto' | 'ask' | 'deny'
+  /** Unified permission manager used by the engine before tool execution. */
+  permissionManager?: PermissionManager
   /** AbortSignal — tools should honour this to support Ctrl+C cancellation */
   signal?: AbortSignal
   /** Progress update function for long-running tools */
@@ -138,6 +155,8 @@ export interface EngineConfig {
   maxIterations: number
   cwd: string
   permissionMode: 'auto' | 'ask' | 'deny'
+  /** Unified permission manager; if omitted the engine creates one from permissionMode. */
+  permissionManager?: PermissionManager
   systemPrompt?: string
   /** Extra tools to inject (e.g. MCP tools) */
   extraTools?: Tool[]

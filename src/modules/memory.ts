@@ -22,6 +22,7 @@ import { str } from '../core/strings.js'
 function createMemoryWriteTool(semantic: SemanticMemory): Tool {
   return {
     name: 'memory_write',
+    metadata: { mutatesState: true, concurrencySafe: false },
     definition: {
       type: 'function',
       function: {
@@ -99,6 +100,7 @@ Higher-priority sources override lower ones on conflict.`,
 function createMemorySearchTool(semantic: SemanticMemory): Tool {
   return {
     name: 'memory_search',
+    metadata: { readOnly: true, concurrencySafe: true },
     definition: {
       type: 'function',
       function: {
@@ -163,6 +165,7 @@ Use this to recall past learnings, user preferences, or project conventions that
 function createMemoryRecallTool(episodic: EpisodicMemory): Tool {
   return {
     name: 'memory_recall',
+    metadata: { readOnly: true, concurrencySafe: true },
     definition: {
       type: 'function',
       function: {

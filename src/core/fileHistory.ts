@@ -45,6 +45,7 @@ export class FileHistory {
   private historyDir: string
   /** filePath → array of backup paths (chronological, [0] = original) */
   private edits = new Map<string, string[]>()
+  private versionCounter = 0
 
   constructor(sessionDir: string) {
     this.historyDir = join(sessionDir, 'file-history')
@@ -72,7 +73,7 @@ export class FileHistory {
       mkdirSync(dir, { recursive: true })
 
       const timestamp = Date.now()
-      const backupPath = join(dir, `v${timestamp}`)
+      const backupPath = join(dir, `v${timestamp}_${this.versionCounter++}`)
       copyFileSync(absPath, backupPath) // atomic file-level copy, no heap pressure
 
       // Preserve file permissions on the backup

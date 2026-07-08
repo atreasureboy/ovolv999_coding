@@ -167,6 +167,7 @@ function formatResults(results: SearchResult[], query: string, backend: string):
 
 export class WebSearchTool implements Tool {
   name = 'WebSearch'
+  metadata = { readOnly: true, concurrencySafe: true, requiresNetwork: true }
 
   definition: ToolDefinition = {
     type: 'function',

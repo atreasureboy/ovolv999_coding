@@ -51,6 +51,7 @@ function escapeRegex(s: string): string {
 
 export class ShellSessionTool implements Tool {
   name = 'ShellSession'
+  metadata = { mutatesState: true, concurrencySafe: true, longRunning: true }
 
   definition: ToolDefinition = {
     type: 'function',

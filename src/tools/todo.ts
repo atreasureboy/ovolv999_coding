@@ -39,6 +39,7 @@ function renderTodoList(): string {
 
 export class TodoWriteTool implements Tool {
   name = 'TodoWrite'
+  metadata = { mutatesState: true, concurrencySafe: false }
 
   definition: ToolDefinition = {
     type: 'function',

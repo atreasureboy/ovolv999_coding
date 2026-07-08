@@ -7,7 +7,7 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript)](https://www.typescriptlang.org/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/Node-%3E%3D20-339933?logo=node.js)](https://nodejs.org/)
-[![Tests](https://img.shields.io/badge/Tests-66%20passed-brightgreen)]()
+[![Tests](https://img.shields.io/badge/Tests-311%20passed-brightgreen)]()
 
 > `ovolv999 "任何你需要它完成的任务"`
 
@@ -29,7 +29,10 @@ ovolv999 是一个**纯 Agent 基座框架**，仿 Claude Code，核心设计参
 - **调用链追踪** — 子 agent spawn 深度追踪（max 5），防递归 + 审计
 - **Skill 懒加载** — Boot 时注入技能索引，LLM 按需通过 `load_skill` 加载
 - **生命周期 Hooks** — 6 种：PreToolCall / PostToolCall / OnError / OnComplete / OnContextOverflow / UserPromptSubmit
-- **并发调度** — 安全工具并行 (Promise.all)，状态工具串行，自动分区
+- **工具元信息** — Tool 自声明 readOnly / concurrencySafe / mutatesState / longRunning / requiresNetwork，运行时据此过滤与调度
+- **统一权限管理** — PermissionManager 接入 Engine 执行路径，`/permissions` 可查看、切换模式、添加 allow/deny 规则
+- **并发调度** — 只读/安全工具并行 (Promise.all)，状态工具串行，支持 per-input `isConcurrencySafe`
+- **后台任务生命周期** — Bash 后台任务统一进入 TaskCreate/TaskGet/TaskList/TaskStop 管理
 - **流式引擎** — Streaming LLM API，tool_call 解析 → 分区调度 → 结果注入 → 循环
 - **上下文预算** — 统一百分比阈值 (70% warn / 85% compact)，**含系统提示词 token**，tool_call 对保护
 - **API 重试** — SDK 指数退避 5 次重试 (429/5xx/ECONNRESET)，120s 超时
@@ -40,7 +43,7 @@ ovolv999 是一个**纯 Agent 基座框架**，仿 Claude Code，核心设计参
 ```
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║                        ovolv999 — 统一 Harness + 模块化 Agent 基座             ║
-║               42 files · 8,300+ lines · tsc 0 · eslint 0 · 66 tests          ║
+║               build OK · eslint OK · 15 test files · 311 tests passed        ║
 ║               Runtime deps: openai · glob · zod (仅 3 个)                     ║
 ║               API retry: 5x exponential backoff · 120s timeout                ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
@@ -81,16 +84,16 @@ ovolv999 是一个**纯 Agent 基座框架**，仿 Claude Code，核心设计参
 ║  │  Abort: softAbort(ESC) / hardAbort(Ctrl+C)                            │   ║
 ║  └────────────────────────────────────────────────────────────────────────┘   ║
 ║                                                                              ║
-║  ┌─ Modules (4) ──────┐  ┌─ Tools (14) ────────┐  ┌─ Memory ───────────┐    ║
-║  │ memory             │  │ Bash / Read / Write  │  │ Semantic:          │    ║
-║  │  ├ boot: 相关性检索│  │ Edit / Glob / Grep   │  │  关键词去重 +       │    ║
-║  │  ├ tools: write/   │  │ TodoWrite / WebFetch │  │  来源优先级冲突解决  │    ║
-║  │  │   search/recall │  │ WebSearch / Agent    │  │ Episodic:          │    ║
-║  │  └ onToolCall:     │  │ load_skill           │  │  成功+失败工具轨迹  │    ║
-║  │     episodic 写入  │  │ memory_write         │  │ Boot: 相关性 top-10│    ║
-║  │ critic             │  │ memory_search        │  │ Exit: session 整合  │    ║
-║  │  └ onIteration:    │  │ memory_recall        │  └────────────────────┘    ║
-║  │     每 N 轮纠错    │  │ TmuxSession / Shell  │                             ║
+║  ┌─ Modules (4) ──────┐  ┌─ Tools (25) ────────┐  ┌─ Memory ───────────┐    ║
+║  │ memory             │  │ Bash / file tools     │  │ Semantic:          │    ║
+║  │  ├ boot: 相关性检索│  │ Web / Agent / Skill   │  │  关键词去重 +       │    ║
+║  │  ├ tools: write/   │  │ Task lifecycle tools  │  │  来源优先级冲突解决  │    ║
+║  │  │   search/recall │  │ AskUser / Plan / Sleep│  │ Episodic:          │    ║
+║  │  └ onToolCall:     │  │ Notebook / Tmux/Shell │  │  成功+失败工具轨迹  │    ║
+║  │     episodic 写入  │  │ 3 Memory tools        │  │ Boot: 相关性 top-10│    ║
+║  │ critic             │  │ metadata-driven       │  │ Exit: session 整合  │    ║
+║  │  └ onIteration:    │  │ scheduling/filtering  │  └────────────────────┘    ║
+║  │     每 N 轮纠错    │  │                       │                             ║
 ║  │ workspace          │  └──────────────────────┘  ┌─ Communication ─────┐   ║
 ║  │  └ boot: sessionDir│                              │ Agent (invoke):     │   ║
 ║  │ reflection         │  ┌─ Verification Gate ───┐   │  AgentConfig 驱动   │   ║
@@ -322,27 +325,33 @@ ovolv999/
 ├── bin/
 │   └── ovogogogo.ts           # CLI + REPL + 模块注册 + session 整合
 ├── src/
-│   ├── core/                           # 引擎核心 (10 files)
+│   ├── core/                           # 引擎核心
 │   │   ├── engine.ts                   # 统一 Harness — Boot Sequence + Module 集成
-│   │   ├── types.ts                    # EngineConfig / AgentConfig / IHookRunner
+│   │   ├── types.ts                    # EngineConfig / Tool metadata / IHookRunner
 │   │   ├── module.ts                   # AgentModule 接口 (4 生命周期钩子)
 │   │   ├── moduleRegistry.ts           # 工厂注册 + 依赖解析 + 环检测
 │   │   ├── agentPresets.ts             # 4 preset + resolveAgentConfig + applyAgentToConfig
 │   │   ├── compact.ts                  # 上下文压缩 + strategy + tool_call 对保护
 │   │   ├── semanticMemory.ts           # 语义记忆 + 来源优先级 + hash 去重
 │   │   ├── episodicMemory.ts           # 过程记忆 (成功+失败轨迹)
+│   │   ├── permissionSystem.ts         # 权限模式 + allow/deny 规则
+│   │   ├── backgroundTaskManager.ts    # 后台任务生命周期
+│   │   ├── fileHistory.ts              # 文件编辑历史 / rewind
+│   │   ├── queryStateMachine.ts        # 显式查询状态机
+│   │   ├── costTracker.ts              # token/cost 统计
 │   │   ├── eventLog.ts                 # 不可变审计流
 │   │   └── strings.ts                  # str() 安全转换 helper
-│   ├── modules/                        # 内置能力模块 (4 files)
+│   ├── modules/                        # 内置能力模块
 │   │   ├── memory.ts                   # 相关性检索 + 3 memory tools + episodic 写入
 │   │   ├── critic.ts                   # 每 N 轮 LLM 纠错
 │   │   ├── workspace.ts                # sessionDir 注入
 │   │   └── reflection.ts               # per-turn 知识提取 + session-level 整合
-│   ├── tools/                          # 工具层 (14 files)
+│   ├── tools/                          # 工具层
 │   │   ├── agent.ts                    # AgentConfig 驱动 + 验证闸门 + 调用链追踪
 │   │   ├── loadSkill.ts                # 技能懒加载 + 权限检查
-│   │   ├── bash.ts                     # 跨平台 shell + 后台模式
-│   │   └── ...                         # Read/Write/Edit/Glob/Grep/Todo/Web/Session
+│   │   ├── bash.ts                     # 跨平台 shell + 后台任务接入
+│   │   ├── tasks.ts                    # TaskCreate/Get/List/Update/Stop
+│   │   └── ...                         # Read/Write/Edit/Glob/Grep/Todo/Web/Session/Notebook
 │   ├── prompts/                        # 提示词 (3 files)
 │   │   ├── system.ts                   # 系统提示词组装 + skill 索引注入
 │   │   ├── tools.ts                    # 工具描述常量
@@ -359,11 +368,13 @@ ovolv999/
 │   │   └── loader.ts                   # frontmatter 解析 + formatSkillIndex
 │   └── memory/                         # 记忆桥接
 │       └── index.ts                    # SemanticMemory → 系统提示词注入
-├── tests/                              # 66 tests
-│   ├── engine.test.ts                  # partitionToolCalls + compact + critic (26)
-│   ├── presets.test.ts                 # AgentConfig + preset 解析 + applyAgent (20)
-│   ├── modules.test.ts                 # SemanticMemory + EpisodicMemory + ModuleRegistry (16)
-│   └── compact.test.ts                 # token 估算 + 策略 + 消息结构 (4)
+├── tests/                              # 15 test files · 311 tests
+│   ├── engine.test.ts                  # partitionToolCalls + compact + critic
+│   ├── presets.test.ts                 # AgentConfig + preset 解析 + applyAgent
+│   ├── modules.test.ts                 # SemanticMemory + EpisodicMemory + ModuleRegistry
+│   ├── permissionSystem.test.ts        # 权限模式 + 规则匹配
+│   ├── backgroundTaskManager.test.ts   # 后台任务生命周期
+│   └── ...                             # modes / cost / fileHistory / query state / tools
 └── package.json                        # 3 runtime deps: openai / glob / zod
 ```
 
@@ -384,7 +395,9 @@ ovolv999/
 | 生命周期 Hooks | 6 种 Hook 类型 |
 | Trajectory 捕获 | `boot_context` + `invoke_sent/completed` + EventLog |
 | Context 压缩 + 策略 | 统一 70%/85% + **含系统提示词 token** + tool_call 对保护 |
-| Context 压缩 + 策略 | 统一 70%/85% + tool_call 对保护 |
+| Tool metadata | `readOnly` / `concurrencySafe` / `mutatesState` / `longRunning` / `requiresNetwork` |
+| 权限系统 | `PermissionManager` 接入 Engine + `/permissions` 运行时规则 |
+| 后台任务 | `TaskCreate/Get/List/Update/Stop` + Bash background 统一接入 |
 | API 重试 | SDK maxRetries=5 指数退避 (429/5xx/ECONNRESET) + 120s timeout |
 | Module-driven Tools | MemoryModule 通过 `boot().tools` 提供 3 个工具 |
 

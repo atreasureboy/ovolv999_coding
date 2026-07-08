@@ -58,6 +58,7 @@ function chunkText(text: string, size = 50): string[] {
 
 export class TmuxSessionTool implements Tool {
   name = 'TmuxSession'
+  metadata = { mutatesState: true, concurrencySafe: true, longRunning: true }
 
   definition: ToolDefinition = {
     type: 'function',

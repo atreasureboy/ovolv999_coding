@@ -43,6 +43,7 @@ type EditMode = 'replace' | 'insert' | 'delete'
 
 export class NotebookEditTool implements Tool {
   name = 'NotebookEdit'
+  metadata = { mutatesState: true, concurrencySafe: false }
 
   definition: ToolDefinition = {
     type: 'function',

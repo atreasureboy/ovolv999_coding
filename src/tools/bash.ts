@@ -12,7 +12,6 @@ import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/type
 import { BASH_DESCRIPTION } from '../prompts/tools.js'
 import { mkdirSync, accessSync, constants } from 'fs'
 import { join } from 'path'
-import { checkCommandPermission } from '../core/riskClassifier.js'
 
 const MAX_OUTPUT_LENGTH = 30_000
 const DEFAULT_TIMEOUT_MS = 1_800_000  // 30 min — long-running commands default
@@ -58,6 +57,11 @@ function truncateOutput(output: string, maxLen: number): string {
 
 export class BashTool implements Tool {
   name = 'Bash'
+  metadata = {
+    concurrencySafe: false,
+    longRunning: true,
+    mutatesState: true,
+  }
 
   definition: ToolDefinition = {
     type: 'function',
@@ -143,20 +147,10 @@ export class BashTool implements Tool {
   }
 
   async execute(input: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
-    const { command, timeout, run_in_background, follow_mode } = input as unknown as BashInput
+    const { command, timeout, run_in_background, description, follow_mode } = input as unknown as BashInput
 
     if (!command || typeof command !== 'string') {
       return { content: 'Error: command is required and must be a string', isError: true }
-    }
-
-    // Risk classification (only active in 'ask' or 'deny' permission mode; 'auto' = no checks)
-    const riskCheck = checkCommandPermission(command, context.permissionMode)
-    if (!riskCheck.allowed) {
-      return { content: riskCheck.reason, isError: true }
-    }
-    if ('warning' in riskCheck) {
-      // In ask mode, warn but proceed (CLI single-user, no interactive approval gate)
-      // The warning is visible in the renderer output
     }
 
     const timeoutMs = Math.min(
@@ -166,6 +160,20 @@ export class BashTool implements Tool {
 
     // ── Background mode (fire-and-forget with auto log redirect) ─────────────
     if (run_in_background) {
+      if (context.backgroundTaskManager) {
+        const id = context.backgroundTaskManager.createTask(command, {
+          description,
+          cwd: context.cwd,
+          sessionDir: context.sessionDir,
+          metadata: { source: 'Bash.run_in_background' },
+        })
+        const task = context.backgroundTaskManager.getTask(id)
+        return {
+          content: `Background task created: ${id}\nCommand: ${command}\nPID: ${task?.pid ?? 'unknown'}\nStatus: running\n\nUse TaskGet with task_id="${id}" or /tasks to check status and output.`,
+          isError: false,
+        }
+      }
+
       // Auto-redirect stdout/stderr to a session-scoped log file so output
       // is never lost even if the caller forgets to add `> file 2>&1`.
       const bgLogDir = context.sessionDir ? join(context.sessionDir, '.bg_logs') : join(context.cwd, '.bg_logs')

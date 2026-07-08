@@ -23,6 +23,7 @@ export interface EditFileInput {
 
 export class FileEditTool implements Tool {
   name = 'Edit'
+  metadata = { mutatesState: true, concurrencySafe: false }
 
   definition: ToolDefinition = {
     type: 'function',

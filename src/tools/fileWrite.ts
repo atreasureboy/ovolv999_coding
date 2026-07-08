@@ -17,6 +17,7 @@ export interface WriteFileInput {
 
 export class FileWriteTool implements Tool {
   name = 'Write'
+  metadata = { mutatesState: true, concurrencySafe: false }
 
   definition: ToolDefinition = {
     type: 'function',

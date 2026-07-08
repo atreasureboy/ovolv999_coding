@@ -27,6 +27,7 @@ interface SkillEntry {
 export function createLoadSkillTool(skills: Map<string, SkillEntry>): Tool {
   return {
     name: 'load_skill',
+    metadata: { readOnly: true, concurrencySafe: true },
     definition: {
       type: 'function',
       function: {

@@ -19,6 +19,7 @@ const MAX_SLEEP_MS = 600_000 // 10 minutes — prevent infinite sleeps
 
 export class SleepTool implements Tool {
   name = 'Sleep'
+  metadata = { readOnly: true, longRunning: true, concurrencySafe: true }
 
   definition: ToolDefinition = {
     type: 'function',

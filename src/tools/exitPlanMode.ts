@@ -17,6 +17,7 @@ import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/type
 
 export class ExitPlanModeTool implements Tool {
   name = 'ExitPlanMode'
+  metadata = { readOnly: true, concurrencySafe: false }
 
   definition: ToolDefinition = {
     type: 'function',

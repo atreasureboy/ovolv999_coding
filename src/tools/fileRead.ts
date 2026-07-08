@@ -19,6 +19,7 @@ const MAX_FILE_SIZE_BYTES = 25_000_000 // 25MB — refuse larger, point to offse
 
 export class FileReadTool implements Tool {
   name = 'Read'
+  metadata = { readOnly: true, concurrencySafe: true }
 
   definition: ToolDefinition = {
     type: 'function',

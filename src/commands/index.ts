@@ -27,6 +27,9 @@ export interface SlashCommandContext {
   setHistory: (msgs: OpenAIMessage[]) => void
   /** Inject a prompt into the conversation (for /commit, /review, etc.) */
   runPrompt: (prompt: string) => void
+  /** Optional REPL-provided dynamic text renderers */
+  getSkillsText?: () => string
+  getSessionsText?: () => string
 }
 
 export type SlashCommandResult =
