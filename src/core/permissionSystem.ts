@@ -210,6 +210,13 @@ export class PermissionManager {
   getRules(): PermissionRule[] { return [...this.rules] }
 
   addRule(rule: PermissionRule): void {
+    if (this.rules.some((existing) =>
+      existing.toolName === rule.toolName &&
+      existing.ruleContent === rule.ruleContent &&
+      existing.behavior === rule.behavior
+    )) {
+      return
+    }
     this.rules.push(rule)
   }
 

@@ -26,7 +26,7 @@
  *   UserPromptSubmit:  OVOGO_PROMPT
  */
 
-import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'fs'
+import { readFileSync, existsSync, mkdirSync, writeFileSync, renameSync } from 'fs'
 import { resolve, join, dirname } from 'path'
 import { homedir } from 'os'
 import type { PermissionMode, PermissionRule } from '../core/permissionSystem.js'
@@ -188,7 +188,9 @@ export function saveProjectSettings(cwd: string, patch: OvogoSettings): OvogoSet
   }
 
   mkdirSync(dirname(projectPath), { recursive: true })
-  writeFileSync(projectPath, JSON.stringify(next, null, 2) + '\n', 'utf8')
+  const tmpPath = projectPath + '.tmp'
+  writeFileSync(tmpPath, JSON.stringify(next, null, 2) + '\n', 'utf8')
+  renameSync(tmpPath, projectPath)
   return next
 }
 

@@ -45,7 +45,7 @@ registerCommand({
   description: 'Clear conversation history',
   handler: (_args, ctx) => {
     ctx.setHistory([])
-    return text('Conversation history cleared.')
+    return { type: 'clear-history' }
   },
 })
 

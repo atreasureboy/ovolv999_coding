@@ -156,6 +156,15 @@ describe('PermissionManager', () => {
     expect(mgr.check('Bash', { command: 'docker build' }, false)).toBe('allow')
   })
 
+  it('deduplicates identical rules', () => {
+    const mgr = new PermissionManager()
+    mgr.addRule({ toolName: 'Bash', ruleContent: 'git *', behavior: 'allow', source: 'user' })
+    mgr.addRule({ toolName: 'Bash', ruleContent: 'git *', behavior: 'allow', source: 'project' })
+    mgr.addRule({ toolName: 'Bash', ruleContent: 'git *', behavior: 'deny', source: 'user' })
+
+    expect(mgr.getRules()).toHaveLength(2)
+  })
+
   it('deny rule overrides mode', () => {
     const mgr = new PermissionManager()
     mgr.setMode('bypassPermissions')

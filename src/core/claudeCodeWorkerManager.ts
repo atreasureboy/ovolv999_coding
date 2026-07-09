@@ -27,10 +27,17 @@ export interface ClaudeWorkerWaitOptions {
   timeoutMs?: number
   intervalMs?: number
   lines?: number
+  signal?: AbortSignal
+}
+
+export interface ClaudeWorkerWaitResult {
+  matched: boolean
+  output: string
+  aborted?: boolean
 }
 
 const DEFAULT_CLAUDE_COMMAND = 'claude'
-const DEFAULT_DONE_PATTERN = '\\[DONE\\]'
+const DEFAULT_DONE_PATTERN = '^\\[DONE\\]$'
 const CLAUDE_ENV_KEYS = [
   'ANTHROPIC_AUTH_TOKEN',
   'ANTHROPIC_API_KEY',
@@ -82,6 +89,29 @@ export function buildClaudeWorkerPrompt(task: string, instructions?: string): st
     'Files:',
     'Tests:',
   ].filter(Boolean).join('\n')
+}
+
+function compilePattern(pattern: string): RegExp {
+  try {
+    return new RegExp(pattern, 'm')
+  } catch {
+    throw new Error('Invalid regex pattern: ' + pattern)
+  }
+}
+
+function delay(ms: number, signal?: AbortSignal): Promise<'done' | 'aborted'> {
+  if (signal?.aborted) return Promise.resolve('aborted')
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve('done')
+    }, ms)
+    const onAbort = () => {
+      clearTimeout(timer)
+      resolve('aborted')
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
 }
 
 async function defaultTmuxRunner(args: string[]): Promise<TmuxResult> {
@@ -171,18 +201,22 @@ export class ClaudeCodeWorkerManager {
     return stdout.trim()
   }
 
-  async waitFor(options: ClaudeWorkerWaitOptions): Promise<{ matched: boolean; output: string }> {
+  async waitFor(options: ClaudeWorkerWaitOptions): Promise<ClaudeWorkerWaitResult> {
     const pattern = options.pattern ?? DEFAULT_DONE_PATTERN
     const timeoutMs = Math.max(1, options.timeoutMs ?? 120_000)
     const intervalMs = Math.max(100, options.intervalMs ?? 2_000)
     const deadline = Date.now() + timeoutMs
-    const regex = new RegExp(pattern)
+    const regex = compilePattern(pattern)
     let output = ''
 
     while (Date.now() <= deadline) {
+      if (options.signal?.aborted) return { matched: false, output, aborted: true }
       output = await this.capture(options.session, options.lines ?? 120)
       if (regex.test(output)) return { matched: true, output }
-      await new Promise((resolve) => setTimeout(resolve, intervalMs))
+      const remainingMs = deadline - Date.now()
+      if (remainingMs <= 0) break
+      const state = await delay(Math.min(intervalMs, remainingMs), options.signal)
+      if (state === 'aborted') return { matched: false, output, aborted: true }
     }
 
     return { matched: false, output }

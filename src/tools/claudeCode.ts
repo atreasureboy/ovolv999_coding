@@ -6,9 +6,19 @@ function defaultSession(input: Record<string, unknown>): string {
   return str(input.session, 'ovogo-claude-worker')
 }
 
+function positiveNumber(value: unknown, fallback: number): number {
+  const n = Number(value)
+  return Number.isFinite(n) && n > 0 ? n : fallback
+}
+
+function nonNegativeNumber(value: unknown, fallback: number): number {
+  const n = Number(value)
+  return Number.isFinite(n) && n >= 0 ? n : fallback
+}
+
 export class ClaudeCodeTool implements Tool {
   name = 'ClaudeCode'
-  metadata = { mutatesState: true, longRunning: true, concurrencySafe: true }
+  metadata = { mutatesState: true, longRunning: true, concurrencySafe: false }
 
   constructor(private readonly manager = new ClaudeCodeWorkerManager()) {}
 
@@ -79,7 +89,8 @@ Use narrow tasks with explicit file scope and required tests. ClaudeCode workers
   }
 
   isConcurrencySafe(input: Record<string, unknown>): boolean {
-    return String(input.action) !== 'stop'
+    const action = String(input.action)
+    return action === 'capture' || action === 'list'
   }
 
   async execute(input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
@@ -94,7 +105,7 @@ Use narrow tasks with explicit file scope and required tests. ClaudeCode workers
         case 'capture':
           return await this.capture(input)
         case 'wait':
-          return await this.wait(input)
+          return await this.wait(input, ctx)
         case 'list':
           return await this.list()
         case 'stop':
@@ -139,8 +150,9 @@ Use narrow tasks with explicit file scope and required tests. ClaudeCode workers
       const waited = await this.manager.waitFor({
         session: result.session,
         pattern: str(input.pattern) || undefined,
-        timeoutMs: Number(input.timeoutMs ?? 120_000),
-        lines: Number(input.lines ?? 120),
+        timeoutMs: positiveNumber(input.timeoutMs, 120_000),
+        lines: nonNegativeNumber(input.lines, 120),
+        signal: ctx.signal,
       })
       return {
         content: [
@@ -168,27 +180,32 @@ Use narrow tasks with explicit file scope and required tests. ClaudeCode workers
     const session = defaultSession(input)
     const text = str(input.text)
     if (!text) return { content: 'Error: text is required for send.', isError: true }
+    if (!await this.manager.sessionExists(session)) return this.sessionNotFound(session)
     await this.manager.send(session, text)
     return { content: `Sent follow-up to ClaudeCode worker: ${session}`, isError: false }
   }
 
   private async capture(input: Record<string, unknown>): Promise<ToolResult> {
     const session = defaultSession(input)
-    const output = await this.manager.capture(session, Number(input.lines ?? 80))
+    if (!await this.manager.sessionExists(session)) return this.sessionNotFound(session)
+    const output = await this.manager.capture(session, nonNegativeNumber(input.lines, 80))
     return { content: output || '(no output)', isError: false }
   }
 
-  private async wait(input: Record<string, unknown>): Promise<ToolResult> {
+  private async wait(input: Record<string, unknown>, ctx?: ToolContext): Promise<ToolResult> {
     const session = defaultSession(input)
+    if (!await this.manager.sessionExists(session)) return this.sessionNotFound(session)
     const result = await this.manager.waitFor({
       session,
       pattern: str(input.pattern) || undefined,
-      timeoutMs: Number(input.timeoutMs ?? 120_000),
-      lines: Number(input.lines ?? 120),
+      timeoutMs: positiveNumber(input.timeoutMs, 120_000),
+      lines: nonNegativeNumber(input.lines, 120),
+      signal: ctx?.signal,
     })
     return {
       content: [
-        result.matched ? `Matched completion pattern in ${session}.` : `Timed out waiting for ${session}.`,
+        result.matched ? `Matched completion pattern in ${session}.` :
+          result.aborted ? `Aborted waiting for ${session}.` : `Timed out waiting for ${session}.`,
         '',
         result.output || '(no output)',
       ].join('\n'),
@@ -206,7 +223,15 @@ Use narrow tasks with explicit file scope and required tests. ClaudeCode workers
 
   private async stop(input: Record<string, unknown>): Promise<ToolResult> {
     const session = defaultSession(input)
+    if (!await this.manager.sessionExists(session)) return this.sessionNotFound(session)
     await this.manager.stop(session)
     return { content: `Stopped ClaudeCode worker: ${session}`, isError: false }
+  }
+
+  private sessionNotFound(session: string): ToolResult {
+    return {
+      content: `ClaudeCode worker session not found: ${session}. Use ClaudeCode({ action: "list" }) or /workers list.`,
+      isError: true,
+    }
   }
 }

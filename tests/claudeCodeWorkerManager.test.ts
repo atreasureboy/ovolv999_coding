@@ -126,4 +126,38 @@ describe('ClaudeCodeWorkerManager', () => {
     await expect(manager.capture('worker-1', 20)).resolves.toBe('line1\nline2')
     expect(calls[0]).toEqual(['capture-pane', '-t', 'worker-1', '-p', '-S', '-20'])
   })
+
+  it('waitFor requires the default DONE marker on its own line', async () => {
+    const { runner } = fakeRunner(() => ({ stdout: 'inline [DONE] marker\n' }))
+    const manager = new ClaudeCodeWorkerManager(runner)
+
+    await expect(manager.waitFor({
+      session: 'worker-1',
+      timeoutMs: 10,
+      intervalMs: 100,
+    })).resolves.toMatchObject({ matched: false })
+  })
+
+  it('waitFor aborts through AbortSignal', async () => {
+    const { runner } = fakeRunner(() => ({ stdout: 'still running\n' }))
+    const manager = new ClaudeCodeWorkerManager(runner)
+    const controller = new AbortController()
+    controller.abort()
+
+    await expect(manager.waitFor({
+      session: 'worker-1',
+      timeoutMs: 10_000,
+      signal: controller.signal,
+    })).resolves.toMatchObject({ matched: false, aborted: true })
+  })
+
+  it('waitFor reports invalid regex patterns clearly', async () => {
+    const { runner } = fakeRunner()
+    const manager = new ClaudeCodeWorkerManager(runner)
+
+    await expect(manager.waitFor({
+      session: 'worker-1',
+      pattern: '[',
+    })).rejects.toThrow('Invalid regex pattern')
+  })
 })

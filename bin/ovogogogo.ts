@@ -674,6 +674,7 @@ async function runRepl(
         if (slashResult.type === 'clear-history') {
           history.length = 0
           if (sessionDir) saveSession(sessionDir, history)
+          renderer.info('Conversation history cleared.')
         }
         if (pendingPrompt) {
           renderer.humanPrompt(pendingPrompt.slice(0, 80) + (pendingPrompt.length > 80 ? ' ...' : ''))
