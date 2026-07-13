@@ -6,10 +6,17 @@
  *   - Verification gate: auto-run tsc/lint after sub-agent completes
  *   - Call chain tracking: prevent infinite recursion + audit depth
  *   - Parallel execution (multiple Agent calls in one response)
+ *
+ * Each AgentTool instance carries its OWN (factory, parentConfig,
+ * parentRenderer) binding. Call depth is derived from
+ * `EngineConfig.initialAgentDepth` on the parent config — there's NO
+ * mutable counter on the instance, so concurrent siblings dispatched in
+ * the same Promise.all batch all observe the SAME depth value, and the
+ * global cap (MAX_CALL_DEPTH) holds across nested spawns without any
+ * shared mutable state.
  */
 
-import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/types.js'
-import type { EngineConfig } from '../core/types.js'
+import type { Tool, ToolContext, ToolDefinition, ToolResult, EngineConfig, AgentChildEngineFactory } from '../core/types.js'
 import type { AgentConfig } from '../core/agentPresets.js'
 import { resolveAgentConfig, validateAgentConfig, PRESET_NAMES } from '../core/agentPresets.js'
 import { Renderer } from '../ui/renderer.js'
@@ -19,10 +26,13 @@ import { join } from 'path'
 import { execSync } from 'child_process'
 import { str } from '../core/strings.js'
 
-// ── Call chain tracking (AgentOS §6 pattern) ─────────────────────────────────
-
-let _callDepth = 0
+/** Hard cap on agent call chain depth (across nesting).
+ * The depth is threaded through `EngineConfig.initialAgentDepth` so the
+ * cap stays global across nested sub-agents without storing it on any
+ * shared mutable state. */
 const MAX_CALL_DEPTH = 5
+
+const AGENT_EVENT_LOG_FILE = 'agent_events.ndjson'
 
 // ── Verification gate (AgentOS §6 "No Tuple, No Merge") ─────────────────────
 
@@ -115,16 +125,7 @@ function runVerification(cwd: string): { passed: boolean; output: string } | nul
   return { passed: allPassed, output: results.join('\n\n') }
 }
 
-// ── Engine factory injection ─────────────────────────────────────────────────
-
-type ChildEngine = {
-  runTurn: (msg: string, history: never[]) => Promise<{ result: { output: string; reason: string } }>
-  abort: () => void
-}
-let _engineFactory: ((config: EngineConfig, renderer: unknown) => ChildEngine) | null = null
-let _currentConfig: EngineConfig | null = null
-let _currentRenderer: unknown = null
-const AGENT_EVENT_LOG_FILE = 'agent_events.ndjson'
+// ── Prompt helpers ─────────────────────────────────────────────────────────
 
 function normalizeDelegatedPrompt(prompt: string, config: EngineConfig): string {
   let normalized = prompt
@@ -150,210 +151,41 @@ function appendAgentEvent(config: EngineConfig, event: Record<string, unknown>):
   }
 }
 
-export function registerAgentFactory(
-  factory: ((config: EngineConfig, renderer: unknown) => ChildEngine),
-  config: EngineConfig,
-  renderer: unknown,
-): void {
-  _engineFactory = factory
-  _currentConfig = config
-  _currentRenderer = renderer
-}
-
-// ── runAgentTask ─────────────────────────────────────────────────────────────
-
-async function runAgentTask(
-  description: string,
-  prompt: string,
-  agentConfig: AgentConfig,
-  agentLabel: string,
-  verify: boolean,
-  context: ToolContext,
-): Promise<ToolResult> {
-  if (!_engineFactory || !_currentConfig || !_currentRenderer) {
-    return { content: 'Error: AgentTool not initialized', isError: true }
-  }
-
-  // Call chain depth check (prevent infinite recursion)
-  _callDepth++
-  if (_callDepth > MAX_CALL_DEPTH) {
-    _callDepth--
-    return {
-      content: `Max agent call depth (${MAX_CALL_DEPTH}) exceeded — possible recursion. Call chain: ${_callDepth} levels deep.`,
-      isError: true,
-    }
-  }
-
-  const mainRenderer = _currentRenderer as {
-    agentStart:     (desc: string, type: string) => void
-    agentDone:      (desc: string, success: boolean) => void
-    agentSummary:   (agentType: string, desc: string, summary: string) => void
-    agentHeartbeat: (agentType: string, desc: string, elapsedSec: number) => void
-  }
-  mainRenderer.agentStart(description, agentLabel)
-  const agentStartTime = Date.now()
-
-  // Structured communication event: INVOKE_SENT (with call depth)
-  context.eventLog?.append('invoke_sent', agentLabel, {
-    description,
-    modules: agentConfig.modules ? Object.keys(agentConfig.modules) : [],
-    planMode: agentConfig.identity.planMode ?? false,
-    maxIterations: agentConfig.maxIterations,
-    call_depth: _callDepth,
-    verify_enabled: verify,
-  }, [agentLabel, 'invoke'])
-
-  const paneLabel = `[${agentLabel}] ${description}`
-  const paneSlot = tmuxLayout.acquireSlot(paneLabel)
-  const childRenderer = paneSlot
-    ? Renderer.forFile(paneSlot.logFile)
-    : (_currentRenderer as Renderer)
-
-  const childConfig: EngineConfig = {
-    ..._currentConfig,
-    agent: agentConfig,
-    cwd: context.cwd,
-    hookRunner: undefined,
-    sessionDir: undefined,
-  }
-
-  const childEngine = _engineFactory(childConfig, childRenderer)
-
-  const normalizedPrompt = normalizeDelegatedPrompt(prompt, _currentConfig)
-  const placeholdersReplaced = normalizedPrompt !== prompt
-  const inheritedContextLines = [
-    `- session_dir: ${_currentConfig.sessionDir ?? 'not set'}`,
-    `- call_depth: ${_callDepth}`,
-  ]
-
-  const sessionDirHint = _currentConfig.sessionDir
-    ? `\n- Session dir: ${_currentConfig.sessionDir}`
-    : ''
-  const delegatedPrompt = [
-    '[Delegation Contract]',
-    '- Strictly follow the "Task Instructions" below. Do not change task scope.',
-    '- If user/main agent gave explicit constraints, treat them as highest priority.',
-    '- If information is missing and blocks execution, report what is missing. Do not guess.',
-    '- If SESSION_DIR placeholder appears, use the value from "Inherited Context" below.',
-    sessionDirHint,
-    '',
-    '[Inherited Context]',
-    ...inheritedContextLines,
-    '',
-    '[Task Description]',
-    description,
-    '',
-    '[Task Instructions]',
-    normalizedPrompt,
-  ].join('\n')
-
-  appendAgentEvent(_currentConfig, {
-    event: 'delegation.start',
-    agent_label: agentLabel,
-    description,
-    max_iterations: agentConfig.maxIterations,
-    call_depth: _callDepth,
-    verify_enabled: verify,
-    placeholders_replaced: placeholdersReplaced,
-    prompt_preview: normalizedPrompt.slice(0, 500),
-  })
-
-  if (context.signal) {
-    if (context.signal.aborted) {
-      _callDepth--
-      mainRenderer.agentDone(description, false)
-      if (paneSlot) { tmuxLayout.releaseSlot(paneSlot.slot); childRenderer.destroy() }
-      return { content: `[${agentLabel}] Cancelled (parent task aborted)`, isError: true }
-    }
-    context.signal.addEventListener('abort', () => childEngine.abort(), { once: true })
-  }
-
-  const HEARTBEAT_MS = 2 * 60 * 1000
-  const heartbeatTimer = setInterval(() => {
-    const elapsedSec = Math.round((Date.now() - agentStartTime) / 1000)
-    mainRenderer.agentHeartbeat(agentLabel, description, elapsedSec)
-  }, HEARTBEAT_MS)
-
-  try {
-    const { result } = await childEngine.runTurn(delegatedPrompt, [])
-    clearInterval(heartbeatTimer)
-    const durationMs = Date.now() - agentStartTime
-
-    mainRenderer.agentDone(description, result.reason !== 'error')
-    if (paneSlot) { tmuxLayout.releaseSlot(paneSlot.slot); childRenderer.destroy() }
-
-    // ── Verification Gate (AgentOS "No Tuple, No Merge") ──
-    let verifySection = ''
-    if (verify && result.reason !== 'error' && !agentConfig.identity.planMode) {
-      const verifyResult = runVerification(context.cwd)
-      if (verifyResult) {
-        const icon = verifyResult.passed ? '✓' : '✗'
-        verifySection = `\n\n---\n[Verify Gate] ${icon}\n${verifyResult.output}`
-        context.eventLog?.append('invoke_completed', agentLabel, {
-          description,
-          verified: true,
-          verification_passed: verifyResult.passed,
-        }, [agentLabel, 'verify', verifyResult.passed ? 'passed' : 'failed'])
-      }
-    }
-
-    context.eventLog?.append('invoke_completed', agentLabel, {
-      description,
-      success: result.reason !== 'error',
-      reason: result.reason,
-      duration_ms: durationMs,
-      call_depth: _callDepth,
-      output_preview: result.output.slice(0, 500),
-    }, [agentLabel, 'invoke', result.reason !== 'error' ? 'success' : 'error'])
-
-    _callDepth--
-
-    if (!result.output) {
-      return {
-        content: `[${agentLabel}] "${description}" done (${result.reason}), no text output.${verifySection}`,
-        isError: false,
-      }
-    }
-
-    const summaryLines = result.output
-      .split('\n')
-      .map((l: string) => l.trimEnd())
-      .filter((l: string) => l.trim().length > 0)
-      .slice(0, 8)
-      .join('\n')
-    if (summaryLines) {
-      mainRenderer.agentSummary(agentLabel, description, summaryLines)
-    }
-
-    return {
-      content: `[${agentLabel}] "${description}":\n\n${result.output}${verifySection}`,
-      isError: false,
-    }
-  } catch (err: unknown) {
-    clearInterval(heartbeatTimer)
-    _callDepth--
-    mainRenderer.agentDone(description, false)
-    if (paneSlot) { tmuxLayout.releaseSlot(paneSlot.slot); childRenderer.destroy() }
-    appendAgentEvent(_currentConfig, {
-      event: 'delegation.error',
-      agent_label: agentLabel,
-      description,
-      success: false,
-      duration_ms: Date.now() - agentStartTime,
-      error: (err as Error).message,
-    })
-    return {
-      content: `[${agentLabel}] "${description}" error: ${(err as Error).message}`,
-      isError: true,
-    }
-  }
-}
-
 // ── AgentTool ────────────────────────────────────────────────────────────────
+
+/**
+ * Wire-up for one AgentTool instance. ALL fields are required when wiring
+ * IS supplied: there is no module-level fallback for the factory /
+ * parentConfig / parentRenderer, and no fallback for the depth counter.
+ * The constructor parameter itself is OPTIONAL so `createTools` can build
+ * an AgentTool that returns "not initialized" at action time when no
+ * wiring is provided; the runtime guard in `execute()` fires in that case.
+ */
+export interface AgentToolWiring {
+  factory: AgentChildEngineFactory
+  parentConfig: EngineConfig
+  parentRenderer: unknown
+}
 
 export class AgentTool implements Tool {
   name = 'Agent'
   metadata = { concurrencySafe: true, longRunning: true }
+
+  /** Immutable per-instance wiring — captured once in the constructor and
+   * shared by every parallel Agent call dispatched from this tool. May
+   * be undefined only when the caller bypasses the type system (e.g.
+   * tests using `as any`). `execute()` guards against the runtime
+   * misshape and returns "not initialized" instead of dereferencing
+   * these fields. */
+  private readonly factory: AgentChildEngineFactory | undefined
+  private readonly parentConfig: EngineConfig | undefined
+  private readonly parentRenderer: unknown
+
+  constructor(wiring?: AgentToolWiring) {
+    this.factory = wiring?.factory
+    this.parentConfig = wiring?.parentConfig
+    this.parentRenderer = wiring?.parentRenderer
+  }
 
   definition: ToolDefinition = {
     type: 'function',
@@ -391,16 +223,24 @@ Failed verification includes error details so you can fix immediately.
   }
 
   async execute(input: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+    // Runtime guard: every AgentTool instance must be constructed with a
+    // complete wiring. The TypeScript type makes this a compile error, but
+    // tests / dynamic callers can still bypass it — fail fast with a
+    // descriptive "not initialized" error rather than crashing on a
+    // downstream undefined access.
+    if (!this.factory || !this.parentConfig || !this.parentRenderer) {
+      return {
+        content: 'Error: AgentTool not initialized. Construct AgentTool with a complete AgentToolWiring (factory, parentConfig, parentRenderer).',
+        isError: true,
+      }
+    }
+
     const description = str(input.description, 'subtask')
     const prompt      = str(input.prompt, '')
     const verify      = input.verify === true
 
     if (!prompt.trim()) {
       return { content: 'Error: prompt cannot be empty', isError: true }
-    }
-
-    if (!_engineFactory || !_currentConfig || !_currentRenderer) {
-      return { content: 'Error: AgentTool not initialized. Call registerAgentFactory first.', isError: true }
     }
 
     const presetName = str(input.subagent_type, '') || undefined
@@ -419,6 +259,204 @@ Failed verification includes error details so you can fix immediately.
       agentConfig.maxIterations = Math.min(input.max_iterations, 200)
     }
 
-    return runAgentTask(description, prompt, agentConfig, agentLabel, verify, context)
+    return this.runAgentTask(description, prompt, agentConfig, agentLabel, verify, context)
+  }
+
+  // ── runAgentTask — depth is derived, not mutated ─────────────────────────
+  //
+  // `inheritedDepth` comes from `parentConfig.initialAgentDepth`, which the
+  // parent engine sets when it spawns a child. `nextDepth = inheritedDepth + 1`
+  // is computed at the start of each invocation; there is NO instance-level
+  // mutable counter, so parallel sibling Agent calls dispatched from the
+  // SAME parent config all observe the SAME nextDepth (no shared state to
+  // race on). The child's childConfig then carries `initialAgentDepth =
+  // nextDepth` so the cap propagates through nested spawns.
+
+  private async runAgentTask(
+    description: string,
+    prompt: string,
+    agentConfig: AgentConfig,
+    agentLabel: string,
+    verify: boolean,
+    context: ToolContext,
+  ): Promise<ToolResult> {
+    // The execute() entry point already validated the wiring is present,
+    // so `this.*` are guaranteed defined below.
+    const factory = this.factory!
+    const parentConfig = this.parentConfig!
+    const parentRenderer = this.parentRenderer!
+
+    const inheritedDepth = parentConfig.initialAgentDepth ?? 0
+    const nextDepth = inheritedDepth + 1
+    if (nextDepth > MAX_CALL_DEPTH) {
+      return {
+        content: `Max agent call depth (${MAX_CALL_DEPTH}) exceeded — possible recursion. Call chain: ${nextDepth} levels deep.`,
+        isError: true,
+      }
+    }
+
+    const mainRenderer = parentRenderer as {
+      agentStart:     (desc: string, type: string) => void
+      agentDone:      (desc: string, success: boolean) => void
+      agentSummary:   (agentType: string, desc: string, summary: string) => void
+      agentHeartbeat: (agentType: string, desc: string, elapsedSec: number) => void
+    }
+    mainRenderer.agentStart(description, agentLabel)
+    const agentStartTime = Date.now()
+
+    // Structured communication event: INVOKE_SENT (with call depth)
+    context.eventLog?.append('invoke_sent', agentLabel, {
+      description,
+      modules: agentConfig.modules ? Object.keys(agentConfig.modules) : [],
+      planMode: agentConfig.identity.planMode ?? false,
+      maxIterations: agentConfig.maxIterations,
+      call_depth: nextDepth,
+      verify_enabled: verify,
+    }, [agentLabel, 'invoke'])
+
+    const paneLabel = `[${agentLabel}] ${description}`
+    const paneSlot = tmuxLayout.acquireSlot(paneLabel)
+    const childRenderer = paneSlot
+      ? Renderer.forFile(paneSlot.logFile)
+      : (parentRenderer as Renderer)
+
+    const childConfig: EngineConfig = {
+      ...parentConfig,
+      agent: agentConfig,
+      cwd: context.cwd,
+      hookRunner: undefined,
+      sessionDir: undefined,
+      // Thread depth so the child engine's AgentTool derives the SAME
+      // nextDepth = inheritedDepth + 1 = nextDepth + 1 hop later, even
+      // though we don't mutate any counter on the parent side.
+      initialAgentDepth: nextDepth,
+    }
+
+    const childEngine = factory(childConfig, childRenderer)
+
+    const normalizedPrompt = normalizeDelegatedPrompt(prompt, parentConfig)
+    const placeholdersReplaced = normalizedPrompt !== prompt
+    const inheritedContextLines = [
+      `- session_dir: ${parentConfig.sessionDir ?? 'not set'}`,
+      `- call_depth: ${nextDepth}`,
+    ]
+
+    const sessionDirHint = parentConfig.sessionDir
+      ? `\n- Session dir: ${parentConfig.sessionDir}`
+      : ''
+    const delegatedPrompt = [
+      '[Delegation Contract]',
+      '- Strictly follow the "Task Instructions" below. Do not change task scope.',
+      '- If user/main agent gave explicit constraints, treat them as highest priority.',
+      '- If information is missing and blocks execution, report what is missing. Do not guess.',
+      '- If SESSION_DIR placeholder appears, use the value from "Inherited Context" below.',
+      sessionDirHint,
+      '',
+      '[Inherited Context]',
+      ...inheritedContextLines,
+      '',
+      '[Task Description]',
+      description,
+      '',
+      '[Task Instructions]',
+      normalizedPrompt,
+    ].join('\n')
+
+    appendAgentEvent(parentConfig, {
+      event: 'delegation.start',
+      agent_label: agentLabel,
+      description,
+      max_iterations: agentConfig.maxIterations,
+      call_depth: nextDepth,
+      verify_enabled: verify,
+      placeholders_replaced: placeholdersReplaced,
+      prompt_preview: normalizedPrompt.slice(0, 500),
+    })
+
+    if (context.signal) {
+      if (context.signal.aborted) {
+        mainRenderer.agentDone(description, false)
+        if (paneSlot) { tmuxLayout.releaseSlot(paneSlot.slot); childRenderer.destroy() }
+        return { content: `[${agentLabel}] Cancelled (parent task aborted)`, isError: true }
+      }
+      context.signal.addEventListener('abort', () => childEngine.abort(), { once: true })
+    }
+
+    const HEARTBEAT_MS = 2 * 60 * 1000
+    const heartbeatTimer = setInterval(() => {
+      const elapsedSec = Math.round((Date.now() - agentStartTime) / 1000)
+      mainRenderer.agentHeartbeat(agentLabel, description, elapsedSec)
+    }, HEARTBEAT_MS)
+
+    try {
+      const { result } = await childEngine.runTurn(delegatedPrompt, [])
+      clearInterval(heartbeatTimer)
+      const durationMs = Date.now() - agentStartTime
+
+      mainRenderer.agentDone(description, result.reason !== 'error')
+      if (paneSlot) { tmuxLayout.releaseSlot(paneSlot.slot); childRenderer.destroy() }
+
+      // ── Verification Gate (AgentOS "No Tuple, No Merge") ──
+      let verifySection = ''
+      if (verify && result.reason !== 'error' && !agentConfig.identity.planMode) {
+        const verifyResult = runVerification(context.cwd)
+        if (verifyResult) {
+          const icon = verifyResult.passed ? '✓' : '✗'
+          verifySection = `\n\n---\n[Verify Gate] ${icon}\n${verifyResult.output}`
+          context.eventLog?.append('invoke_completed', agentLabel, {
+            description,
+            verified: true,
+            verification_passed: verifyResult.passed,
+          }, [agentLabel, 'verify', verifyResult.passed ? 'passed' : 'failed'])
+        }
+      }
+
+      context.eventLog?.append('invoke_completed', agentLabel, {
+        description,
+        success: result.reason !== 'error',
+        reason: result.reason,
+        duration_ms: durationMs,
+        call_depth: nextDepth,
+        output_preview: result.output.slice(0, 500),
+      }, [agentLabel, 'invoke', result.reason !== 'error' ? 'success' : 'error'])
+
+      if (!result.output) {
+        return {
+          content: `[${agentLabel}] "${description}" done (${result.reason}), no text output.${verifySection}`,
+          isError: false,
+        }
+      }
+
+      const summaryLines = result.output
+        .split('\n')
+        .map((l: string) => l.trimEnd())
+        .filter((l: string) => l.trim().length > 0)
+        .slice(0, 8)
+        .join('\n')
+      if (summaryLines) {
+        mainRenderer.agentSummary(agentLabel, description, summaryLines)
+      }
+
+      return {
+        content: `[${agentLabel}] "${description}":\n\n${result.output}${verifySection}`,
+        isError: false,
+      }
+    } catch (err: unknown) {
+      clearInterval(heartbeatTimer)
+      mainRenderer.agentDone(description, false)
+      if (paneSlot) { tmuxLayout.releaseSlot(paneSlot.slot); childRenderer.destroy() }
+      appendAgentEvent(parentConfig, {
+        event: 'delegation.error',
+        agent_label: agentLabel,
+        description,
+        success: false,
+        duration_ms: Date.now() - agentStartTime,
+        error: (err as Error).message,
+      })
+      return {
+        content: `[${agentLabel}] "${description}" error: ${(err as Error).message}`,
+        isError: true,
+      }
+    }
   }
 }

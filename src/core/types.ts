@@ -18,6 +18,27 @@ export interface ToolCall {
   }
 }
 
+/**
+ * Minimal surface a child engine needs to expose to AgentTool. Defined in
+ * types.ts so `EngineConfig.agentFactory` can reference it without importing
+ * the tools package (which would re-import types.ts → circular).
+ */
+export interface ChildEngineLike {
+  runTurn: (msg: string, history: never[]) => Promise<{ result: { output: string; reason: string } }>
+  abort: () => void
+}
+
+/**
+ * Factory used by AgentTool to spawn a child engine for a sub-task.
+ * Per-EngineConfig, so each engine owns its own factory closure — no
+ * module-level mutable state, safe under concurrency and across multiple
+ * ExecutionEngine instances running side-by-side.
+ */
+export type AgentChildEngineFactory = (
+  config: EngineConfig,
+  renderer: unknown,
+) => ChildEngineLike
+
 export interface OpenAIMessage {
   role: 'system' | 'user' | 'assistant' | 'tool'
   content: string | null
@@ -133,19 +154,51 @@ export type AskUserQuestionHandler = (
 ) => Promise<Record<string, string>>
 
 /**
+ * Structured outcome of a single hook command execution.
+ * Returned (rather than thrown) so the engine never blocks on hook failures.
+ */
+export interface HookResult {
+  /** Which hook entry fired (PreToolCall, PostToolCall, ...). */
+  hook: string
+  /** The shell command that ran. */
+  command: string
+  /** True iff the command exited with status 0. */
+  ok: boolean
+  /** Exit status from the child process, or null when unavailable. */
+  status: number | null
+  /** Termination signal (e.g. SIGTERM from timeout), or null. */
+  signal: NodeJS.Signals | null
+  /** Wall-clock duration in milliseconds. */
+  durationMs: number
+  /** Failure reason — already scrubbed of sensitive env values. */
+  error?: string
+  /** Suggested error code — 'not_found', 'timeout', 'non_zero', 'spawn_failed', or 'unknown'. */
+  errorCode?: HookErrorCode
+}
+
+export type HookErrorCode =
+  | 'not_found'       // ENOENT — the binary doesn't exist
+  | 'timeout'         // child exceeded timeoutMs
+  | 'non_zero'        // exited with status != 0
+  | 'spawn_failed'    // other spawn errors
+  | 'unknown'
+
+/**
  * Interface for hook runners — decouples engine from config layer.
- * Hooks are best-effort: implementations must never throw.
+ * Hooks are best-effort: implementations must never throw. Each method
+ * returns the structured outcome of every hook entry that fired so callers
+ * (and tests) can inspect success or failure without aborting the agent loop.
  */
 export interface IHookRunner {
-  runPreToolCall(toolName: string, input: Record<string, unknown>): void
-  runPostToolCall(toolName: string, result: string, isError: boolean): void
-  runUserPromptSubmit(prompt: string): void
+  runPreToolCall(toolName: string, input: Record<string, unknown>): HookResult[]
+  runPostToolCall(toolName: string, result: string, isError: boolean): HookResult[]
+  runUserPromptSubmit(prompt: string): HookResult[]
   /** Called when the engine encounters an unrecoverable error */
-  runOnError?(error: Error, context: { turnNumber: number; lastToolName?: string }): void
+  runOnError?(error: Error, context: { turnNumber: number; lastToolName?: string }): HookResult[]
   /** Called when a run completes (any reason: stop, max_iterations, error, interrupted) */
-  runOnComplete?(result: TurnResult): void
+  runOnComplete?(result: TurnResult): HookResult[]
   /** Called after context compaction (auto-summary of older messages) */
-  runOnContextOverflow?(tokensBefore: number, tokensAfter: number): void
+  runOnContextOverflow?(tokensBefore: number, tokensAfter: number): HookResult[]
 }
 
 export interface EngineConfig {
@@ -220,6 +273,22 @@ export interface EngineConfig {
    * Absent in sub-agents / piped mode (tool auto-approves).
    */
   exitPlanMode?: (plan: string) => Promise<boolean>
+  /**
+   * Factory for spawning a child engine from AgentTool. Optional: an
+   * ExecutionEngine can be built without one (e.g. for tests / REPLs that
+   * don't spawn sub-agents). When set, the engine constructor wires its
+   * private AgentTool from this value — the closure is per-engine so
+   * concurrent and nested Agent calls never share state. When unset,
+   * the AgentTool's action returns "not initialized" at runtime.
+   */
+  agentFactory?: AgentChildEngineFactory
+  /**
+   * Internal — AgentTool threads its current call-chain depth through the
+   * config so the MAX_CALL_DEPTH check stays global across nested spawns
+   * without resorting to module-level mutable counters. Callers normally
+   * leave this unset.
+   */
+  initialAgentDepth?: number
 }
 
 export interface TurnResult {

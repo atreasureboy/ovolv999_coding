@@ -60,7 +60,6 @@ import { ExecutionEngine } from '../src/core/engine.js'
 import { Renderer } from '../src/ui/renderer.js'
 import { InputHandler, readStdin } from '../src/ui/input.js'
 import type { EngineConfig, OpenAIMessage } from '../src/core/types.js'
-import { registerAgentFactory } from '../src/tools/agent.js'
 import { getProjectSettingsPath, loadSettings, saveProjectSettings } from '../src/config/settings.js'
 import { HookRunner, NoopHookRunner } from '../src/config/hooks.js'
 import { loadSkills, expandSkillPrompt, formatSkillIndex } from '../src/skills/loader.js'
@@ -94,6 +93,7 @@ import {
   resolveSessionPath,
   saveSession,
 } from '../src/core/sessionManager.js'
+import type { AgentChildEngineFactory } from '../src/core/types.js'
 
 const VERSION = '0.1.0'
 
@@ -733,7 +733,7 @@ async function main(): Promise<void> {
   // Load settings + hooks
   const settings = loadSettings(cwd)
   const hookRunner = settings.hooks
-    ? new HookRunner(settings.hooks)
+    ? new HookRunner(settings.hooks, { sink: { warn: (m) => renderer.warn(m) } })
     : new NoopHookRunner()
 
   const hookTypes = ['PreToolCall', 'PostToolCall', 'UserPromptSubmit', 'OnError', 'OnComplete', 'OnContextOverflow'] as const
@@ -866,6 +866,15 @@ async function main(): Promise<void> {
   // Create load_skill tool bound to the loaded skills map
   const loadSkillTool = createLoadSkillTool(skills)
 
+  // Sub-agent factory lives on the engine config so it's owned by THIS
+  // engine instance. No module-level mutable state — concurrent engines or
+  // parallel Agent calls don't clobber each other. The factory closure is
+  // the stable key (see src/tools/agent.ts). MUST be set on config BEFORE
+  // any ExecutionEngine (or planEngine) is constructed, because the engine
+  // reads `config.agentFactory` inside its constructor to wire its AgentTool.
+  const agentFactory: AgentChildEngineFactory = (childConfig, childRenderer) =>
+    new ExecutionEngine(childConfig, childRenderer as Renderer)
+
   const config: EngineConfig = {
     model,
     apiKey,
@@ -885,6 +894,7 @@ async function main(): Promise<void> {
     episodicMemory,
     extraTools: skills.size > 0 ? [loadSkillTool] : [],
     enabledModules: ['memory', 'critic', 'workspace', 'reflection'],
+    agentFactory,
     askUserQuestion: createTerminalAskUserHandler((s) => process.stdout.write(s)),
     exitPlanMode: async (plan: string): Promise<boolean> => {
       process.stdout.write('\n\x1b[95m❯❯ Plan:\x1b[0m\n')
@@ -901,7 +911,8 @@ async function main(): Promise<void> {
     },
   }
 
-  // Plan-mode config: read-only analysis, no reflection (plans aren't completed work)
+  // Plan-mode config: read-only analysis, no reflection (plans aren't completed work).
+  // Inherits the same agentFactory via spread so /plan also has a fully-wired AgentTool.
   const planPermissionManager = new PermissionManager()
   planPermissionManager.setMode('plan')
   const planConfig: EngineConfig = {
@@ -912,13 +923,6 @@ async function main(): Promise<void> {
   }
 
   const engine = new ExecutionEngine(config, renderer)
-
-  // Register agent factory so AgentTool can spawn child engines
-  registerAgentFactory(
-    (childConfig, childRenderer) => new ExecutionEngine(childConfig, childRenderer as Renderer),
-    config,
-    renderer,
-  )
 
   // Cleanup tmux session on exit
   let cleanedUp = false

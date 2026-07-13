@@ -252,7 +252,20 @@ export class ExecutionEngine {
       maxRetries: 5,      // SDK auto-retries 429/5xx with exponential backoff
       timeout: 120_000,   // 2 min — covers slow reasoning models (deepseek-reasoner)
     })
-    this.tools = createTools(config.extraTools ?? [])
+    // Wire the engine's private AgentTool only when an agentFactory is
+    // available. With no factory, the AgentTool is constructed without
+    // wiring and returns "not initialized" at action time — callers can
+    // still build engines that legitimately do not spawn sub-agents.
+    this.tools = config.agentFactory
+      ? createTools(config.extraTools ?? [], {
+          // Give THIS engine's AgentTool a private binding to its own
+          // factory + config + renderer. The factory closure keeps
+          // concurrency isolated; see src/tools/agent.ts for the rationale.
+          factory: config.agentFactory,
+          parentConfig: config,
+          parentRenderer: renderer,
+        })
+      : createTools(config.extraTools ?? [])
     this.allTools = this.tools  // will be updated with module tools in runTurn
     this.eventLog = config.eventLog
     this.costTracker = new CostTracker()

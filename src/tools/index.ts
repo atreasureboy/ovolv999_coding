@@ -2,7 +2,7 @@
  * Tool registry — ovolv999 agent base tools
  */
 
-import type { Tool } from '../core/types.js'
+import type { Tool, EngineConfig, AgentChildEngineFactory } from '../core/types.js'
 import { BashTool } from './bash.js'
 import { FileReadTool } from './fileRead.js'
 import { FileWriteTool } from './fileWrite.js'
@@ -28,7 +28,31 @@ import { SleepTool } from './sleep.js'
 import { NotebookEditTool } from './notebookEdit.js'
 import { ClaudeCodeTool } from './claudeCode.js'
 
-export function createTools(extraTools: Tool[] = []): Tool[] {
+/**
+ * Wiring for the per-engine AgentTool instance. All fields are REQUIRED
+ * — when an `AgentWiring` is supplied to `createTools`, it must be
+ * complete. `createTools`'s second parameter itself is OPTIONAL: when
+ * omitted, an `AgentTool` with no wiring is constructed and will return
+ * a "not initialized" error if its action is invoked.
+ */
+export interface AgentWiring {
+  factory: AgentChildEngineFactory
+  parentConfig: EngineConfig
+  parentRenderer: unknown
+}
+
+export function createTools(
+  extraTools: Tool[] = [],
+  agentWiring?: AgentWiring,
+): Tool[] {
+  const agent: Tool = agentWiring
+    ? new AgentTool({
+        factory: agentWiring.factory,
+        parentConfig: agentWiring.parentConfig,
+        parentRenderer: agentWiring.parentRenderer,
+      })
+    : new AgentTool()
+
   return [
     new BashTool(),
     new FileReadTool(),
@@ -39,7 +63,7 @@ export function createTools(extraTools: Tool[] = []): Tool[] {
     new TodoWriteTool(),
     new WebFetchTool(),
     new WebSearchTool(),
-    new AgentTool(),
+    agent,
     new TmuxSessionTool(),
     new ShellSessionTool(),
     new TaskCreateTool(),
