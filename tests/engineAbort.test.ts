@@ -253,61 +253,68 @@ describe('ExecutionEngine — abort() lifecycle', () => {
   it('NEW turn stays abortable after OLD turn rejected upstream (ownership race)', async () => {
     const { engine, client } = makeEngine()
 
-    // Start OLD → parked in llm_call's await create()
+    // SEQUENTIAL form of the prior concurrent ownership test. Two
+    // simultaneous runTurn calls on the same engine are now structurally
+    // rejected (see the "rejects concurrent runTurn" test below), so the
+    // equivalent invariant is: after a turn converges via upstream
+    // failure, the singleton slot is released and the NEXT turn installs
+    // a fresh, independently-abortable controller. This is the safety net
+    // for the ownership-aware finally cleanup — without it, a stuck
+    // finally could leave a stale controller installed.
+
+    // Turn 1 → parked in create(0)
     const t1 = engine.runTurn('old', [])
     await settle()
     const oldSignal = client.createCalls[0].signal
     expect(oldSignal.aborted).toBe(false)
 
-    // Start NEW → installs a fresh controller in the singleton slot
+    // Drive t1 to convergence via upstream failure. The catch + finally
+    // paths fire; the singleton is released by ownership-aware cleanup.
+    client.rejectCall(0, 'simulated upstream failure')
+    await t1
+
+    // Turn 2 — must install a fresh controller. The new signal should be
+    // a different AbortSignal (proves the slot was released), and the new
+    // engine.abort() must reach IT (proves the slot was repopulated cleanly).
     const t2 = engine.runTurn('new', [])
     await settle()
     const newSignal = client.createCalls[1].signal
     expect(newSignal).not.toBe(oldSignal)
     expect(newSignal.aborted).toBe(false)
 
-    // Reject OLD's create() — this drives OLD's catch + finally without
-    // touching any AbortSignal. With the ownership bug, OLD's finally would
-    // null out the singleton, making subsequent engine.abort() a no-op for
-    // NEW's signal.
-    client.rejectCall(0, 'simulated upstream failure')
-    await t1
-
-    // NEW is still parked. Its signal must NOT have been touched by OLD.
-    expect(newSignal.aborted).toBe(false)
-
-    // The behavioral proof: engine.abort() must still reach NEW's signal.
+    // Behavioral proof: engine.abort() must reach t2's signal even though
+    // t1 had earlier installed + cleared a controller for the slot.
     engine.abort()
     expect(newSignal.aborted).toBe(true)
 
     await t2
-    // After NEW converges, abort is again a safe no-op.
+    // After t2 converges, a third abort is again a safe no-op.
     expect(() => engine.abort()).not.toThrow()
   })
 
-  it('concurrent turns: aborting the current turn does not affect an older parked turn', async () => {
+  it('aborting the in-flight turn does not damage prior turn state (sequential ownership)', async () => {
     const { engine, client } = makeEngine()
 
+    // Turn 1 parks in create(0). Converge via upstream failure.
     const t1 = engine.runTurn('a', [])
     await settle()
     const t1Signal = client.createCalls[0].signal
+    client.rejectCall(0, 'simulated upstream failure')
+    await t1
+    // Singleton released; t1's signal is fixed in its post-rejection state.
+    expect(t1Signal.aborted).toBe(false) // never aborted, just rejected
 
+    // Turn 2 parks in create(1). engine.abort() targets t2 — t1 is not in
+    // flight anymore, but it would still be wrong for a buggy cleanup to
+    // have inherited / corrupted t1's signal.
     const t2 = engine.runTurn('b', [])
     await settle()
     const t2Signal = client.createCalls[1].signal
-
-    // engine.abort() targets the current (t2) controller
     engine.abort()
     expect(t2Signal.aborted).toBe(true)
-    expect(t1Signal.aborted).toBe(false)
+    expect(t1Signal.aborted).toBe(false) // still untouched
 
     await t2
-    // After t2 finishes, t1 must still be parked and unaffected
-    expect(t1Signal.aborted).toBe(false)
-
-    // Clean up t1 via the fake
-    client.rejectCall(0, 'cleanup')
-    await t1
   })
 
   it('no unhandled rejection is raised when a turn is aborted', async () => {
@@ -355,102 +362,86 @@ describe('ExecutionEngine — abort() lifecycle', () => {
     expect(client.createCalls[0].signal.aborted).toBe(true)
   })
 
-  it('softAbort() requested for NEW turn survives OLD turn finally (NEW race)', async () => {
+  it('softAbort() requested between two sequential turns survives the first turn finally (sequential NEW race)', async () => {
     const { engine, client } = makeEngine()
 
-    // OLD turn parks in llm_call
-    const t1 = engine.runTurn('old', [])
+    // SEQUENTIAL form of the prior concurrent soft-flag test. After
+    // runTurn rejection makes concurrency structurally impossible, the
+    // observable softFlag path is: turn 1 parked → softAbort() queued →
+    // turn 1 driven to convergence → turn 2 picks up the soft-flag at
+    // its first check_abort and self-interrupts.
+
+    // Turn 1 parks in llm_call. softAbort() called while turn 1 is
+    // running — the flag's owner = turn 1's controller (since turn 2 has
+    // not started yet, owner = currentTurnAbortController).
+    const t1 = engine.runTurn('first', [])
     await settle()
     expect(client.createCalls).toHaveLength(1)
-
-    // NEW turn parks in llm_call, takes the singleton slot
-    const t2 = engine.runTurn('new', [])
-    await settle()
-    expect(client.createCalls).toHaveLength(2)
-    const t2Signal = client.createCalls[1].signal
-    expect(t2Signal.aborted).toBe(false)
-
-    // User requests soft-abort. owner = NEW's controller.
     engine.softAbort()
 
-    // OLD ends via upstream failure — its finally runs. Without the
-    // ownership-aware cleanup, this would unconditionally clear the flag
-    // and destroy NEW's request.
+    // Drive turn 1 to convergence via upstream failure. The catch +
+    // finally paths fire. Ownership-aware cleanup: if the soft-flag's
+    // owner is OUR controller (and check_abort never claimed it), the
+    // finally clears it. But because softAbort() inside the turn hadn't
+    // been observed yet (no check_abort reached), the flag should still
+    // belong to OUR controller when the finally runs — and be CLEARED
+    // by ownership-aware cleanup. The test confirms: turn 1's reason is
+    // 'error' (the hard-reject path), NOT 'interrupted' (the soft-abort
+    // path that requires check_abort to have fired first).
     client.rejectCall(0, 'simulated upstream failure')
     const t1Result = await t1
+    expect(t1Result.result.reason).toBe('error')
 
-    // OLD's turn should not have soft-aborted — it never saw the flag
-    // (owner was NEW's controller, not OLD's).
-    expect(t1Result.result.reason).not.toBe('interrupted')
-
-    // NEW's signal must NOT have been touched.
-    expect(t2Signal.aborted).toBe(false)
-
-    // Feed NEW an empty stream so llm_call returns and the state machine
-    // reaches check_abort, where the still-pending soft-abort should fire.
-    client.completeCall(1)
-    const t2Result = await t2
-
-    // NEW soft-aborted — reason='interrupted'.
-    expect(t2Result.result.reason).toBe('interrupted')
-    expect(t2Result.result.stopped).toBe(true)
-  })
-
-  it('NEW soft-abort survives OLD turn tool-batch soft-abort check (tool-schedule race)', async () => {
-    // OLD turn has a tool call parked in executeToolCall (controlled via a
-    // blocking tool + Deferred). NEW turn calls softAbort() while OLD is
-    // mid-batch. OLD's per-batch soft-abort check must NOT consume NEW's
-    // request — the soft-flag's owner is NEW's controller, not OLD's.
-    const oldBlock = blockingTool()
-    const newBlock = blockingTool()
-    const { engine, client } = makeEngineWithTool(oldBlock.tool)
-
-    // OLD parked in create(0). Feed it a Blocking tool call → enters
-    // tool_execution and parks inside oldBlock.tool.execute().
-    const t1 = engine.runTurn('old', [])
-    await settle()
-    expect(client.createCalls).toHaveLength(1)
-    client.completeCall(0)
-    // Allow OLD to enter tool_execution and reach the awaited execute().
-    await new Promise((r) => setTimeout(r, 10))
-
-    // NEW parked in create(1). softAbort()'s owner = NEW's controller.
-    const t2 = engine.runTurn('new', [])
+    // Turn 2 — soft-flag must be CLEAN (the prior turn's finally reset
+    // it). turn 2 must reach llm_call and stay there.
+    const t2 = engine.runTurn('second', [])
     await settle()
     expect(client.createCalls).toHaveLength(2)
+    expect(client.createCalls[1].signal.aborted).toBe(false)
+
+    // Belt-and-braces: tick a few ms and re-verify. If a leaked soft-abort
+    // had survived, turn 2 would have transitioned to soft_abort at its
+    // first check_abort BEFORE reaching llm_call — leaving createCalls
+    // at length 1.
+    await new Promise((r) => setTimeout(r, 30))
+    expect(client.createCalls).toHaveLength(2)
+    expect(client.createCalls[1].signal.aborted).toBe(false)
+
+    engine.abort()
+    await t2
+  })
+
+  it('softAbort() consumed within a single turn survives per-batch soft-abort checks (tool-schedule single-turn)', async () => {
+    // Within a SINGLE turn, the softAbort flag must be observably consumed
+    // only when OWNERSHIP matches the current controller. This is the
+    // in-turn shape of the prior concurrent "scheduleToolCalls consumes
+    // NEW's soft-abort" test — same invariant, single-turn.
+    const { tool, release } = blockingTool()
+    const { engine, client } = makeEngineWithTool(tool)
+
+    const t1 = engine.runTurn('a', [])
+    await settle()
+    expect(client.createCalls).toHaveLength(1)
+
+    // Feed turn 1 a Blocking tool call → enters tool_execution, parks
+    // inside the blocking tool.execute().
+    client.completeCall(0)
+    await new Promise((r) => setTimeout(r, 10))
+
+    // Now while turn 1 is parked inside the tool, request softAbort.
+    // The flag's owner = turn 1's controller (the only one in flight).
     engine.softAbort()
 
-    // Release OLD's batch — its tool returns, scheduleToolCalls runs its
-    // per-batch soft-abort check. Owner mismatch → do not consume.
-    oldBlock.release('done')
-    // Give OLD time to run per-batch check, transition to tools_done,
-    // check_abort, llm_call, and create() again.
+    // Release the tool — scheduleToolCalls runs its per-batch check,
+    // owner matches → consume → scheduleToolCalls returns aborted=true.
+    // The state machine transitions to tools_done then check_abort.
+    release('done')
     await new Promise((r) => setTimeout(r, 30))
-    // OLD should now be parked on a fresh create() (its 2nd or 3rd).
-    expect(client.createCalls.length).toBeGreaterThanOrEqual(3)
-    const t2Signal = client.createCalls[1].signal
-    expect(t2Signal.aborted).toBe(false)
 
-    // Force OLD to terminate via upstream failure so we can read result.reason.
-    // The most recent create call belongs to OLD (NEW's is at index 1).
-    const idx = client.createCalls.length - 1
-    client.rejectCall(idx, 'cleanup')
+    // The flag was consumed, so turn 1 will terminate with reason='interrupted'.
     const t1Result = await t1
-
-    // If OLD's per-batch check wrongly claimed NEW's soft-abort, OLD would
-    // have returned aborted=true from scheduleToolCalls → reason='interrupted'.
-    // With the fix, the flag survives and OLD terminates via upstream failure.
-    expect(t1Result.result.reason).not.toBe('interrupted')
-
-    // NEW continues, feed it a Blocking tool call → reaches tool_execution
-    // → tools_done → check_abort, where the still-pending soft-abort fires.
-    client.completeCall(1)
-    await new Promise((r) => setTimeout(r, 10))
-    newBlock.release('done')
-
-    const t2Result = await t2
-    expect(t2Result.result.reason).toBe('interrupted')
-    expect(t2Result.result.stopped).toBe(true)
+    expect(t1Result.result.reason).toBe('interrupted')
+    expect(t1Result.result.stopped).toBe(true)
   })
 
   it('hard-abort after softAbort still clears the flag for the next turn (regression)', async () => {

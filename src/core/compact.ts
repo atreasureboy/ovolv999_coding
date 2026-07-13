@@ -11,6 +11,38 @@
 import type OpenAI from 'openai'
 import type { OpenAIMessage } from './types.js'
 
+/**
+ * Detect whether a thrown value represents an abort cancellation rather
+ * than a generic upstream failure. Aborts come in several shapes across
+ * the OpenAI SDK, fetch, and platform-specific transports:
+ *
+ *   1. Native `DOMException` with `name === 'AbortError'` (browsers, modern
+ *      undici).
+ *   2. Plain `Error` whose message starts with "aborted" or contains
+ *      "Request was aborted" / "This operation was aborted" — what
+ *      undici emits when an AbortSignal fires after a request is in
+ *      flight and the underlying socket is closed.
+ *   3. A node `AbortError` (subclass of Error with `name` set but
+ *      `instanceof` working off `Error`).
+ *   4. The signal itself is already aborted by the time we check (the
+ *      error might not carry the name, but the signal is the source of
+ *      truth).
+ *
+ * Used by `maybeCompact`'s catch to re-throw real cancellations while
+ * letting genuine failures (network, 429) fall through to
+ * `compacted: false`. Exported for tests.
+ */
+export function isAbort(err: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted) return true
+  if (!err) return false
+  const e = err as { name?: string; message?: string }
+  if (e.name === 'AbortError') return true
+  const msg = (e.message ?? '').toLowerCase()
+  if (msg.startsWith('aborted') || msg.startsWith('this operation was aborted')) return true
+  if (msg.includes('request was aborted')) return true
+  return false
+}
+
 // Legacy single-rate constant kept here historically; the multilingual
 // estimator now uses ASCII_CHARS_PER_TOKEN (for ASCII) and
 // NON_ASCII_CHARS_PER_TOKEN (for CJK/emoji/etc.) instead. See estimateTextTokens.
@@ -459,14 +491,30 @@ function extractSummary(text: string): string {
 
 /**
  * Serialize messages to text for the summarization prompt.
+ *
+ * An assistant message MAY carry both a non-empty `content` AND one or more
+ * `tool_calls` — for example, the assistant says "Let me check." (content)
+ * and at the same time issues a `Read` tool call. The previous
+ * implementation used an `if / else if` chain that emitted ONLY the
+ * content and silently dropped the tool_calls, which meant a compaction
+ * summary lost every tool call that came bundled with spoken text. The
+ * LLM rebuilding context from that summary would be unable to reason
+ * about which tools the assistant had already invoked.
+ *
+ * This function now emits BOTH halves when both are present, in the
+ * order: content first, then tool_calls — matching the natural reading
+ * flow ("what the assistant said, then what it asked for"). Pure;
+ * exported for tests so the contract is locked down without spinning
+ * up a fake OpenAI client.
  */
-function serializeMessages(messages: OpenAIMessage[]): string {
+export function serializeMessages(messages: OpenAIMessage[]): string {
   const parts: string[] = []
   for (const msg of messages) {
     const role = msg.role.toUpperCase()
     if (typeof msg.content === 'string' && msg.content) {
       parts.push(`[${role}]: ${msg.content}`)
-    } else if (msg.content === null && msg.tool_calls?.length) {
+    }
+    if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
       const calls = msg.tool_calls
         .map(tc => `  → ${tc.function.name}(${tc.function.arguments.slice(0, 200)})`)
         .join('\n')
@@ -489,53 +537,130 @@ export interface CompactResult {
 }
 
 /**
+ * Pick a split index so that `messages.slice(splitPoint)` is a safe leading
+ * window to send to the OpenAI chat API. "Safe" means:
+ *
+ *   1. `messages[splitPoint]` is not `role: 'tool'` (orphan tool result).
+ *   2. If `messages[splitPoint]` is `role: 'assistant'` carrying
+ *      `tool_calls`, EVERY `tool_call.id` it names must appear on a
+ *      `role: 'tool'` message SOMEWHERE inside the recent window. An
+ *      orphan assistant tool_call (assistant asks for `Bash`, but the
+ *      `Bash` result was dropped because it was "old") makes the API
+ *      reject the request.
+ *
+ * Strategy: start at `messages.length - KEEP_RECENT_MESSAGES`. Walk FORWARD
+ * past any leading invalid boundary (orphan tool / orphan assistant
+ * tool_call). If we walk off the end (no safe forward point), walk
+ * BACKWARD from the end and return the largest safe index we can find.
+ *
+ * Returns `messages.length` only when NO safe boundary exists — caller
+ * treats that as "nothing usable to keep verbatim" and falls back to the
+ * non-compacted path.
+ *
+ * Pure function — exposed for tests so the safety contract can be locked
+ * down without spinning up a fake OpenAI client.
+ */
+export function computeSafeSplitPoint(messages: OpenAIMessage[]): number {
+  const initial = messages.length - KEEP_RECENT_MESSAGES
+
+  // `idx` is safe iff messages[idx] is a valid leading message and any
+  // tool_calls it names are matched by tool results inside [idx+1..).
+  const isSafe = (idx: number): boolean => {
+    if (idx < 0 || idx >= messages.length) return false
+    const m = messages[idx]
+    if (!m) return false
+    if (m.role === 'tool') return false
+    if (m.role === 'assistant' && m.tool_calls && m.tool_calls.length > 0) {
+      const ids = new Set(m.tool_calls.map((tc) => tc.id))
+      for (let j = idx + 1; j < messages.length; j++) {
+        const n = messages[j]
+        if (!n) break
+        if (n.role === 'tool' && n.tool_call_id && ids.has(n.tool_call_id)) {
+          ids.delete(n.tool_call_id)
+        } else if (n.role !== 'tool') {
+          // Encountered a non-tool message before satisfying all ids →
+          // some tool_calls are unmatched.
+          break
+        }
+      }
+      return ids.size === 0
+    }
+    return true
+  }
+
+  if (initial <= 0) return Math.max(0, initial)
+
+  // Walk FORWARD from initial split, skipping any leading unsafe boundary.
+  let split = initial
+  while (split < messages.length && !isSafe(split)) {
+    split++
+  }
+  if (split < messages.length) return split
+
+  // Walk BACKWARD from the end — pick the largest safe index we can find.
+  // (We may have overshot because messages[initial..] is wholly a long
+  //  orphan block — e.g. trailing tool results with no assistant call.)
+  for (let s = messages.length - 1; s > 0; s--) {
+    if (isSafe(s)) return s
+  }
+  // Nothing safe — caller treats this as "cannot keep anything verbatim".
+  return messages.length
+}
+
+/**
  * Compact the conversation by summarizing older messages.
  * The engine gates this call — by the time we're here, compaction is needed.
  * Returns new (smaller) messages array.
+ *
+ * `signal` (optional AbortSignal) is forwarded to the OpenAI completion
+ * call so the user can cancel a long-running summary with ESC / Ctrl+C /
+ * a 10-minute hard deadline. The cancellation contract is:
+ *
+ *   - `signal.aborted` at entry: throw immediately (treat as
+ *     cancellation, not a silent failure).
+ *   - The create() promise rejects with an AbortError (recognised by
+ *     `err.name === 'AbortError'` OR message includes "aborted" /
+ *     "Request was aborted"): RE-THROW. Aborts must NEVER be silently
+ *     swallowed — that would strand the engine waiting on a dead
+ *     summary request while the user thinks their ESC key worked.
+ *   - Any OTHER failure (network error, 429, malformed-response):
+ *     swallow and return `compacted: false` so the engine can continue
+ *     with the original messages.
  */
 export async function maybeCompact(
   client: OpenAI,
   model: string,
   messages: OpenAIMessage[],
+  signal?: AbortSignal,
 ): Promise<CompactResult> {
+  // Fast-path: caller already aborted before we started the
+  // summarization request — do not waste an API call.
+  if (signal?.aborted) {
+    throw new Error('maybeCompact: aborted before summarization request')
+  }
+
   const originalTokens = estimateTokens(messages)
 
   // Keep the most recent messages verbatim — they're the freshest context.
   // CRITICAL: The recent window must START with a valid message type:
   //   - 'user' or 'assistant' (with or without tool_calls)
   //   - NEVER start with 'tool' (orphan result → API 400)
+  //   - NEVER start with 'assistant' carrying tool_calls unless every
+  //     matching tool result is ALSO inside the recent window — otherwise
+  //     the assistant message is an orphan tool_call and the API rejects
+  //     the request with a 400 ("messages must alternate between tool /
+  //     assistant after the first user").
   //
-  // Strategy: find a split point where recentMessages[0] is NOT a tool message.
-  // Walk BACKWARD from the initial split point until we find a safe boundary.
-  let splitPoint = messages.length - KEEP_RECENT_MESSAGES
-  if (splitPoint > 0) {
-    // Walk FORWARD past tool results first (like before)
-    while (
-      splitPoint < messages.length &&
-      messages[splitPoint]?.role === 'tool'
-    ) {
-      splitPoint++
-    }
-    // If we walked past everything, recent is empty — walk BACKWARD instead
-    // to find the last non-tool message before the tool batch
-    if (splitPoint >= messages.length) {
-      splitPoint = messages.length - KEEP_RECENT_MESSAGES
-      while (splitPoint > 0 && messages[splitPoint]?.role === 'tool') {
-        splitPoint--
-      }
-      // Ensure splitPoint is at a non-tool message
-      if (messages[splitPoint]?.role === 'tool' && splitPoint > 0) {
-        splitPoint--
-      }
-    }
-    // Final safety: splitPoint must be >= 0 and point to a non-tool message
-    splitPoint = Math.max(0, splitPoint)
-  }
+  // We compute the split point once with `computeSafeSplitPoint`, which
+  // guarantees both invariants for messages.slice(splitPoint). The legacy
+  // code only filtered the orphan-tool case; orphan assistant-tool_calls
+  // could slip through and break the next LLM call.
+  const splitPoint = computeSafeSplitPoint(messages)
   const recentMessages = messages.slice(splitPoint)
   const olderMessages = messages.slice(0, splitPoint)
 
   if (olderMessages.length === 0 || messages.length < KEEP_RECENT_MESSAGES * 2) {
-    // Not enough messages to compact meaningfully
+    // Not enough messages to compact meaningfully — return original.
     return { compacted: false, messages, summaryTokens: 0, originalTokens }
   }
 
@@ -545,19 +670,34 @@ export async function maybeCompact(
 
   let summaryText: string
   try {
-    const response = await client.chat.completions.create({
-      model,
-      messages: [
-        { role: 'system', content: SUMMARY_SYSTEM_PROMPT },
-        { role: 'user', content: userPrompt },
-      ],
-      temperature: 0,
-      max_tokens: SUMMARY_OUTPUT_RESERVE,
-      // No tools — we explicitly don't want tool calls here
-    })
+    const response = await client.chat.completions.create(
+      {
+        model,
+        messages: [
+          { role: 'system', content: SUMMARY_SYSTEM_PROMPT },
+          { role: 'user', content: userPrompt },
+        ],
+        temperature: 0,
+        max_tokens: SUMMARY_OUTPUT_RESERVE,
+        // No tools — we explicitly don't want tool calls here
+      },
+      // Forward the caller's AbortSignal so ESC / Ctrl+C / a 10-minute
+      // hard deadline can interrupt the summarization. Without this,
+      // auto-compact could park indefinitely after a user cancel and
+      // the engine would silently fall through to `compacted: false`.
+      signal ? { signal } : undefined,
+    )
     summaryText = response.choices[0]?.message?.content ?? ''
-  } catch {
-    // If summarization fails, return original messages unchanged
+  } catch (err) {
+    // Cancellation contract: aborts are NEVER silently swallowed. The
+    // engine relies on the throw to surface the cancellation up through
+    // its own catch and into the user-facing `result.reason = 'error'`
+    // path. Other failures (network blip, 429, malformed-response)
+    // keep the legacy "return compacted:false" behaviour so the engine
+    // can continue with the original messages.
+    if (isAbort(err, signal)) {
+      throw err
+    }
     return { compacted: false, messages, summaryTokens: 0, originalTokens }
   }
 

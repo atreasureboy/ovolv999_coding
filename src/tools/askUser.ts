@@ -15,10 +15,20 @@
  * Architecture: The tool itself is stateless — it calls a callback
  * (`ctx.askUserQuestion`) provided by the REPL. This keeps the tool
  * testable (mock the callback) and decoupled from the terminal I/O layer.
- * Sub-agents / piped mode (no callback provided) get a graceful fallback.
+ *
+ * IMPORTANT — single readline ownership: the terminal handler in this file
+ * is given a `SharedPrompt` by the REPL and routes ALL input through it.
+ * It does NOT create a second `readline.createInterface` on stdin. Doing
+ * so would race the REPL's readline and corrupt user input. This is the
+ * single biggest source of "my prompt got eaten" bugs in CLI tools.
+ *
+ * Non-TTY / piped mode (SharedPrompt.isTTY === false): the handler
+ * returns a graceful fallback answer ("Other (auto)") instead of
+ * blocking on a stdin that nobody is typing into. The LLM then proceeds
+ * with best judgment, which is what the user implicitly asked for when
+ * they piped input.
  */
 
-import { createInterface } from 'readline'
 import type {
   Tool,
   ToolContext,
@@ -28,6 +38,7 @@ import type {
   AskUserQuestionInput,
   AskUserQuestionHandler,
 } from '../core/types.js'
+import type { SharedPrompt } from '../ui/input.js'
 
 // Re-export for convenience (terminal handler consumers import from here)
 export type { AskUserOption, AskUserQuestionInput, AskUserQuestionHandler }
@@ -148,7 +159,7 @@ export class AskUserQuestionTool implements Tool {
                 },
                 options: {
                   type: 'array',
-                  description: '2-4 options (do NOT include "Other" — it is automatic)',
+                  description: '2-4 options (do NOT include "Other" - it is automatic)',
                   minItems: 2,
                   maxItems: 4,
                   items: {
@@ -198,7 +209,12 @@ export class AskUserQuestionTool implements Tool {
     }
 
     try {
-      const answers = await ctx.askUserQuestion(questions)
+      // Forward ctx.signal so the prompt is cancelled when the engine
+      // is aborted (ESC / hard deadline / 2nd SIGINT). Without this,
+      // a pending question would block the readline indefinitely and
+      // continue consuming stdin even after the engine wanted to
+      // abort the turn.
+      const answers = await ctx.askUserQuestion(questions, ctx.signal)
 
       // Format answers for the LLM
       const formatted = Object.entries(answers)
@@ -220,87 +236,103 @@ export class AskUserQuestionTool implements Tool {
 
 // ── Terminal handler factory ────────────────────────────────────────────────
 //
-// Creates an AskUserQuestionHandler backed by terminal I/O.
-// Used by the REPL to wire the tool to the user's keyboard.
-//
-// Display format:
-//   ❯❯ [Header] Which approach should we use?
-//       1. Option A — Description of A
-//       2. Option B — Description of B
-//       3. Other (type your own answer)
-//     ❯ 
-//
-// For multiSelect, the prompt accepts comma-separated numbers.
+// Creates an AskUserQuestionHandler backed by a REPL-owned readline.
+// The REPL is responsible for instantiating ONE InputHandler; this
+// factory binds the handler to that handler's SharedPrompt so we never
+// spawn a competing readline interface on stdin.
+
+export interface TerminalAskUserDeps {
+  /** Shared prompt bound to the REPL's readline (see InputHandler.sharedPrompt). */
+  prompt: SharedPrompt
+  /** Output sink — typically `(s) => process.stdout.write(s)`. */
+  writeOut: (s: string) => void
+}
 
 export function createTerminalAskUserHandler(
-  writeOut: (s: string) => void,
+  deps: TerminalAskUserDeps,
 ): AskUserQuestionHandler {
-  return async (questions: AskUserQuestionInput[]): Promise<Record<string, string>> => {
-    const answers: Record<string, string> = {}
-    const rl = createInterface({
-      input: process.stdin,
-      output: process.stdout,
-      terminal: process.stdout.isTTY,
-    })
-
-    // Prevent readline from closing on Ctrl+C
-    rl.on('SIGINT', () => {})
-
-    try {
+  const { prompt, writeOut } = deps
+  return async (questions: AskUserQuestionInput[], signal?: AbortSignal): Promise<Record<string, string>> => {
+    // Non-TTY (pipe, redirect, sub-agent): return the synthetic "Other (auto)"
+    // answer for every question. This is what the LLM would have seen if the
+    // tool had no callback at all — but here we keep the per-question keys so
+    // the LLM's prompt can still reason about which questions were skipped.
+    if (!prompt.isTTY) {
+      const fallback: Record<string, string> = {}
       for (const q of questions) {
-        const multi = q.multiSelect === true
-        const header = q.header.slice(0, 12)
-        const prompt = multi
-          ? `  ${'\x1b[95m'}❯❯ ${'\x1b[0m'}[${header}] ${q.question} (comma-separated numbers)`
-          : `  ${'\x1b[95m'}❯❯ ${'\x1b[0m'}[${header}] ${q.question}`
-
-        writeOut('\n' + prompt + '\n')
-        q.options.forEach((opt, i) => {
-          writeOut(`      ${i + 1}. ${opt.label} — ${opt.description}\n`)
-        })
-        writeOut(`      0. Other (type your own answer)\n`)
-
-        const answer: string = await new Promise((resolve) => {
-          // Handle Ctrl+D (EOF) — rl.question callback won't fire on close
-          const onClose = (): void => resolve('')
-          rl.once('close', onClose)
-          rl.question('  ❯ ', (resp) => {
-            rl.removeListener('close', onClose)
-            resolve(resp.trim())
-          })
-        })
-
-        // Parse the response
-        if (multi) {
-          const selections = answer
-            .split(',')
-            .map((s) => s.trim())
-            .filter(Boolean)
-          const labels: string[] = []
-          for (const sel of selections) {
-            const idx = parseInt(sel, 10)
-            if (!isNaN(idx) && idx >= 1 && idx <= q.options.length) {
-              labels.push(q.options[idx - 1].label)
-            } else if (sel === '0' || isNaN(idx)) {
-              // "0" or non-numeric → treat as custom text
-              if (sel !== '0') labels.push(sel)
-            }
-          }
-          answers[q.question] = labels.length > 0 ? labels.join(', ') : answer
-        } else {
-          const idx = parseInt(answer, 10)
-          if (!isNaN(idx) && idx >= 1 && idx <= q.options.length) {
-            answers[q.question] = q.options[idx - 1].label
-          } else {
-            // Non-numeric or "0" → custom text
-            answers[q.question] = answer
-          }
-        }
+        fallback[q.question] = 'Other (auto — non-interactive mode)'
       }
-    } finally {
-      rl.close()
+      return fallback
     }
 
+    const answers: Record<string, string> = {}
+    for (const q of questions) {
+      // Honour an external abort between questions too: if the engine
+      // aborted between two questions, we should not keep prompting.
+      if (signal?.aborted) {
+        answers[q.question] = 'Other (aborted)'
+        continue
+      }
+
+      const multi = q.multiSelect === true
+      const header = q.header.slice(0, 12)
+      const promptLabel = multi
+        ? `  ❯❯ [${header}] ${q.question} (comma-separated numbers)\n`
+        : `  ❯❯ [${header}] ${q.question}\n`
+
+      writeOut('\n' + promptLabel)
+      q.options.forEach((opt, i) => {
+        writeOut(`      ${i + 1}. ${opt.label} — ${opt.description}\n`)
+      })
+      writeOut(`      0. Other (type your own answer)\n`)
+
+      // Drive the REPL's owned readline — never call readline.createInterface
+      // here. Forward the abort signal so a Ctrl+C / deadline / 2nd-SIGINT
+      // cancels the in-flight question immediately rather than letting
+      // it block the readline.
+      const { text: resp, eof, aborted } = await prompt.readLine('  ❯ ', signal)
+      if (aborted) {
+        // External abort (e.g. hard deadline fired) — fill remaining
+        // questions with a sentinel answer and bail out of the loop.
+        answers[q.question] = 'Other (aborted)'
+        for (const rest of questions.slice(questions.indexOf(q) + 1)) {
+          answers[rest.question] = 'Other (aborted)'
+        }
+        return answers
+      }
+      if (eof) {
+        answers[q.question] = 'Other (Ctrl+D — no answer)'
+        continue
+      }
+      const answer = resp.trim()
+
+      // Parse the response
+      if (multi) {
+        const selections = answer
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean)
+        const labels: string[] = []
+        for (const sel of selections) {
+          const idx = parseInt(sel, 10)
+          if (!isNaN(idx) && idx >= 1 && idx <= q.options.length) {
+            labels.push(q.options[idx - 1].label)
+          } else if (sel === '0' || isNaN(idx)) {
+            // "0" or non-numeric → treat as custom text
+            if (sel !== '0') labels.push(sel)
+          }
+        }
+        answers[q.question] = labels.length > 0 ? labels.join(', ') : answer
+      } else {
+        const idx = parseInt(answer, 10)
+        if (!isNaN(idx) && idx >= 1 && idx <= q.options.length) {
+          answers[q.question] = q.options[idx - 1].label
+        } else {
+          // Non-numeric or "0" → custom text
+          answers[q.question] = answer
+        }
+      }
+    }
     return answers
   }
 }

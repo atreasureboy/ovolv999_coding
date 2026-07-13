@@ -22,10 +22,22 @@ export interface ToolCall {
  * Minimal surface a child engine needs to expose to AgentTool. Defined in
  * types.ts so `EngineConfig.agentFactory` can reference it without importing
  * the tools package (which would re-import types.ts → circular).
+ *
+ * `dispose` is OPTIONAL — a child that owns long-running background work
+ * (BackgroundTaskManager) implements it so AgentTool can tear the work down
+ * when the sub-agent finishes / aborts / errors. Absent in plain stubs and
+ * in tests that don't model background work.
  */
 export interface ChildEngineLike {
   runTurn: (msg: string, history: never[]) => Promise<{ result: { output: string; reason: string } }>
   abort: () => void
+  /**
+   * Tear down engine-owned side effects (background tasks, transient
+   * caches). Idempotent — safe to call multiple times. Must NOT throw.
+   * AgentTool invokes this exactly once per child after the child's
+   * runTurn resolves/rejects, regardless of outcome.
+   */
+  dispose?: () => void
 }
 
 /**
@@ -124,7 +136,7 @@ export interface ToolContext {
    * LLM loop and prompt the user for input. Provided by the REPL; absent
    * in sub-agents / piped mode (tool degrades gracefully).
    */
-  askUserQuestion?: (questions: AskUserQuestionInput[]) => Promise<Record<string, string>>
+  askUserQuestion?: (questions: AskUserQuestionInput[], signal?: AbortSignal) => Promise<Record<string, string>>
   /**
    * Exit-plan-mode callback — lets the ExitPlanMode tool present a plan
    * for user approval and switch off plan mode. Returns true if approved.
@@ -151,6 +163,7 @@ export interface AskUserQuestionInput {
 
 export type AskUserQuestionHandler = (
   questions: AskUserQuestionInput[],
+  signal?: AbortSignal,
 ) => Promise<Record<string, string>>
 
 /**

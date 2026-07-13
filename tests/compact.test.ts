@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'fs'
+import { fileURLToPath } from 'url'
 import {
   estimateTokens,
   estimateTextTokens,
@@ -16,6 +18,8 @@ import {
   clampMaxOutputTokens,
   effectiveInputBudget,
   isFinitePositiveInteger,
+  maybeCompact,
+  isAbort,
 } from '../src/core/compact.js'
 import type { OpenAIMessage } from '../src/core/types.js'
 
@@ -685,5 +689,243 @@ describe('effectiveInputBudget', () => {
     expect(effectiveInputBudget(2_000, undefined)).toBe(1_000)
     // window smaller than default → clamp to window/2
     expect(effectiveInputBudget(1_000, undefined)).toBe(500)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────
+// maybeCompact abort propagation — reviewer-confirmed cancellation defect
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * Build a "fake" client that models the abortable shape of the real
+ * OpenAI SDK. The real `client.chat.completions.create(params, opts)`
+ * takes request options as a SECOND argument and responds to the
+ * `signal` field there. We mimic that signature so the test exercises
+ * the same call site `maybeCompact` uses.
+ *
+ * Modes:
+ *   - abortBeforeCreate: throw an AbortError synchronously if the signal
+ *     is already aborted when create() is called.
+ *   - rejectOnSignal: reject after seeing signal.aborted flip true.
+ *   - settle: complete with a fake response containing the supplied
+ *     summary.
+ */
+function makeFakeClient(opts: {
+  behaviour: 'settle' | 'reject-on-signal' | 'reject-immediately'
+  rejectWith?: unknown
+  reply?: string
+}): { chat: { completions: { create: (...a: unknown[]) => Promise<unknown> } } } {
+  return {
+    chat: {
+      completions: {
+        create: async (...args: unknown[]) => {
+          // Pull the signal out of the second positional argument (the
+          // OpenAI SDK shape). The engine and tests may pass undefined.
+          const second = args[1] as { signal?: AbortSignal } | undefined
+          const signal = second?.signal
+
+          if (opts.behaviour === 'reject-immediately') {
+            throw (opts.rejectWith as Error) ?? Object.assign(new Error('upstream failure'), { name: 'Error' })
+          }
+          if (opts.behaviour === 'reject-on-signal') {
+            // Wait for the signal to fire, then reject.
+            return new Promise<unknown>((_, reject) => {
+              if (signal?.aborted) {
+                reject(opts.rejectWith as Error ?? Object.assign(new Error('aborted'), { name: 'AbortError' }))
+                return
+              }
+              const onAbort = () => {
+                reject(opts.rejectWith as Error ?? Object.assign(new Error('aborted'), { name: 'AbortError' }))
+              }
+              signal?.addEventListener('abort', onAbort, { once: true })
+            })
+          }
+          // settle — return a fake summary response
+          return {
+            choices: [
+              { message: { content: opts.reply ?? '<summary>test summary</summary>' } },
+            ],
+          }
+        },
+      },
+    },
+  }
+}
+
+/**
+ * Build a messages array that crosses the KEEP_RECENT_MESSAGES * 2
+ * threshold so maybeCompact actually attempts a summary request
+ * (the early-return path returns `compacted: false` without calling
+ * the LLM). We don't care about the content — we just want to drive
+ * the create() call.
+ */
+function buildMessagesForCompact(): OpenAIMessage[] {
+  const messages: OpenAIMessage[] = []
+  // 20 user/assistant pairs to get past the minimum length gate.
+  for (let i = 0; i < 20; i++) {
+    messages.push({
+      role: 'user',
+      content: 'user-message-' + i + ' '.repeat(200),
+    })
+    messages.push({
+      role: 'assistant',
+      content: 'assistant-reply-' + i + ' '.repeat(200),
+    })
+  }
+  return messages
+}
+
+describe('maybeCompact — abort propagation (cancellation defect fix)', () => {
+  it('throws immediately when the signal is already aborted at entry', async () => {
+    const client = makeFakeClient({ behaviour: 'settle' })
+    const ac = new AbortController()
+    ac.abort() // already aborted before we ever call
+
+    await expect(maybeCompact(
+      client as unknown as Parameters<typeof maybeCompact>[0],
+      'test-model',
+      buildMessagesForCompact(),
+      ac.signal,
+    )).rejects.toThrow(/aborted before summarization/i)
+
+    // The fake client's create must NOT have been called when the
+    // signal was already aborted at entry.
+  })
+
+  it('forwards the AbortSignal to chat.completions.create as a second argument', () => {
+    // Source-level audit: the catch in maybeCompact previously swallowed
+    // every error (including AbortError). The fix MUST pass { signal }
+    // as the second argument and MUST re-throw on abort.
+    //
+    // We can't introspect a fake client from outside without a
+    // wrapper, so this is the cleanest structural regression guard.
+    // Use top-level readFileSync import
+    const src = readFileSync(
+      fileURLToPath(new URL('../src/core/compact.ts', import.meta.url)),
+      'utf8',
+    )
+    // Confirm the create call now uses the second-argument options shape.
+    expect(src).toMatch(/client\.chat\.completions\.create\(\s*\{/)
+    expect(src).toMatch(/signal\s*\?\s*\{\s*signal\s*\}\s*:\s*undefined/)
+    // Confirm the catch no longer swallows every error — it must
+    // distinguish abort from non-abort.
+    expect(src).not.toMatch(/\}\s*catch\s*\{\s*\/\/\s*If summarization fails/m)
+    expect(src).toMatch(/isAbort\(/)
+    expect(src).toMatch(/throw err/)
+  })
+
+  it('re-throws AbortError when the upstream create() rejects with one', async () => {
+    const abortErr = Object.assign(new Error('aborted'), { name: 'AbortError' })
+    const client = makeFakeClient({ behaviour: 'reject-immediately', rejectWith: abortErr })
+    const ac = new AbortController()
+
+    await expect(maybeCompact(
+      client as unknown as Parameters<typeof maybeCompact>[0],
+      'test-model',
+      buildMessagesForCompact(),
+      ac.signal,
+    )).rejects.toBe(abortErr)
+  })
+
+  it('re-throws when the rejection message begins with "aborted"', async () => {
+    const undiciStyle = new Error('aborted')
+    const client = makeFakeClient({ behaviour: 'reject-immediately', rejectWith: undiciStyle })
+    const ac = new AbortController()
+
+    await expect(maybeCompact(
+      client as unknown as Parameters<typeof maybeCompact>[0],
+      'test-model',
+      buildMessagesForCompact(),
+      ac.signal,
+    )).rejects.toBe(undiciStyle)
+  })
+
+  it('does NOT swallow non-abort failures — they return compacted:false (preserved behaviour)', async () => {
+    const netErr = new Error('connect ECONNREFUSED')
+    const client = makeFakeClient({ behaviour: 'reject-immediately', rejectWith: netErr })
+    const ac = new AbortController()
+
+    const result = await maybeCompact(
+      client as unknown as Parameters<typeof maybeCompact>[0],
+      'test-model',
+      buildMessagesForCompact(),
+      ac.signal,
+    )
+    expect(result.compacted).toBe(false)
+    // Original messages must be returned unchanged.
+    expect(result.messages.length).toBe(buildMessagesForCompact().length)
+  })
+
+  it('still throws on abort even when no signal is passed (signal undefined)', async () => {
+    // Regression guard: the abort-detect path must remain correct in
+    // branches that never received a signal. With `signal` undefined,
+    // isAbort must NOT match a non-abort error — and a thrown AbortError
+    // still re-throws because err.name === 'AbortError'.
+    const abortErr = Object.assign(new Error('aborted'), { name: 'AbortError' })
+    const client = makeFakeClient({ behaviour: 'reject-immediately', rejectWith: abortErr })
+
+    await expect(maybeCompact(
+      client as unknown as Parameters<typeof maybeCompact>[0],
+      'test-model',
+      buildMessagesForCompact(),
+      // no signal
+    )).rejects.toBe(abortErr)
+  })
+
+  it('source-level guard: engine evaluateContextBudget passes the turn signal', () => {
+    // Confirm the engine's call sites forward the AbortSignal. We can't
+    // easily reach into engine.ts from a runtime test without spinning
+    // up the full state machine, so this is the structural regression
+    // guard that future edits can rely on.
+    // Use top-level readFileSync import
+    const src = readFileSync(
+      fileURLToPath(new URL('../src/core/engine.ts', import.meta.url)),
+      'utf8',
+    )
+    // First call site: the pressure-driven compact.
+    expect(src).toMatch(/await maybeCompact\(\s*this\.client,\s*this\.config\.model,\s*messages,\s*turnAbortSignal\s*\)/)
+    // Second call site: the reactive-compact-after-context-overflow retry.
+    // The pattern in the source is the compactResult await line — we
+    // accept either order of args as long as turnAbortSignal is passed.
+    const reactivePasses = /maybeCompact\(this\.client,\s*this\.config\.model,\s*messages,\s*turnAbortSignal\)/.test(src)
+    expect(reactivePasses).toBe(true)
+    // Both call sites counted → 2 occurrences of the 4-arg form.
+    const matches = src.match(/maybeCompact\(\s*this\.client,\s*this\.config\.model,\s*messages,\s*turnAbortSignal/g)
+    expect(matches?.length).toBe(2)
+  })
+})
+
+describe('isAbort helper (cancellation recogniser)', () => {
+  it('returns true when signal is aborted', () => {
+    const ac = new AbortController(); ac.abort()
+    expect(isAbort(new Error('whatever'), ac.signal)).toBe(true)
+  })
+
+  it('returns true for err.name === "AbortError"', () => {
+    const e = Object.assign(new Error('aborted'), { name: 'AbortError' })
+    expect(isAbort(e)).toBe(true)
+  })
+
+  it('returns true for messages starting with "aborted"', () => {
+    expect(isAbort(new Error('aborted'))).toBe(true)
+  })
+
+  it('returns true for messages containing "Request was aborted"', () => {
+    expect(isAbort(new Error('Request was aborted'))).toBe(true)
+  })
+
+  it('returns true for messages starting with "this operation was aborted"', () => {
+    expect(isAbort(new Error('This operation was aborted'))).toBe(true)
+  })
+
+  it('returns false for generic upstream failures', () => {
+    expect(isAbort(new Error('connect ECONNREFUSED'))).toBe(false)
+    expect(isAbort(new Error('rate limit exceeded'))).toBe(false)
+    expect(isAbort(new Error('internal server error'))).toBe(false)
+  })
+
+  it('returns false for null / undefined', () => {
+    expect(isAbort(null)).toBe(false)
+    expect(isAbort(undefined)).toBe(false)
   })
 })

@@ -7,11 +7,22 @@
  * Robustness contract:
  *   - append() is best-effort: any I/O failure is swallowed so the engine
  *     never crashes because the audit log is unwritable.
+ *   - append() also performs BACKGROUND auto-rotation: when the on-disk
+ *     file exceeds `rotateBytes`, the next append() renames the existing
+ *     log to `events.ndjson.1` and starts a fresh file. Default threshold
+ *     is {@link DEFAULT_EVENTLOG_ROTATE_BYTES} (10 MiB). Tests may pass
+ *     a smaller threshold via the constructor `options.rotateBytes` to
+ *     exercise the rotation path deterministically.
  *   - readAll() is line-tolerant: a single corrupted line does NOT drop the
  *     rest of the log. Each line is parsed independently; malformed lines
  *     (bad JSON or wrong shape) are skipped, and a readAll() with options
  *     { onSkip } receives the count of dropped lines for diagnostics.
  *   - query() exposes a lightweight predicate filter for common lookups.
+ *   - rotateIfExceeded(thresholdBytes) is a public helper for callers that
+ *     want to force a rotation check on a different threshold than the
+ *     instance's default (e.g. before a readAll() on a long-running
+ *     session). Production auto-rotation does NOT depend on this helper —
+ *     append() handles it inline.
  *
  * NOTE: This module does NOT promise power-loss durability. `appendFileSync`
  * flushes to the OS but does not fsync the disk; a crash between the OS
@@ -19,7 +30,7 @@
  * that need stronger guarantees should add an explicit fsync layer.
  */
 
-import { appendFileSync, mkdirSync, existsSync, readFileSync } from 'fs'
+import { appendFileSync, mkdirSync, existsSync, readFileSync, statSync, renameSync } from 'fs'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
 
@@ -127,13 +138,55 @@ export function buildFilter(filter: {
 export interface ReadAllOptions {
   /** Optional callback receiving count of skipped (corrupt / wrong-shape) lines. */
   onSkip?: (skipped: number) => void
+  /**
+   * Cap the number of entries returned. When set, readAll returns the
+   * most recent `limit` entries (preserving append order) rather than
+   * the entire file. Bounds the parsed-result memory footprint for
+   * long-running sessions where the audit log has grown large.
+   *
+   * When omitted (default), the entire file is read — same as before.
+   */
+  limit?: number
 }
+
+export interface EventLogOptions {
+  /**
+   * Soft size cap for the on-disk log, in bytes. When the file exceeds
+   * this size, the NEXT append() atomically rotates it (renaming the
+   * existing log to `events.ndjson.1`) before writing the new entry.
+   *
+   * Defaults to {@link DEFAULT_EVENTLOG_ROTATE_BYTES} (10 MiB) when
+   * omitted — enough headroom for a typical session, low enough that
+   * a runaway audit log cannot blow up disk usage. Tests pass smaller
+   * values to exercise the rotation path deterministically.
+   *
+   * Pass 0 (or a negative number) to disable auto-rotation entirely.
+   * `rotateIfExceeded()` still works as an explicit rotation helper in
+   * that mode.
+   */
+  rotateBytes?: number
+}
+
+/**
+ * Default rotation threshold: 10 MiB. Long sessions routinely cross this
+ * with audit volume; 10 MiB of NDJSON at ~150 bytes/entry is on the order
+ * of 70k entries, well past anything a single session needs to retain
+ * in-memory for review.
+ */
+export const DEFAULT_EVENTLOG_ROTATE_BYTES = 10 * 1024 * 1024
 
 export class EventLog {
   private filePath: string
+  /**
+   * Auto-rotation threshold (bytes). When `> 0`, every append() checks
+   * the file size and rotates the log once it crosses this cap. `<= 0`
+   * disables auto-rotation; `rotateIfExceeded()` remains usable.
+   */
+  private rotateBytes: number
 
-  constructor(sessionDir: string) {
+  constructor(sessionDir: string, options?: EventLogOptions) {
     this.filePath = join(sessionDir, 'events.ndjson')
+    this.rotateBytes = options?.rotateBytes ?? DEFAULT_EVENTLOG_ROTATE_BYTES
     try { mkdirSync(sessionDir, { recursive: true }) } catch { /* best-effort */ }
   }
 
@@ -152,6 +205,18 @@ export class EventLog {
       detail,
       tags,
     }
+    // Auto-rotation: BEFORE writing, if the file already exceeds the
+    // configured cap, rename it to `events.ndjson.1` and start fresh.
+    // Best-effort: a rotation failure must NEVER block the actual
+    // append — the audit log is already best-effort, and a failed
+    // rotation just means we'll try again on the next append.
+    if (this.rotateBytes > 0) {
+      try {
+        this.rotateIfExceeded(this.rotateBytes)
+      } catch {
+        /* swallow — see comment above */
+      }
+    }
     try {
       appendFileSync(this.filePath, JSON.stringify(entry) + '\n', 'utf8')
     } catch {
@@ -167,6 +232,13 @@ export class EventLog {
    * lines (bad JSON or wrong shape) are silently skipped.
    *
    * Returns [] only when the file is missing, empty, or wholly unreadable.
+   *
+   * Bounded-read support: when `options.limit` is set, the returned array
+   * is capped to the LAST `limit` valid entries (preserving append order).
+   * Corrupt lines are still skipped first, so the limit applies to valid
+   * entries — not to raw lines. This bounds the parsed-result memory
+   * footprint for long-running sessions where the audit log has grown
+   * large, while keeping the line-tolerant recovery contract intact.
    */
   readAll(options: ReadAllOptions = {}): EventLogEntry[] {
     if (!existsSync(this.filePath)) return []
@@ -198,7 +270,55 @@ export class EventLog {
       out.push(parsed)
     }
     if (skipped > 0) options.onSkip?.(skipped)
+
+    // Apply the bounded-read cap. Drop the OLDEST entries first so the
+    // caller keeps the most recent activity — which is almost always
+    // what they want from an audit log. We use a non-negative integer
+    // limit; anything else falls back to "no cap".
+    if (typeof options.limit === 'number' && Number.isFinite(options.limit) && options.limit >= 0) {
+      const limit = Math.floor(options.limit)
+      if (out.length > limit) {
+        out.splice(0, out.length - limit)
+      }
+    }
     return out
+  }
+
+  /**
+   * Rotate the on-disk log when its size exceeds `thresholdBytes`.
+   *
+   * Behavior:
+   *   - If the file is missing or smaller than the threshold, returns
+   *     `false` and does nothing.
+   *   - Otherwise, atomically renames `events.ndjson` to
+   *     `events.ndjson.1` (overwriting any existing `.1`). The next
+   *     `append()` creates a fresh empty log.
+   *
+   * Returns `true` iff a rotation was performed. Best-effort: any
+   * rename failure returns `false` rather than throwing — the audit log
+   * must never break the engine.
+   *
+   * Callers typically invoke this before `readAll()` on long-running
+   * sessions so the read returns a bounded working set and the rotated
+   * `.1` holds the historical tail.
+   */
+  rotateIfExceeded(thresholdBytes: number): boolean {
+    if (!Number.isFinite(thresholdBytes) || thresholdBytes <= 0) return false
+    if (!existsSync(this.filePath)) return false
+    let size: number
+    try {
+      size = statSync(this.filePath).size
+    } catch {
+      return false
+    }
+    if (size <= thresholdBytes) return false
+    const rotatedPath = `${this.filePath}.1`
+    try {
+      renameSync(this.filePath, rotatedPath)
+      return true
+    } catch {
+      return false
+    }
   }
 
   /**

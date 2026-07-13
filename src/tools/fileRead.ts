@@ -81,7 +81,10 @@ export class FileReadTool implements Tool {
 
       const raw = await readFile(file_path, 'utf8')
 
-      // Binary file detection — check for null bytes in first 8000 chars
+      // Binary file detection — check for null bytes in first 8000 chars.
+      // For binary files we still mark as read (so hasFileBeenRead works)
+      // but skip the content-hash layer — hashing a Buffer-as-utf8 distorts
+      // the byte content vs how a later Writer would re-hash it.
       const sample = raw.slice(0, 8000)
       if (sample.includes('\0')) {
         markFileRead(file_path)
@@ -94,9 +97,10 @@ export class FileReadTool implements Tool {
       const lines = raw.split('\n')
       const total = lines.length
 
-      // Handle empty files — don't render a phantom "1\t" line
+      // Handle empty files — don't render a phantom "1\t" line. Pass the
+      // empty string so the cache hash matches a later "" write.
       if (total === 1 && lines[0] === '') {
-        markFileRead(file_path)
+        markFileRead(file_path, raw)
         return {
           content: `File: ${file_path} (empty file, 0 bytes)`,
           isError: false,
@@ -117,7 +121,7 @@ export class FileReadTool implements Tool {
           ? `File: ${file_path} (showing lines ${startLine}-${endLine} of ${total})\nUse offset=${endLine + 1} to read next page.\n`
           : `File: ${file_path}\n`
 
-      markFileRead(file_path)
+      markFileRead(file_path, raw)
 
       return { content: header + numbered, isError: false }
     } catch (err: unknown) {

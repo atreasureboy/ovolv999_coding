@@ -265,4 +265,26 @@ export class PermissionManager {
     const desc = permissionModeDescription(this.mode)
     return (sym ? sym + ' ' : '') + label + ' — ' + desc
   }
+
+  /**
+   * Produce an independent copy of this manager: same mode, deep-cloned
+   * rule list. Mutations on the clone (addRule / removeRule / setMode /
+   * cycleMode) do NOT propagate back to the source manager.
+   *
+   * The original rules array is COPIED object-by-object — each rule's
+   * `source` (a string literal) and `behavior` (string) are immutable
+   * primitives, so a shallow rule copy is sufficient.
+   *
+   * Used by AgentTool to give the child engine its own PermissionManager
+   * so a sub-agent cannot mutate (or have its permission state mutated by)
+   * the parent's permissions registry.
+   */
+  clone(): PermissionManager {
+    const copy = new PermissionManager()
+    copy.setMode(this.mode)
+    for (const rule of this.rules) {
+      copy.addRule({ ...rule })
+    }
+    return copy
+  }
 }

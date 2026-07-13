@@ -14,11 +14,17 @@
  *
  * This gives the engine an "undo" capability — if the LLM makes bad edits,
  * the user can rewind to a known-good state.
+ *
+ * Bounded retention: a single file with thousands of edits would otherwise
+ * produce thousands of full-content copies on disk — unbounded disk
+ * pressure on long sessions. {@link MAX_VERSIONS_PER_FILE} caps the
+ * versions kept per file; oldest copies are unlinked from disk and
+ * removed from the in-memory index when the cap is exceeded.
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, copyFileSync, chmodSync } from 'fs'
+import { existsSync, readFileSync, mkdirSync, statSync, copyFileSync, chmodSync, closeSync, fsyncSync, openSync, renameSync, unlinkSync, writeSync } from 'fs'
 import { join, resolve } from 'path'
-import { createHash } from 'crypto'
+import { createHash, randomBytes } from 'crypto'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -38,6 +44,26 @@ export interface EditedFileInfo {
   currentSize: number | null
   lastModified: number | null
 }
+
+// ── Constants ───────────────────────────────────────────────────────────────
+
+/**
+ * Maximum number of backup versions retained per tracked file.
+ *
+ * When trackEdit() pushes a new version and the count exceeds this cap,
+ * the OLDEST backup is unlinked from disk and removed from the
+ * in-memory version index. Subsequent restores can no longer reach the
+ * evicted version — the oldest still-recoverable version becomes the
+ * new "original" (i.e. restoreOriginal() returns it).
+ *
+ * 50 was chosen so a typical coding session (~tens of edits per file)
+ * stays well under the cap, while a runaway edit loop on a large file
+ * can never blow up disk usage.
+ */
+export const MAX_VERSIONS_PER_FILE = 50
+
+/** Length of the per-file hash used as the on-disk directory name. */
+const HISTORY_DIR_HASH_LEN = 32
 
 // ── FileHistory ─────────────────────────────────────────────────────────────
 
@@ -68,7 +94,14 @@ export class FileHistory {
       // Use copyFile (not read+write) to avoid loading the entire file into
       // the JS heap — prevents OOM on large tracked files (e.g. minified JS,
       // data files). Preserves file permissions via chmod sync.
-      const hash = createHash('md5').update(absPath).digest('hex').slice(0, 16)
+      //
+      // SHA-256 (instead of MD5) so a backup directory name has a much
+      // wider collision space. The directory is keyed on the absolute
+      // file path, so a collision would mix two unrelated files'
+      // backups under the same directory — recovered via
+      // restoreOriginal on the wrong file would return garbage.
+      // 32 hex chars of SHA-256 is enough for any realistic session.
+      const hash = createHash('sha256').update(absPath).digest('hex').slice(0, HISTORY_DIR_HASH_LEN)
       const dir = join(this.historyDir, hash)
       mkdirSync(dir, { recursive: true })
 
@@ -84,6 +117,23 @@ export class FileHistory {
 
       const versions = this.edits.get(absPath) ?? []
       versions.push(backupPath)
+
+      // Bound retention: when the cap is exceeded, evict the OLDEST
+      // backup from disk and from the in-memory index. Eviction runs
+      // in a loop (not a single step) so trackEdit remains correct even
+      // if the cap ever shrinks across versions.
+      while (versions.length > MAX_VERSIONS_PER_FILE) {
+        const evicted = versions.shift()
+        if (evicted !== undefined) {
+          try {
+            unlinkSync(evicted)
+          } catch {
+            /* best-effort — missing backups are already surfaced as
+               null stats in getVersions() */
+          }
+        }
+      }
+
       this.edits.set(absPath, versions)
     } catch {
       /* best-effort — never block the edit */
@@ -118,7 +168,7 @@ export class FileHistory {
     return result.sort((a, b) => a.path.localeCompare(b.path))
   }
 
-  /** Get all backup versions for a file. Version 0 = original (pre-first-edit). */
+  /** Get all backup versions for a file. Version 0 = oldest still-tracked. */
   getVersions(filePath: string): FileVersion[] {
     const absPath = resolve(filePath)
     const versions = this.edits.get(absPath) ?? []
@@ -134,23 +184,101 @@ export class FileHistory {
     })
   }
 
-  /** Restore a file to its original (pre-first-edit) state. */
+  /** Restore a file to its oldest still-tracked version. */
   restoreOriginal(filePath: string): boolean {
     return this.restoreVersion(filePath, 0)
   }
 
-  /** Restore a file to its Nth backup version. Returns false if not found. */
+  /**
+   * Restore a file to its Nth backup version. Returns false if not found.
+   *
+   * Atomic write: writes the backup to a uniquely-suffixed tmp file IN
+   * THE SAME DIRECTORY as the live target, fsyncs it, then renames it
+   * over the live file. This means a crash mid-restore can never leave
+   * a half-written file at the live path — readers always see EITHER
+   * the previous content OR the fully-restored content, never a torn
+   * mix. The tmp suffix (pid + ms + 8 random bytes) prevents two
+   * concurrent restores from clobbering each other.
+   *
+   * Mode rewind (rewind semantics): we capture the BACKUP's mode (the
+   * mode the live file had at the moment of trackEdit, since trackEdit
+   * already chmod'd the backup to match) and re-apply it to the tmp
+   * just before the rename. This makes restoreVersion a true rewind:
+   * BOTH content AND mode revert to the snapshot — restoring a 0755
+   * executable script after the user accidentally chmod'd it to 0644
+   * brings the executable bit back. Reading the BACKUP's mode (rather
+   * than the live file's current mode) is the right invariant because
+   * the backup is the authoritative "what the file was" record.
+   *
+   * Failure modes (all return false, never throw):
+   *   - readFileSync of the backup fails → live file untouched.
+   *   - write/fsync/close of the tmp fails → tmp unlinked in `finally`,
+   *     live file untouched.
+   *   - rename fails → tmp unlinked in `finally`, live file untouched.
+   *   - On success, any leftover tmp from a previous failed attempt
+   *     is replaced by the rename (the unlink in `finally` is a no-op
+   *     on a missing path).
+   */
   restoreVersion(filePath: string, version: number): boolean {
     const absPath = resolve(filePath)
     const versions = this.edits.get(absPath)
     if (!versions || version < 0 || version >= versions.length) return false
 
+    const backupPath = versions[version]
+    let content: Buffer
     try {
-      const content = readFileSync(versions[version])
-      writeFileSync(absPath, content)
+      content = readFileSync(backupPath)
+    } catch {
+      return false
+    }
+
+    // Capture the backup's mode. trackEdit already chmod'd the backup
+    // to match the live file's mode at backup time, so this is exactly
+    // the mode the live file SHOULD have after a rewind. If statSync
+    // fails (defensive — should not happen since we just read the
+    // same path), we fall through and let the umask default apply.
+    let backupMode: number | undefined
+    try {
+      backupMode = statSync(backupPath).mode
+    } catch {
+      /* best-effort — see comment above */
+    }
+
+    // Unique tmp in the SAME directory as the target so the rename is
+    // atomic on POSIX (cross-directory rename isn't). Suffix combines
+    // pid + Date.now() ms + 8 random bytes hex — collision-free under
+    // any realistic concurrency.
+    const tmpPath = `${absPath}.restore.tmp.${process.pid}.${Date.now()}.${randomBytes(8).toString('hex')}`
+    let tmpFd: number | null = null
+    try {
+      tmpFd = openSync(tmpPath, 'w')
+      writeSync(tmpFd, content, 0, content.length, 0)
+      fsyncSync(tmpFd)
+      closeSync(tmpFd)
+      tmpFd = null
+      // chmod BEFORE the rename so the renamed file already has the
+      // rewound mode the moment it appears at the live path. chmodSync
+      // is sync on purpose — the gap between closeSync and chmod is
+      // already serial on this process; making it async would just
+      // add a microtask boundary.
+      if (backupMode !== undefined) {
+        chmodSync(tmpPath, backupMode)
+      }
+      renameSync(tmpPath, absPath)
       return true
     } catch {
       return false
+    } finally {
+      // Best-effort cleanup: close a half-open fd and unlink the tmp
+      // on any failure path so we don't leak either onto disk.
+      if (tmpFd !== null) {
+        try { closeSync(tmpFd) } catch { /* swallow */ }
+      }
+      try {
+        if (existsSync(tmpPath)) unlinkSync(tmpPath)
+      } catch {
+        /* swallow */
+      }
     }
   }
 

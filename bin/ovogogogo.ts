@@ -58,7 +58,9 @@ import { fileURLToPath } from 'url'
 }
 import { ExecutionEngine } from '../src/core/engine.js'
 import { Renderer } from '../src/ui/renderer.js'
-import { InputHandler, readStdin } from '../src/ui/input.js'
+import { InputHandler, readStdin, type SharedPrompt } from '../src/ui/input.js'
+import { runWithDeadline } from '../src/ui/turnDeadline.js'
+import { trimHistoryForNextTurn } from '../src/ui/historyTrimmer.js'
 import type { EngineConfig, OpenAIMessage } from '../src/core/types.js'
 import { getProjectSettingsPath, loadSettings, saveProjectSettings } from '../src/config/settings.js'
 import { HookRunner, NoopHookRunner } from '../src/config/hooks.js'
@@ -98,6 +100,36 @@ import type { AgentChildEngineFactory } from '../src/core/types.js'
 const VERSION = '0.1.0'
 
 // ─────────────────────────────────────────────────────────────
+// Shared prompt router — single source of truth for stdin reads.
+//
+// The REPL, AskUserQuestion, and ExitPlanMode ALL share one readline
+// (owned by the REPL's InputHandler). They talk to that readline
+// through this router instead of creating their own. This prevents
+// the classic "second readline eats my keystrokes" bug.
+//
+// Before the REPL has started (pipe mode, single-shot mode, before
+// runRepl creates its InputHandler), `activePrompt` is null — callers
+// fall back to auto-approve (e.g. ExitPlanMode in non-TTY), which is
+// exactly the contract sub-agents and piped mode already want.
+// ─────────────────────────────────────────────────────────────
+let activePrompt: SharedPrompt | null = null
+
+/**
+ * Save the latest session state on exit. Wired by runRepl so the
+ * cleanup() in main() can persist the final history even when exit
+ * is triggered by SIGINT, SIGTERM, SIGHUP, or a non-0 exit path.
+ */
+let saveOnExit: (() => void) | null = null
+
+/**
+ * Hard deadline for a single engine turn. If a turn exceeds this,
+ * we abort the engine and treat it as a normal interrupt (the user
+ * gets a chance to provide feedback before the next iteration).
+ * Prevents the CLI from hanging indefinitely on a stuck turn.
+ */
+const HARD_TURN_DEADLINE_MS = 10 * 60 * 1000  // 10 minutes
+
+// ─────────────────────────────────────────────────────────────
 // Arg parsing
 // ─────────────────────────────────────────────────────────────
 
@@ -114,44 +146,22 @@ interface Args {
   resumeSession?: string
 }
 
-const MAX_RECENT_HISTORY_MESSAGES = 120
-const MAX_PINNED_USER_MESSAGES = 12
+/**
+ * Argv parser — error on missing values instead of silently defaulting.
+ *
+ * The previous parser used `args[++i] ?? defaultValue`, which meant
+ * `ovogogogo --model` (no value, e.g. the user forgot the argument)
+ * silently kept the previous model. Same problem for `--max-iter`,
+ * `--cwd`, `--loop-max-iters`. We now require an explicit value and
+ * write a clear error to stderr before exiting.
+ */
+class ArgError extends Error {}
 
-function trimHistoryForNextTurn(messages: OpenAIMessage[]): OpenAIMessage[] {
-  if (messages.length <= MAX_RECENT_HISTORY_MESSAGES) return [...messages]
-
-  const keepIndexes = new Set<number>()
-  let recentStart = Math.max(0, messages.length - MAX_RECENT_HISTORY_MESSAGES)
-
-  // Walk forward past orphaned tool results (prevents API 400 on resume)
-  if (recentStart > 0) {
-    const maxSplit = messages.length - 2
-    while (recentStart < maxSplit && messages[recentStart]?.role === 'tool') {
-      recentStart++
-    }
+function requireValue(flag: string, value: string | undefined): string {
+  if (value === undefined || value === '' || value.startsWith('-')) {
+    throw new ArgError(`Error: ${flag} requires a value`)
   }
-
-  for (let i = recentStart; i < messages.length; i++) {
-    keepIndexes.add(i)
-  }
-
-  const pinnedUserIndexes = messages
-    .map((msg, idx) => ({ msg, idx }))
-    .filter(({ msg }) => {
-      if (msg.role !== 'user' || typeof msg.content !== 'string') return false
-      // Skip synthetic compaction summaries; keep real user instructions.
-      return !msg.content.startsWith('[CONVERSATION SUMMARY')
-    })
-    .slice(-MAX_PINNED_USER_MESSAGES)
-    .map(({ idx }) => idx)
-
-  for (const idx of pinnedUserIndexes) {
-    keepIndexes.add(idx)
-  }
-
-  return Array.from(keepIndexes)
-    .sort((a, b) => a - b)
-    .map((idx) => messages[idx])
+  return value
 }
 
 function parseArgs(argv: string[]): Args {
@@ -168,27 +178,53 @@ function parseArgs(argv: string[]): Args {
   let continueSession = false
   let resumeSession: string | undefined
 
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i]
-    switch (arg) {
-      case '--help': case '-h': help = true; break
-      case '--version': case '-v': case '-V': version = true; break
-      case '--model': case '-m': model = args[++i] ?? model; break
-      case '--max-iter': maxIter = parseInt(args[++i] ?? '200', 10); if (isNaN(maxIter) || maxIter <= 0) maxIter = 200; break
-      case '--cwd': cwd = args[++i] ?? cwd; break
-      case '--loop': loop = true; break
-      case '--loop-max-iters': loopMaxIters = parseInt(args[++i] ?? '12', 10); break
-      case '--continue': case '-c': continueSession = true; break
-      case '--resume': case '-r':
-        resumeSession = args[++i]
-        if (!resumeSession) {
-          process.stderr.write('Error: --resume requires a session name\n')
-          process.exit(1)
-        }
-        break
-      default:
-        if (!arg.startsWith('-')) task = task ? task + ' ' + arg : arg
+  try {
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i]
+      switch (arg) {
+        case '--help': case '-h': help = true; break
+        case '--version': case '-v': case '-V': version = true; break
+        case '--model': case '-m':
+          model = requireValue(arg, args[++i])
+          break
+        case '--max-iter':
+          {
+            const raw = requireValue(arg, args[++i])
+            const n = parseInt(raw, 10)
+            if (isNaN(n) || n <= 0) {
+              throw new ArgError(`Error: --max-iter must be a positive integer (got "${raw}")`)
+            }
+            maxIter = n
+          }
+          break
+        case '--cwd':
+          cwd = requireValue(arg, args[++i])
+          break
+        case '--loop': loop = true; break
+        case '--loop-max-iters':
+          {
+            const raw = requireValue(arg, args[++i])
+            const n = parseInt(raw, 10)
+            if (isNaN(n) || n <= 0) {
+              throw new ArgError(`Error: --loop-max-iters must be a positive integer (got "${raw}")`)
+            }
+            loopMaxIters = n
+          }
+          break
+        case '--continue': case '-c': continueSession = true; break
+        case '--resume': case '-r':
+          resumeSession = requireValue(arg, args[++i])
+          break
+        default:
+          if (!arg.startsWith('-')) task = task ? task + ' ' + arg : arg
+      }
     }
+  } catch (err) {
+    if (err instanceof ArgError) {
+      process.stderr.write(err.message + '\n')
+      process.exit(1)
+    }
+    throw err
   }
   return { task, model, maxIter, cwd, help, version, loop, loopMaxIters, continueSession, resumeSession }
 }
@@ -391,7 +427,26 @@ async function runRepl(
   resumedHistory?: OpenAIMessage[],
 ): Promise<void> {
   const input = new InputHandler()
+  // Wire this readline into the shared router so AskUserQuestion and
+  // ExitPlanMode (configured on the engine in main()) use THIS readline
+  // instead of creating their own. Without this wiring, tool prompts
+  // would race the REPL for stdin and one would lose keystrokes.
+  activePrompt = input.sharedPrompt()
+
   const history: OpenAIMessage[] = resumedHistory ? [...resumedHistory] : []
+
+  // Idempotent save — wired into the cleanup() in main() so any exit
+  // path (SIGINT, SIGTERM, normal end, Ctrl+D, /exit) persists the
+  // latest history. We also call it directly on EOF and on force-exit
+  // for safety, but the cleanup path is the real source of truth.
+  saveOnExit = (): void => {
+    if (!sessionDir) return
+    try {
+      saveSession(sessionDir, history)
+    } catch (err: unknown) {
+      renderer.warn(`Failed to persist session: ${(err as Error).message}`)
+    }
+  }
 
   const getSkillsText = (): string => {
     if (skills.size === 0) return 'No skills available.'
@@ -447,27 +502,35 @@ async function runRepl(
   })
 
   // ── Ctrl+C: exit ─────────────────────────────────────────────
+  // 2nd SIGINT (or any SIGINT after a 1.5s grace window) force-exits
+  // REGARDLESS of whether a turn is running. This is the user-visible
+  // "stuck turn" escape hatch — without it, a runaway tool loop that
+  // ignores engine.abort() would trap the user.
   let sigintCount = 0
+  let lastSigintMs = 0
   process.on('SIGINT', () => {
     sigintCount++
-    if (running) {
+    const now = Date.now()
+    const rapid = now - lastSigintMs < 1500
+    lastSigintMs = now
+    if (running && !rapid) {
+      // First SIGINT during a turn: ask the engine to abort. Soft cancel —
+      // the runTask loop will surface the interrupt, let the user provide
+      // feedback, then resume.
       engine.abort()
       renderer.stopSpinner()
-      renderer.warn('Cancelled.')
-      running = false
+      renderer.warn('Cancelled. Press Ctrl+C again within 1.5s to force exit.')
       return
     }
-    // Not running
-    if (sigintCount >= 2) {
-      // Double Ctrl+C = force exit
-      renderer.newline()
-      renderer.info('Goodbye.')
-      process.exit(0)
-    } else {
-      // First Ctrl+C when idle — warn, second exits
-      renderer.warn('Press Ctrl+C again to exit, or type a command.')
-      setTimeout(() => { sigintCount = 0 }, 2000)
-    }
+    // Either we're idle, OR the user just hit Ctrl+C a second time quickly.
+    // Either way: force-exit. cleanup() (registered on `process.exit` AND
+    // `SIGTERM`/SIGHUP) will save the session before the process dies.
+    renderer.newline()
+    renderer.info('Force exit (Ctrl+C x' + sigintCount + '). Saving session...')
+    try { saveOnExit?.() } catch { /* best-effort */ }
+    try { input.close() } catch { /* best-effort */ }
+    // Use SIGINT exit code (130) so callers can distinguish from a clean exit.
+    process.exit(130)
   })
 
   /**
@@ -482,12 +545,77 @@ async function runRepl(
 
     try {
       while (true) {
-
-        const { result, newHistory } = await engine.runTurn(currentPrompt, currentHistory)
+        // Race the engine against a hard deadline. The timer handle
+        // is owned by runWithDeadline and cleared in our finally —
+        // NOT cancelled via setImmediate, which would fire on the
+        // next tick and silently turn the 10-minute cap into a no-op.
+        let result: { result: { reason: string; output: string }; newHistory: OpenAIMessage[] }
+        let deadlineExceeded = false
+        const dl = runWithDeadline(
+          () => engine.runTurn(currentPrompt, currentHistory),
+          {
+            deadlineMs: HARD_TURN_DEADLINE_MS,
+            onDeadline: () => {
+              deadlineExceeded = true
+              engine.abort()
+            },
+          },
+        )
+        try {
+          result = await dl.promise
+        } catch (err: unknown) {
+          const error = err as Error
+          if (error.name === 'AbortError' || deadlineExceeded) {
+            renderer.warn(deadlineExceeded
+              ? `Turn hit the ${HARD_TURN_DEADLINE_MS / 1000}s hard deadline — aborting.`
+              : 'Turn aborted.')
+            // CRITICAL — REENTRANCY: the engine's `runTurn` sets
+            // `_turnInFlight = true` on entry and clears it in a
+            // `finally`. The deadline fired, so we caught the
+            // deadline-error first, but the engine's `runTurn` is
+            // STILL settling (it observed the abort and is unwinding
+            // through its own `finally`). If we prompt the user for
+            // feedback and immediately loop into another `runTurn`,
+            // the reentrancy guard rejects with
+            // "another turn is already in progress". Awaiting
+            // `dl.taskSettled` waits for the original runTurn's
+            // `finally` to clear the flag. This is a never-rejecting
+            // observer of the underlying task — it surfaces the
+            // original task's value via `dl.taskSettled.value`
+            // (e.g. partial `newHistory`) for any cleanup work.
+            const settled = await dl.taskSettled
+            if (settled.status === 'fulfilled' && settled.value) {
+              history.length = 0
+              history.push(...trimHistoryForNextTurn(settled.value.newHistory))
+            }
+            // Save the partial history so the user can resume.
+            if (sessionDir) {
+              try { saveSession(sessionDir, history) } catch { /* best-effort */ }
+            }
+            // Fall through to the interrupt prompt so the user can give
+            // feedback (e.g. "skip this step") or just hit Enter to continue.
+            renderer.writeInterruptPrompt()
+            awaitingInput = true
+            const { text: feedback, eof } = await input.readLine('')
+            awaitingInput = false
+            if (eof) break
+            const trimmedFeedback = feedback.trim()
+            currentPrompt = trimmedFeedback
+              ? `[User Interrupt]\n${trimmedFeedback}\n\nThe previous turn exceeded a safety deadline. Adjust your actions and continue.`
+              : '[Resume] The previous turn hit a safety deadline. Try a simpler approach.'
+            continue
+          }
+          throw err
+        } finally {
+          // Clear the deadline timer in BOTH the success and error paths,
+          // AFTER the inner promise has settled. clear() is idempotent
+          // and safe to call even if the timer already fired.
+          dl.clear()
+        }
 
         // Update shared history with latest turn
         history.length = 0
-        history.push(...trimHistoryForNextTurn(newHistory))
+        history.push(...trimHistoryForNextTurn(result.newHistory))
         currentHistory = [...history]
 
         // Persist session after each turn (best-effort — warn on disk failure)
@@ -499,7 +627,7 @@ async function runRepl(
           }
         }
 
-        if (result.reason === 'interrupted' || result.reason === 'error') {
+        if (result.result.reason === 'interrupted' || result.result.reason === 'error') {
           // ESC interrupted or error — ask for feedback, then resume
           renderer.writeInterruptPrompt()
           awaitingInput = true
@@ -508,6 +636,10 @@ async function runRepl(
 
           if (eof) {
             // Ctrl+D during interrupt prompt = hard exit
+            // Save first so the interrupt can be resumed in a later session.
+            if (sessionDir) {
+              try { saveSession(sessionDir, history) } catch { /* best-effort */ }
+            }
             break
           }
 
@@ -525,7 +657,7 @@ async function runRepl(
 
         // Normal finish (stop / max_iterations / error)
         const elapsed = ((Date.now() - startMs) / 1000).toFixed(1)
-        renderer.info(`Done in ${elapsed}s · ${result.reason}`)
+        renderer.info(`Done in ${elapsed}s · ${result.result.reason}`)
         break
       }
     } catch (err: unknown) {
@@ -543,6 +675,13 @@ async function runRepl(
     const { text, eof } = await input.readLine('')
 
     if (eof) {
+      // Ctrl+D at the prompt — save the session before exiting so the
+      // user can resume with `--continue` or `--resume <session>`.
+      // saveOnExit is also wired into cleanup() in main(), but we save
+      // here too for a tight, deterministic path.
+      if (sessionDir) {
+        try { saveSession(sessionDir, history) } catch { /* best-effort */ }
+      }
       renderer.newline()
       renderer.info('Goodbye.')
       input.close()
@@ -554,7 +693,12 @@ async function runRepl(
     let pendingPrompt: string | null = null
 
     // ── /plan command ─────────────────────────────────────────
-    if (trimmed.startsWith('/plan')) {
+    // Match EXACTLY: `/plan` or `/plan <args>`. Previously this was
+    // `trimmed.startsWith('/plan')`, which incorrectly accepted
+    // `/planner`, `/planning`, `/planet`, etc. The user typed a
+    // command that doesn't exist, and we silently treated it as
+    // "/plan ner <task>". Now we only match the command itself.
+    if (trimmed === '/plan' || trimmed.startsWith('/plan ')) {
       const planTask = trimmed.slice(5).trim()
       if (!planTask) {
         renderer.warn('Usage: /plan <task description>')
@@ -710,28 +854,110 @@ async function runRepl(
     } catch { /* best-effort */ }
   }
 
+  // Final save before exit — covers /exit, EOF (after we save above too
+  // for safety), and the normal REPL-loop-end case. saveOnExit wired in
+  // cleanup() ALSO runs (process.on('exit')) — calling it twice is safe
+  // because saveSession is idempotent (the second write overwrites the
+  // first with the same data).
+  try { saveOnExit?.() } catch { /* best-effort */ }
+  // Release the shared-prompt router so a future runRepl (in the same
+  // process — unusual, but the framework supports it) starts clean.
+  activePrompt = null
+  saveOnExit = null
+  try { input.close() } catch { /* best-effort */ }
   process.exit(0)
 }
 
 // ─────────────────────────────────────────────────────────────
 // Single-shot task
+//
+// Used for `ovogogogo "fix the type errors"` and `echo "x" | ovogogogo`.
+// After the turn completes (for any reason — including the hard
+// deadline, an engine abort, or a successful stop), we persist the
+// final history. Without this, a single-shot run never wrote
+// history.json and `--continue` / `--resume` couldn't see it.
 // ─────────────────────────────────────────────────────────────
 
-async function runTask(
+async function runSingleTask(
   engine: ExecutionEngine,
   renderer: Renderer,
   task: string,
   cwd: string,
-  history?: OpenAIMessage[],
+  historyRef: OpenAIMessage[],
+  sessionDir: string | undefined,
+  resumedHistory?: OpenAIMessage[],
 ): Promise<void> {
   renderer.humanPrompt(task)
   updateProgressLog(cwd, 'running', task.slice(0, 100))
 
   const startMs = Date.now()
-  const { result } = await engine.runTurn(task, history ?? [])
-  const elapsed = ((Date.now() - startMs) / 1000).toFixed(1)
+  let result: { reason: string; output: string }
+  let deadlineExceeded = false
+  const dl = runWithDeadline(
+    () => engine.runTurn(task, resumedHistory ?? historyRef),
+    {
+      deadlineMs: HARD_TURN_DEADLINE_MS,
+      onDeadline: () => {
+        deadlineExceeded = true
+        engine.abort()
+      },
+    },
+  )
+  try {
+    const out = await dl.promise
+    result = out.result
+    // CRITICAL: take the engine's `newHistory`, trim it for next-turn
+    // budget, and write it back into the caller's `historyRef` so the
+    // /continue and /resume flows see THIS turn. The previous
+    // implementation discarded `out.newHistory` and saved the
+    // pre-turn snapshot, meaning `echo "x" | ovogogogo` and
+    // `ovogogogo "..."` never persisted the response and the user
+    // could not resume.
+    if (Array.isArray(out.newHistory)) {
+      const trimmed = trimHistoryForNextTurn(out.newHistory)
+      historyRef.length = 0
+      historyRef.push(...trimmed)
+    }
+  } catch (err: unknown) {
+    const error = err as Error
+    if (deadlineExceeded) {
+      renderer.warn(`Turn hit the ${HARD_TURN_DEADLINE_MS / 1000}s hard deadline.`)
+    } else if (error.name !== 'AbortError') {
+      renderer.error(`Error: ${error.message}`)
+    }
+    // Even on error/deadline, the engine may have appended messages
+    // before bailing. Trim whatever is in `out.newHistory` (if
+    // available via the underlying task's settled state — see
+    // dl.taskSettled) and update historyRef so the partial turn
+    // survives a --continue.
+    const partialNewHistory = await dl.taskSettled
+      .then((v) => (v.status === 'fulfilled' ? v.value?.newHistory : undefined))
+      .catch(() => undefined)
+    if (Array.isArray(partialNewHistory)) {
+      const trimmed = trimHistoryForNextTurn(partialNewHistory)
+      historyRef.length = 0
+      historyRef.push(...trimmed)
+    }
+    if (sessionDir && historyRef.length > 0) {
+      try { saveSession(sessionDir, historyRef) } catch { /* best-effort */ }
+    }
+    updateProgressLog(cwd, 'complete', 'done')
+    return
+  } finally {
+    dl.clear()
+  }
 
+  const elapsed = ((Date.now() - startMs) / 1000).toFixed(1)
   renderer.info(`Done in ${elapsed}s · ${result.reason}`)
+
+  // Persist the final history so --continue / --resume can pick it up.
+  // saveOnExit (set by main() for single-shot mode) covers most cases,
+  // but we save here too — the engine may have appended messages after
+  // the last runTask check, and a deterministic save on success is
+  // easier to reason about than relying on the exit handler.
+  if (sessionDir && historyRef.length > 0) {
+    try { saveSession(sessionDir, historyRef) } catch { /* best-effort */ }
+  }
   updateProgressLog(cwd, 'complete', 'done')
 }
 
@@ -935,19 +1161,39 @@ async function main(): Promise<void> {
     extraTools: skills.size > 0 ? [loadSkillTool] : [],
     enabledModules: ['memory', 'critic', 'workspace', 'reflection'],
     agentFactory,
-    askUserQuestion: createTerminalAskUserHandler((s) => process.stdout.write(s)),
+    askUserQuestion: createTerminalAskUserHandler({
+      // The handler reads `activePrompt` lazily (it can be null before
+      // the REPL has wired up its readline) and falls back to
+      // non-TTY auto-answers in that case.
+      prompt: {
+        get isTTY(): boolean { return activePrompt?.isTTY ?? !!process.stdout.isTTY },
+        readLine: (p, signal) => activePrompt
+          ? activePrompt.readLine(p, signal)
+          : Promise.resolve({ text: '', eof: true }),
+        close: () => activePrompt?.close(),
+      },
+      writeOut: (s) => process.stdout.write(s),
+    }),
     exitPlanMode: async (plan: string): Promise<boolean> => {
+      // Non-TTY (pipe mode, sub-agent, before REPL has wired its readline):
+      // auto-approve. This is the explicit, documented contract — we do NOT
+      // wait for stdin to produce a "y" because nobody is typing.
+      if (!activePrompt || !activePrompt.isTTY) {
+        process.stdout.write('\n\x1b[95m❯❯ Plan (auto-approved in non-interactive mode):\x1b[0m\n')
+        process.stdout.write(plan + '\n')
+        return true
+      }
+      // Interactive: use the REPL's readline, not a second readline.
       process.stdout.write('\n\x1b[95m❯❯ Plan:\x1b[0m\n')
       process.stdout.write(plan + '\n')
       process.stdout.write('\n\x1b[93mApprove this plan? (y/n):\x1b[0m ')
-      const rl = await import('readline')
-      const rlInterface = rl.createInterface({ input: process.stdin, output: process.stdout, terminal: process.stdout.isTTY })
-      return new Promise<boolean>((resolve) => {
-        rlInterface.question('', (answer) => {
-          rlInterface.close()
-          resolve(answer.trim().toLowerCase().startsWith('y'))
-        })
-      })
+      const { text: answer, eof } = await activePrompt.readLine('')
+      if (eof) {
+        // Ctrl+D during approval — treat as rejection so the LLM revises
+        process.stdout.write('\n')
+        return false
+      }
+      return answer.trim().toLowerCase().startsWith('y')
     },
   }
 
@@ -964,28 +1210,56 @@ async function main(): Promise<void> {
 
   const engine = new ExecutionEngine(config, renderer)
 
-  // Cleanup tmux session on exit
+  // Cleanup on any exit path — must be IDEMPOTENT (signal handlers may fire
+  // alongside the natural `exit` event). Order matters: save session first
+  // (sync fs), then dispose engine (kills any background tasks spawned
+  // via `run_in_background`), then tear down tmux, then print cost.
+  //
+  // The previous version feature-detected `engine.shutdown`, but
+  // `ExecutionEngine` actually exposes `dispose()` — it tears down the
+  // BackgroundTaskManager so a Bash `run_in_background` task that
+  // outlives a turn (or the whole CLI) does not leak. We now call
+  // `engine.dispose()` directly. It is documented as idempotent and
+  // never-throws.
   let cleanedUp = false
-  const cleanup = () => {
+  const cleanup = (): void => {
     if (cleanedUp) return
     cleanedUp = true
-    tmuxLayout.destroy()
+    try { saveOnExit?.() } catch { /* best-effort */ }
+    try { engine.dispose() } catch { /* best-effort — never let cleanup throw */ }
+    try { tmuxLayout.destroy() } catch { /* best-effort */ }
     // Display cost summary if any API calls were made
-    const costTracker = engine.getCostTracker()
-    if (costTracker.getTotalAPICalls() > 0) {
-      process.stdout.write('\n' + costTracker.formatSummary() + '\n')
-    }
+    try {
+      const costTracker = engine.getCostTracker()
+      if (costTracker.getTotalAPICalls() > 0) {
+        process.stdout.write('\n' + costTracker.formatSummary() + '\n')
+      }
+    } catch { /* best-effort */ }
   }
   process.on('exit', cleanup)
   process.on('SIGTERM', () => { cleanup(); process.exit(0) })
   process.on('SIGHUP',  () => { cleanup(); process.exit(0) })
+
+  // Wire saveOnExit for non-REPL modes so cleanup() persists the
+  // session on every exit path. The REPL wires its own (history-mutating)
+  // version; for pipe/loop/single-shot we save the static history we
+  // have at exit time.
+  saveOnExit = (): void => {
+    if (!sessionDir) return
+    try { saveSession(sessionDir, resumedHistory) } catch { /* best-effort */ }
+  }
 
   // Pipe input?
   if (!process.stdin.isTTY) {
     const piped = await readStdin()
     if (piped) {
       hookRunner.runUserPromptSubmit(piped)
-      await runTask(engine, renderer, piped, cwd)
+      // Update saveOnExit to capture the post-turn history snapshot
+      saveOnExit = (): void => {
+        if (!sessionDir) return
+        try { saveSession(sessionDir, resumedHistory) } catch { /* best-effort */ }
+      }
+      await runSingleTask(engine, renderer, piped, cwd, resumedHistory, sessionDir, resumedHistory)
       return
     }
   }
@@ -1005,7 +1279,7 @@ async function main(): Promise<void> {
   // Single task from args?
   if (task) {
     hookRunner.runUserPromptSubmit(task)
-    await runTask(engine, renderer, task, cwd, resumedHistory)
+    await runSingleTask(engine, renderer, task, cwd, resumedHistory, sessionDir, resumedHistory)
     return
   }
 

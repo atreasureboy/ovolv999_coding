@@ -131,7 +131,9 @@ describe('AskUserQuestionTool — execute with callback', () => {
       ctx,
     )
     expect(mockHandler).toHaveBeenCalledOnce()
-    expect(mockHandler).toHaveBeenCalledWith([makeQuestion()])
+    // Second arg is the optional AbortSignal (undefined here since
+    // the test ctx does not set one).
+    expect(mockHandler).toHaveBeenCalledWith([makeQuestion()], undefined)
     expect(result.isError).toBe(false)
     expect(result.content).toContain('Which approach?')
     expect(result.content).toContain('Option A')

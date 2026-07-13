@@ -237,11 +237,18 @@ registerCommand({
 })
 
 // ── /rewind — file history ─────────────────────────────────────────────────
+//
+// Audit note: the previous version advertised `/rewind [file_path] [version]`
+// and hinted that you could "restoreVersion", but the implementation only
+// returns a summary — there is no restoreVersion call wired through the
+// engine, and exposing the file-history mutation API to a slash command
+// would require a real versioned restore. Until that lands, we tell the
+// truth: this command is a *list*, not a *restore*.
 
 registerCommand({
   name: 'rewind',
-  description: 'Show or restore file edit history',
-  usage: '/rewind [file_path] [version]',
+  description: 'List file edits in this session (read-only — restore is not supported)',
+  usage: '/rewind',
   handler: (_args, ctx) => {
     const fh = ctx.engine.getFileHistory()
     if (!fh) {
@@ -251,7 +258,7 @@ registerCommand({
     if (files.length === 0) {
       return text('No file edits tracked in this session.')
     }
-    return text(fh.getSummary())
+    return text(fh.getSummary() + '\n\nRestore is not supported by this command. To roll back, use git or your editor\'s undo.')
   },
 })
 
@@ -340,17 +347,34 @@ registerCommand({
     const INFO = '\x1b[36mi\x1b[0m'
     const checks: string[] = []
 
-    // API key
-    const apiKey = process.env.OPENAI_API_KEY
-    if (apiKey && apiKey.length > 10) {
-      checks.push('  ' + OK + ' API key: set (' + apiKey.slice(0, 6) + '...' + apiKey.slice(-4) + ')')
-    } else {
-      checks.push('  ' + FAIL + ' API key: NOT SET (export OPENAI_API_KEY=...)')
-    }
+    // Detect the active provider. The CLI can run against either OpenAI
+    // directly or a MiniMax (minimaxi.com / minimax.io) deployment. The
+    // previous version only checked OPENAI_API_KEY / OPENAI_BASE_URL,
+    // so a MiniMax user with ANTHROPIC_AUTH_TOKEN set would see
+    // "API key: NOT SET" — a false negative that prompted users to set
+    // a credential they don't actually need.
+    const anthropicBaseURL = process.env.ANTHROPIC_BASE_URL
+    const anthropicApiKey = process.env.ANTHROPIC_AUTH_TOKEN ?? process.env.ANTHROPIC_API_KEY
+    const isMiniMax = Boolean(
+      anthropicApiKey && anthropicBaseURL &&
+      /^https:\/\/api\.(?:minimax\.io|minimaxi\.com)\/anthropic\/?$/i.test(anthropicBaseURL),
+    )
 
-    // Base URL
-    const baseURL = process.env.OPENAI_BASE_URL
-    checks.push('  ' + INFO + ' Base URL: ' + (baseURL || 'default (OpenAI)'))
+    if (isMiniMax) {
+      checks.push('  ' + OK + ' Provider: MiniMax (Anthropic-compatible endpoint)')
+      checks.push('  ' + OK + ' API key: set (ANTHROPIC_AUTH_TOKEN)')
+      checks.push('  ' + INFO + ' Base URL: ' + anthropicBaseURL)
+    } else {
+      // OpenAI / OpenAI-compatible path
+      const apiKey = process.env.OPENAI_API_KEY
+      if (apiKey && apiKey.length > 10) {
+        checks.push('  ' + OK + ' API key: set (' + apiKey.slice(0, 6) + '...' + apiKey.slice(-4) + ')')
+      } else {
+        checks.push('  ' + FAIL + ' API key: NOT SET (export OPENAI_API_KEY=...)')
+      }
+      const baseURL = process.env.OPENAI_BASE_URL
+      checks.push('  ' + INFO + ' Base URL: ' + (baseURL || 'default (OpenAI)'))
+    }
 
     // Model
     checks.push('  ' + INFO + ' Model: ' + ctx.engine.getModel())

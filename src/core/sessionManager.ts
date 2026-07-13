@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'fs'
 import { join, resolve } from 'path'
-import type { OpenAIMessage } from './types.js'
+import { randomBytes } from 'crypto'
+import type { OpenAIMessage, ToolCall } from './types.js'
 
 export interface SessionInfo {
   dir: string
@@ -109,11 +110,37 @@ function isSessionDirName(name: string): boolean {
 const VALID_ROLES = new Set<OpenAIMessage['role']>(['system', 'user', 'assistant', 'tool'])
 
 /**
+ * Validate the *shape* of a single tool call inside an assistant message.
+ * A tool_call MUST look like:
+ *   { id: string, type: 'function', function: { name: string, arguments: string } }
+ *
+ * This deep check rejects garbage that the shallow "tool_calls is an array"
+ * test would let through — e.g. an item whose `function` is a string, or
+ * whose `arguments` is an object. The engine reads these fields directly
+ * when reconstructing an API call, so malformed items can cause runtime 400s.
+ */
+function isValidToolCallShape(tc: unknown): tc is ToolCall {
+  if (!tc || typeof tc !== 'object' || Array.isArray(tc)) return false
+  const t = tc as Record<string, unknown>
+  if (typeof t.id !== 'string' || t.id.length === 0) return false
+  if (t.type !== 'function') return false
+  if (!t.function || typeof t.function !== 'object' || Array.isArray(t.function)) return false
+  const fn = t.function as Record<string, unknown>
+  if (typeof fn.name !== 'string' || fn.name.length === 0) return false
+  if (typeof fn.arguments !== 'string') return false
+  return true
+}
+
+/**
  * Validate the *shape* of a single message without dropping anything that the
  * engine hasn't strictly required. The point is to keep obviously malformed
  * entries (e.g. a JSON number where a role string is expected) out of the
  * engine, while tolerating legacy history files that may have been written
  * by an earlier version with fewer or extra optional fields.
+ *
+ * For `tool_calls` we additionally deep-validate each item — see
+ * {@link isValidToolCallShape}. A non-array `tool_calls` is corrupt; an
+ * array containing a malformed item is also corrupt.
  */
 function isValidMessageShape(msg: unknown): msg is OpenAIMessage {
   if (!msg || typeof msg !== 'object') return false
@@ -121,7 +148,12 @@ function isValidMessageShape(msg: unknown): msg is OpenAIMessage {
   if (typeof m.role !== 'string' || !VALID_ROLES.has(m.role as OpenAIMessage['role'])) return false
   if (m.content !== null && typeof m.content !== 'string') return false
   // Optional fields — accept when present, tolerate absence for old formats.
-  if (m.tool_calls !== undefined && !Array.isArray(m.tool_calls)) return false
+  if (m.tool_calls !== undefined) {
+    if (!Array.isArray(m.tool_calls)) return false
+    for (let i = 0; i < m.tool_calls.length; i++) {
+      if (!isValidToolCallShape(m.tool_calls[i])) return false
+    }
+  }
   if (m.tool_call_id !== undefined && typeof m.tool_call_id !== 'string') return false
   if (m.name !== undefined && typeof m.name !== 'string') return false
   return true
@@ -325,10 +357,20 @@ export function createSessionDir(cwd: string, now: Date = new Date()): string {
  * can tell when the session was last touched. There is intentionally no
  * "creation time" field — `updatedAt` always reflects the last write.
  *
- * Writes to `history.json.tmp` first and renames it into place so the file
- * is never partially written. Cleans up the tmp file if the rename fails.
- * `history` may be an empty array — callers use this to persist /clear as
- * "session exists, history emptied" atomically.
+ * Writes to a uniquely-suffixed temp file in the SAME directory and
+ * renames it into place so the file is never partially written. The tmp
+ * name combines process pid + Date.now() ms + 8 random bytes — collisions
+ * across concurrent saveSession() calls in the same process (or between
+ * processes on the same dir) are effectively impossible. The earlier
+ * fixed `.tmp` suffix could race when two saves fired in the same
+ * millisecond: writer A's rename would steal writer B's half-written tmp
+ * mid-flight, leaving B's data overwritten or its tmp clobbered. With a
+ * unique suffix each call gets its own tmp and only the LAST rename
+ * survives — exactly the property the caller expects.
+ *
+ * Cleans up OUR tmp file if the rename fails. Other concurrent writers'
+ * tmps are left alone. `history` may be an empty array — callers use this
+ * to persist /clear as "session exists, history emptied" atomically.
  */
 export function saveSession(sessionDir: string, history: OpenAIMessage[]): void {
   assertNonEmpty(sessionDir, 'sessionDir')
@@ -337,7 +379,10 @@ export function saveSession(sessionDir: string, history: OpenAIMessage[]): void 
   }
 
   const historyPath = join(sessionDir, 'history.json')
-  const tmpPath = `${historyPath}.tmp`
+  // Uniquely-suffixed tmp — pid + ms + 8 random bytes hex. Same shape as
+  // atomicWrite in src/core/atomicWrite.ts so a single convention covers
+  // all atomic-replace file mutations.
+  const tmpPath = `${historyPath}.tmp.${process.pid}.${Date.now()}.${randomBytes(8).toString('hex')}`
   mkdirSync(sessionDir, { recursive: true })
 
   const envelope: SessionEnvelope = {
@@ -351,7 +396,9 @@ export function saveSession(sessionDir: string, history: OpenAIMessage[]): void 
     writeFileSync(tmpPath, JSON.stringify(envelope, null, 2), 'utf8')
     renameSync(tmpPath, historyPath)
   } catch (err) {
-    // Best-effort: remove the orphan tmp file so we don't leak it on disk.
+    // Best-effort: remove OUR orphan tmp file so we don't leak it on disk.
+    // We only touch the path we just created — concurrent writers' tmps
+    // are deliberately left alone.
     try {
       if (existsSync(tmpPath)) unlinkSync(tmpPath)
     } catch {

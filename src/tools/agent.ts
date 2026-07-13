@@ -25,6 +25,7 @@ import { appendFileSync, existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { execSync } from 'child_process'
 import { str } from '../core/strings.js'
+import type { PermissionManager } from '../core/permissionSystem.js'
 
 /** Hard cap on agent call chain depth (across nesting).
  * The depth is threaded through `EngineConfig.initialAgentDepth` so the
@@ -149,6 +150,23 @@ function appendAgentEvent(config: EngineConfig, event: Record<string, unknown>):
   } catch {
     // best-effort audit logging; never break execution on log failure
   }
+}
+
+// ── PermissionManager clone helper ──────────────────────────────────────────
+
+/**
+ * Make an independent copy of a PermissionManager so the child engine's
+ * permission rules and mode never bleed back into (or get clobbered by)
+ * the parent. Wrapped as a small helper to keep the call-site readable
+ * and to centralize the "no shared mutable references" invariant.
+ *
+ * Delegates to PermissionManager.clone() — the helper is here so the
+ * agent-tool file's import of PermissionManager is value-typed (not
+ * type-only) in one localized spot, and to keep the call-site readable
+ * when the clone must precede a child config snapshot.
+ */
+function clonePermissionManager(mgr: PermissionManager): PermissionManager {
+  return mgr.clone()
 }
 
 // ── AgentTool ────────────────────────────────────────────────────────────────
@@ -330,6 +348,19 @@ Failed verification includes error details so you can fix immediately.
       // nextDepth = inheritedDepth + 1 = nextDepth + 1 hop later, even
       // though we don't mutate any counter on the parent side.
       initialAgentDepth: nextDepth,
+      // ── Isolated PermissionManager for the child engine ────────
+      // Spread of `parentConfig` would otherwise hand the child the
+      // SAME PermissionManager instance the parent is using — meaning
+      // the child's addRule / removeRule / setMode would mutate the
+      // parent's permission state, and a parent's mode cycle would
+      // silently change what the child auto-approves. Clone via the
+      // manager's own `clone()` so rules + mode are decoupled from
+      // the parent's instance. Pass `undefined` (not the parent's
+      // manager) when no manager is configured — the child engine
+      // creates a fresh one from `permissionMode` itself.
+      permissionManager: parentConfig.permissionManager
+        ? clonePermissionManager(parentConfig.permissionManager)
+        : undefined,
     }
 
     const childEngine = factory(childConfig, childRenderer)
@@ -456,6 +487,25 @@ Failed verification includes error details so you can fix immediately.
       return {
         content: `[${agentLabel}] "${description}" error: ${(err as Error).message}`,
         isError: true,
+      }
+    } finally {
+      // ── Tear down the child engine's background tasks ──────────────
+      // The child ExecutionEngine owns its own BackgroundTaskManager
+      // distinct from the parent's — so `run_in_background:true` Bash
+      // calls inside the sub-agent are tracked on the child, not the
+      // host. Without an explicit dispose, a sub-agent that spawns a
+      // long-running process would keep that process alive after the
+      // sub-agent finishes (or aborts, or errors). The parent's turn
+      // has fully resolved by this point — disposal is the correct
+      // final step regardless of outcome.
+      //
+      // `dispose()` is optional on ChildEngineLike (simple test stubs
+      // omit it). The call MUST be wrapped in try/catch — disposal
+      // failures must NOT propagate out of the host runTurn.
+      try {
+        childEngine.dispose?.()
+      } catch {
+        // best-effort teardown; never throw out of the host's finally
       }
     }
   }

@@ -16,6 +16,7 @@
 import { execSync, spawnSync } from 'child_process'
 import { mkdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
+import { randomBytes } from 'crypto'
 
 // ─────────────────────────────────────────────────────────────
 // Shell single-quote escape
@@ -68,22 +69,51 @@ export class TmuxLayout {
     const check = spawnSync('tmux', ['-V'], { stdio: 'pipe' })
     if (check.status !== 0) return false
 
-    // Only clean up THIS instance's sessions (identified by unique timestamp suffix)
-    // Don't kill other ovolv999 instances' tmux sessions
-    this.sessionName = `ovogo-${Date.now()}`
-    const myPrefix = this.sessionName.slice(0, -4)  // first 10 chars of timestamp = unique enough for this session
+    // Compose a session name that cannot collide with another running
+    // instance. We include PID (so two ovogo runs on the same host at
+    // the same millisecond don't fight) AND a random suffix (so a
+    // crashed and respawned process with the same PID still gets a
+    // unique name). The previous `ovogo-<Date.now()>` was vulnerable
+    // to collisions when:
+    //   - two users (or two terminals) launched ovogo within the same
+    //     millisecond — they both got the same name and one lost its
+    //     session.
+    //   - a process was respawned by a supervisor that preserved the
+    //     PID, then the next tmux call (init/destroy) targeted a
+    //     session owned by a DIFFERENT live process.
+    const pid = process.pid
+    const rand = randomBytes(3).toString('hex')  // 6 hex chars
+    this.sessionName = `ovogo-${pid}-${rand}`
+    const myPrefix = `ovogo-${pid}-`  // exact match: our PID, our session
+
     try {
-      // Kill only sessions older than 1 hour (stale from crashed processes)
-      const out = execSync('tmux ls -F "#{session_name}" 2>/dev/null', { stdio: 'pipe' }).toString()
-      for (const name of out.trim().split('\n')) {
-        if (name.startsWith('ovogo-') && !name.includes(myPrefix)) {
-          // Only kill sessions older than 1 hour
+      // Garbage-collect STALE ovogo-* sessions that don't belong to
+      // a live process. We do NOT kill a session just because it's
+      // old — the previous behavior was to kill anything > 1h, which
+      // also killed sessions that a user had `tmux a`-ed into for a
+      // long-running monitoring task. Now we only kill if:
+      //   (a) the session has NO attached clients, AND
+      //   (b) it's owned by a PID that no longer exists, OR it has
+      //       been idle for > 1h.
+      const out = execSync('tmux ls -F "#{session_name}||#{session_created}||#{session_attached}" 2>/dev/null', { stdio: 'pipe' }).toString()
+      for (const line of out.trim().split('\n')) {
+        if (!line.startsWith('ovogo-')) continue
+        if (line.includes(myPrefix)) continue  // skip our own session
+        const [name, createdStr, attachedStr] = line.split('||')
+        if (!name || !createdStr) continue
+        const attached = attachedStr === '1'
+        if (attached) {
+          // Never kill a session the user is currently watching. This
+          // is the most important fix here: the previous code would
+          // happily kill an attached session if its PID happened to
+          // match a stale process, and the user would suddenly see
+          // their monitor go dark.
+          continue
+        }
+        const ageSec = Date.now() / 1000 - parseInt(createdStr, 10)
+        if (ageSec > 3600) {
           try {
-            const created = execSync(`tmux display-message -p -t ${sq(name)} '#{session_created}'`, { stdio: 'pipe' }).toString().trim()
-            const ageSec = Date.now() / 1000 - parseInt(created, 10)
-            if (ageSec > 3600) {
-              execSync(`tmux kill-session -t ${sq(name)}`, { stdio: 'pipe' })
-            }
+            execSync(`tmux kill-session -t ${sq(name)}`, { stdio: 'pipe' })
           } catch { /* skip */ }
         }
       }
@@ -215,10 +245,34 @@ export class TmuxLayout {
    * 清理：杀掉整个 tmux 会话（主进程退出时调用）。
    * 这会终止所有子 agent 窗口内的 tail -f 进程。
    * Best-effort — 失败不抛。
+   *
+   * If the user has manually `tmux a`-ed into this session to watch
+   * the agent monitor, we DO NOT kill it — they'd be left staring at
+   * a "session not found" message. Instead we detach all our spawned
+   * `tail -f` processes (by killing the session) only if there are no
+   * attached clients. If clients ARE attached, we just release the
+   * in-process state and leave the session running for the user to
+   * inspect / clean up themselves.
    */
   destroy(): void {
     if (!this.initialized || !this.sessionName) return
     try {
+      // Check if anyone is attached to our session.
+      let attached = 0
+      try {
+        const out = execSync(
+          `tmux display-message -p -t ${sq(this.sessionName)} '#{session_attached}'`,
+          { stdio: 'pipe' },
+        ).toString().trim()
+        attached = parseInt(out, 10) || 0
+      } catch { /* session may be gone — best-effort below */ }
+      if (attached > 0) {
+        // Don't kill the user's monitor. Just drop our reference.
+        this.initialized = false
+        this.sessionName = ''
+        this.activeWindows = []
+        return
+      }
       execSync(`tmux kill-session -t ${sq(this.sessionName)}`, { stdio: 'pipe' })
     } catch { /* best-effort */ }
     this.initialized = false

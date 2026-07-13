@@ -6,13 +6,14 @@
  * This prevents accidental changes and makes diffs reviewable.
  */
 
-import { readFile, writeFile } from 'fs/promises'
+import { readFile } from 'fs/promises'
 import { existsSync } from 'fs'
 import { dirname } from 'path'
-import { execSync } from 'child_process'
+import { execFileSync } from 'child_process'
 import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/types.js'
 import { EDIT_FILE_DESCRIPTION } from '../prompts/tools.js'
-import { hasFileBeenRead } from '../core/fileState.js'
+import { hasFileBeenRead, hasFileChanged, markFileRead } from '../core/fileState.js'
+import { atomicWrite, statSafely } from '../core/atomicWrite.js'
 
 export interface EditFileInput {
   file_path: string
@@ -80,7 +81,54 @@ export class FileEditTool implements Tool {
     }
 
     try {
+      // ── TOCTOU window coverage map ───────────────────────────────────────
+      // This function defends against external writers at FOUR distinct
+      // checkpoints. Between checkpoints there are unavoidable windows
+      // (the file may keep changing in the gaps). For each window we list
+      // which guard (if any) catches the change, and what the cost of
+      // closing it would be.
+      //
+      //   A. before our read          → hasFileChanged(file_path, content)
+      //                                  (uses cache hash; catches same-
+      //                                   mtime/same-size swaps that the
+      //                                   pre-read mtime+size check misses)
+      //   B. between preStat and read  → postStat mtime/size check (#1)
+      //   C. between read and postStat → content-equality re-read (#2)
+      //   D. between re-read and write → NOT GUARDED. Closing this would
+      //                                  require file-locking (flock) or
+      //                                  a CAS retry loop with the rename.
+      //                                  We accept this last small window
+      //                                  because the cost of locking on
+      //                                  every Edit is high and the
+      //                                  window is microseconds.
+      //
+      // ─────────────────────────────────────────────────────────────────────
+      //
+      // Snapshot the file's mtime+size BEFORE reading its content. After we
+      // compute the replacement we re-stat and bail if the file changed
+      // underneath us — closing window B (the read-modify-write TOCTOU).
+      // The post-readFile hasFileChanged check below covers window A.
+      const preStat = await statSafely(file_path)
+
       const content = await readFile(file_path, 'utf8')
+
+      // Stale-content guard (window A) — placed AFTER readFile so we can
+      // pass the just-read content to hasFileChanged and exercise the
+      // SHA-256 hash layer. A pre-read hasFileChanged() (mtime+size only)
+      // cannot detect a same-mtime / same-size replacement, so the guard
+      // used to miss that case for swaps that happened between the prior
+      // user-Read and Edit. The cost of moving the guard past the read is
+      // one read for stale files, which is acceptable — Edit was about
+      // to read anyway.
+      if (hasFileChanged(file_path, content)) {
+        return {
+          content:
+            `Error: ${file_path} has been modified since you last read it ` +
+            `(by a linter, formatter, or the user). Read the file again ` +
+            `before editing to avoid losing changes.`,
+          isError: true,
+        }
+      }
 
       const occurrences = countOccurrences(content, old_string)
 
@@ -104,10 +152,54 @@ export class FileEditTool implements Tool {
         ? content.split(old_string).join(new_string)
         : content.replace(old_string, () => new_string) // arrow fn prevents $ pattern interpretation
 
-      // Back up the file before modifying (undo/checkpoint support)
+      // TOCTOU guard #1 — mtime+size. Cheap; catches most external writers.
+      const postStat = await statSafely(file_path)
+      if (
+        preStat === null ||
+        postStat === null ||
+        preStat.mtimeMs !== postStat.mtimeMs ||
+        preStat.size !== postStat.size
+      ) {
+        return {
+          content:
+            `Error: ${file_path} was modified by another writer during the edit. ` +
+            `Read the file again to get current content before retrying.`,
+          isError: true,
+        }
+      }
+
+      // TOCTOU guard #2 — content equality. mtime+size can fail to detect a
+      // same-size replacement that lands within the same millisecond (e.g.
+      // a formatter that saves in place on a fast disk). Re-read and
+      // compare to the content we computed the replacement against. If
+      // anything differs we refuse to overwrite, even when mtime/size match.
+      // We don't claim strict CAS semantics — instead we surface "read again"
+      // and let the caller decide.
+      const reReadContent = await readFile(file_path, 'utf8')
+      if (reReadContent !== content) {
+        return {
+          content:
+            `Error: ${file_path} was modified during the edit (content mismatch, ` +
+            `possibly same-size same-mtime replacement). Read the file again ` +
+            `to get current content before retrying.`,
+          isError: true,
+        }
+      }
+
+      // Both TOCTOU guards passed — back up the current content for undo,
+      // then atomically replace. trackEdit is intentionally placed AFTER
+      // the guards so a refused edit doesn't create a phantom history
+      // version of content we never actually changed.
       context.fileHistory?.trackEdit(file_path)
 
-      await writeFile(file_path, newContent, 'utf8')
+      // Atomic write — see src/core/atomicWrite.ts.
+      await atomicWrite(file_path, newContent)
+
+      // Refresh the file-state cache so a subsequent Read sees this edit's
+      // new content as the cached baseline. Pass `newContent` so the hash
+      // layer can detect same-mtime/same-size replacements on the next
+      // Write/Edit without re-reading.
+      markFileRead(file_path, newContent)
 
       // Auto-format: detect prettier/eslint config in project and run after edit
       // Walk up from file's directory to find project root (where config files live)
@@ -124,14 +216,44 @@ export class FileEditTool implements Tool {
       }
       let formatNote = ''
       try {
+        // SECURITY: never use execSync with a string command — the file_path
+        // (which is untrusted input from the LLM) would otherwise be
+        // interpreted by the shell, allowing arbitrary command injection
+        // (e.g. file_path = 'x; rm -rf ~'). execFileSync with an args
+        // array bypasses the shell entirely: every argument is passed
+        // verbatim as a single argv element to the target executable.
+        // Capture stdout/stderr so a formatter warning doesn't pollute
+        // the tool's stdout — we only care whether it succeeded.
         if (existsSync(`${projectRoot}/.prettierrc`) || existsSync(`${projectRoot}/.prettierrc.js`) || existsSync(`${projectRoot}/prettier.config.js`)) {
-          execSync(`npx prettier --write "${file_path}" 2>&1`, { cwd: projectRoot, encoding: 'utf8', timeout: 10_000 })
+          execFileSync('npx', ['prettier', '--write', file_path], {
+            cwd: projectRoot,
+            encoding: 'utf8',
+            timeout: 10_000,
+            stdio: ['ignore', 'pipe', 'pipe'],
+          })
           formatNote = ' (formatted with prettier)'
         } else if (existsSync(`${projectRoot}/.eslintrc`) || existsSync(`${projectRoot}/.eslintrc.js`) || existsSync(`${projectRoot}/eslint.config.js`)) {
-          execSync(`npx eslint --fix "${file_path}" 2>&1`, { cwd: projectRoot, encoding: 'utf8', timeout: 10_000 })
+          execFileSync('npx', ['eslint', '--fix', file_path], {
+            cwd: projectRoot,
+            encoding: 'utf8',
+            timeout: 10_000,
+            stdio: ['ignore', 'pipe', 'pipe'],
+          })
           formatNote = ' (fixed with eslint)'
         }
       } catch { /* best-effort format — don't fail the edit */ }
+
+      // If a formatter ran in-place above, the file content may now differ
+      // from `newContent`. Re-mark with the post-format content so the cache
+      // hash reflects what is actually on disk. Best-effort: a failed re-read
+      // leaves the pre-format hash, which is still a valid (just slightly
+      // stale) baseline.
+      if (formatNote !== '') {
+        try {
+          const postFormatContent = await readFile(file_path, 'utf8')
+          markFileRead(file_path, postFormatContent)
+        } catch { /* leave the prior hash in place */ }
+      }
 
       // Build a simple diff for display
       const oldLines = old_string.split('\n')

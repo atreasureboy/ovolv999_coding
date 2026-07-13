@@ -116,10 +116,28 @@ function truncateToolResult(result: string, sessionDir?: string): string {
  * Enforce an aggregate budget across all tool results in a single batch.
  * When the total character count exceeds MAX_AGGREGATE_TOOL_RESULTS,
  * the largest results are individually persisted to disk (replaced with
- * preview + file path) until the aggregate fits.
+ * preview + file path) until the aggregate fits. Smaller-but-numerous
+ * results that don't warrant disk persist are TRUNCATED in place to
+ * head+tail — there is no fallback below MAX_TOOL_RESULT_LENGTH for the
+ * disk path, so we must truncate medium-sized results in memory instead
+ * of giving up.
  *
- * This solves the "10 parallel Grep calls each returning 15K = 150K total"
- * problem that per-result truncation cannot catch.
+ * This solves BOTH:
+ *   - "1 huge + 0 small" (one Grep returning 80K) — persist the giant
+ *   - "10 medium each returning 15K = 150K total" — persists the biggest
+ *     and truncates the rest so the aggregate actually fits.
+ * Per-result truncation alone cannot catch the second case.
+ *
+ * Per-item cap: MAX_AGGREGATE_TOOL_RESULTS / item_count, floored at 1.
+ * With this cap, once every item is at most itemTarget chars the
+ * aggregate MUST fit (sum ≤ MAX_AGGREGATE_TOOL_RESULTS) — the loop's
+ * exit predicate ("currentTotal ≤ MAX_AGGREGATE_TOOL_RESULTS") is then
+ * guaranteed to fire, no matter how many items there are.
+ *
+ * Regression guard: the previous implementation had `break` when
+ * finding a "small enough" item, exiting the loop on the FIRST medium
+ * result and leaving the aggregate unchanged. Items with size between
+ * (per-item budget) and MAX_TOOL_RESULT_LENGTH were not trimmed.
  *
  * Inspired by claude-code-best's enforceToolResultBudget.
  */
@@ -129,32 +147,61 @@ function enforceAggregateToolResultBudget(
 ): void {
   const totalChars = results.reduce((sum, r) => sum + r.content.length, 0)
   if (totalChars <= MAX_AGGREGATE_TOOL_RESULTS) return
-  if (!sessionDir) return // can't persist without sessionDir
+  if (results.length === 0) return
 
-  // Sort by size descending — persist the largest first
+  // Per-item cap: distribute the aggregate budget evenly across the
+  // items. Once every item is at most `itemTarget` chars the aggregate
+  // MUST fit (and the break-on-budget predicate fires).
+  const itemTarget = Math.max(1, Math.floor(MAX_AGGREGATE_TOOL_RESULTS / results.length))
+
+  // Sort by size descending — work on the largest first so each shrink
+  // buys the most headroom.
   const indexed = results.map((r, i) => ({ r, i, size: r.content.length }))
   indexed.sort((a, b) => b.size - a.size)
 
   let currentTotal = totalChars
   for (const item of indexed) {
     if (currentTotal <= MAX_AGGREGATE_TOOL_RESULTS) break
-    if (item.size <= MAX_TOOL_RESULT_LENGTH) break // already small enough
 
-    // Persist this result to disk
-    const original = item.r.content
-    try {
-      const dir = join(sessionDir, 'tool-results')
-      mkdirSync(dir, { recursive: true })
-      const fileName = `result_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.txt`
-      const filePath = join(dir, fileName)
-      writeFileSync(filePath, original, 'utf8')
-      const preview = original.slice(0, 2000)
-      results[item.i].content =
-        `${preview}\n\n[... Full output (${original.length} chars) saved to: ${filePath} ...]`
-      currentTotal -= original.length - results[item.i].content.length
-    } catch {
-      break // can't persist — stop trying
+    // Already small enough — leave alone. Regression guard: the legacy
+    // code `break`-ed here, which prevented the rest of the items from
+    // being shrunk. `continue` lets the loop proceed to trim the others.
+    if (item.size <= itemTarget) continue
+
+    // Persist large items to disk when available — biggest shrink
+    // (file body is replaced by a ~2KB preview + path). Falls through
+    // to head+tail truncation if no sessionDir OR if the write fails.
+    if (item.size > MAX_TOOL_RESULT_LENGTH && sessionDir) {
+      const original = item.r.content
+      try {
+        const dir = join(sessionDir, 'tool-results')
+        mkdirSync(dir, { recursive: true })
+        const fileName = `result_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.txt`
+        const filePath = join(dir, fileName)
+        writeFileSync(filePath, original, 'utf8')
+        const preview = original.slice(0, 2000)
+        const replacement =
+          `${preview}\n\n[... Full output (${original.length} chars) saved to: ${filePath} ...]`
+        results[item.i].content = replacement
+        currentTotal += replacement.length - original.length
+        continue
+      } catch {
+        // Disk write failed — fall through to in-memory truncation.
+      }
     }
+
+    // In-memory head+tail truncation. Shrinks this item to itemTarget
+    // so the aggregate fits when every item is processed.
+    const original = item.r.content
+    if (original.length === 0) continue
+    const headLen = Math.max(1, Math.floor(itemTarget / 2))
+    const tailLen = Math.max(1, itemTarget - headLen)
+    const truncated =
+      original.slice(0, headLen) +
+      `\n\n[... ${original.length - (headLen + tailLen)} chars truncated to fit aggregate budget ...]\n\n` +
+      original.slice(original.length - tailLen)
+    results[item.i].content = truncated
+    currentTotal += truncated.length - original.length
   }
 }
 
@@ -258,6 +305,18 @@ export class ExecutionEngine {
   private _suppressCompactWarning = false
   /** Cached resolved context window for the current model — refreshed lazily */
   private _resolvedContextWindow: number | null = null
+  /**
+   * Reentrancy guard for `runTurn`. Every ExecutionEngine is single-turn
+   * per instance: the legacy design reused a singleton slot
+   * (`currentTurnAbortController`) for the in-flight turn, which allowed
+   * two `runTurn` calls to overlap and share mutable state — aborted siblings
+   * would clobber each other's controllers, systemPromptTokens, the message
+   * accumulator, cost-tracker entries, etc. The fix is structural: a
+   * concurrent `runTurn` call observes this flag and rejects with a clear
+   * error BEFORE any side effects fire. This is the "explicitly reject"
+   * branch of priority-1.
+   */
+  private _turnInFlight = false
 
   /**
    * Resolve the model-aware context window (cached for the engine's
@@ -360,6 +419,27 @@ export class ExecutionEngine {
     this.currentTurnAbortController?.abort('user_cancelled')
   }
 
+  /**
+   * Tear down engine-owned side effects. Currently delegates to the
+   * BackgroundTaskManager so any long-running tasks spawned during the
+   * engine's lifetime (e.g. via the Bash tool's `run_in_background:true`)
+   * do not outlive the engine. Required by AgentTool so child engines —
+   * which have their own BackgroundTaskManager distinct from the parent's —
+   * are disposed when the sub-agent completes, aborts, or errors.
+   *
+   * Safe to call multiple times (the underlying manager's dispose is
+   * idempotent). Safe to call before any turn has run (no-op on an
+   * empty task map). Never throws.
+   */
+  dispose(): void {
+    try {
+      this.backgroundTaskManager.dispose()
+    } catch {
+      // disposal must not throw — AgentTool calls this from a finally
+      // block and any throw would propagate out of the host's runTurn
+    }
+  }
+
   /** Soft interrupt — pause after current tool, preserve history */
   softAbort(): void {
     this.softAbortRequested = true
@@ -422,8 +502,25 @@ export class ExecutionEngine {
 
   // ── Context budget ──────────────────────────────────────────────────────
 
-  private async evaluateContextBudget(messages: OpenAIMessage[], toolDefs?: ReturnType<typeof getToolDefinitions>): Promise<void> {
-    // Clear the compact-warning suppression flag from last turn
+  private async evaluateContextBudget(
+    messages: OpenAIMessage[],
+    toolDefs?: ReturnType<typeof getToolDefinitions>,
+    turnAbortSignal?: AbortSignal,
+  ): Promise<void> {
+    // Snapshot and reset the compact-warning suppression flag atomically.
+    // The previous implementation cleared this flag at the start of EVERY
+    // budget check, which meant the flag — set by a successful compact
+    // earlier in the same call — was never read in a meaningful state
+    // and the "next turn only" semantics described in the field's
+    // declaration never fired.
+    //
+    // Lifecycle now:
+    //   1. read + reset: snapshot into a local, reset the instance flag
+    //   2. emit warning if `shouldWarn && !suppressed` — uses the snapshot,
+    //      so a previous turn's compact suppresses THIS call's warning
+    //   3. on a fresh compact in step 4, set the flag again for the
+    //      NEXT call to read
+    const suppressCompactWarning = this._suppressCompactWarning
     this._suppressCompactWarning = false
 
     // Resolve the actual context window for the model. Use the cached getter
@@ -494,7 +591,7 @@ export class ExecutionEngine {
       }
     }
 
-    if (this.config.sessionDir && shouldWarn && !this._suppressCompactWarning) {
+    if (this.config.sessionDir && shouldWarn && !suppressCompactWarning) {
       this.renderer.contextWarning(totalTokens, maxCtxTokens, pct)
     }
 
@@ -511,6 +608,7 @@ export class ExecutionEngine {
         this.client,
         this.config.model,
         messages,
+        turnAbortSignal,
       )
 
       if (compactResult.compacted) {
@@ -606,11 +704,26 @@ export class ExecutionEngine {
         return result
       }
 
-      // Reactive compact: if API rejected due to context length, auto-compact and retry once
+      // Reactive compact: if API rejected due to context length, auto-compact and retry once.
+      //
+      // Match logic:
+      //   - `context_length_exceeded` (OpenAI) — explicit code
+      //   - `maximum context length` (Anthropic / generic) — explicit phrase
+      //   - bare `too long` is NOT included — too many user-facing error
+      //     strings contain "too long" without referring to context
+      //     (e.g. "request body was too long"). For `too long` to count,
+      //     a nearby context-token synonym must appear in a 80-char
+      //     window: this limits false positives to messages that actually
+      //     describe a context overflow.
       const compactErrMsg = (err as Error).message || ''
-      if (compactErrMsg.includes('context_length_exceeded') || compactErrMsg.includes('maximum context length') || compactErrMsg.includes('too long')) {
+      const isContextOverflowError =
+        compactErrMsg.includes('context_length_exceeded') ||
+        compactErrMsg.includes('maximum context length') ||
+        /context[\s_-]{0,80}(?:is\s+)?too\s+long/i.test(compactErrMsg) ||
+        /too\s+long[\s_-]{0,80}(?:context|tokens?|input|window|limit)/i.test(compactErrMsg)
+      if (isContextOverflowError) {
         this.renderer.warn('Context too long — auto-compacting and retrying...')
-        const compactResult = await maybeCompact(this.client, this.config.model, messages)
+        const compactResult = await maybeCompact(this.client, this.config.model, messages, turnAbortSignal)
         if (compactResult.compacted) {
           messages.length = 0
           messages.push(...compactResult.messages)
@@ -1023,78 +1136,114 @@ export class ExecutionEngine {
     userMessage: string,
     history: OpenAIMessage[],
   ): Promise<{ result: TurnResult; newHistory: OpenAIMessage[] }> {
-    const planMode = this.planModeActive
-
-    // Clear file read state for this turn (read-before-edit is per-turn, not cross-turn)
-    clearFileState()
-
-    // ── Boot Sequence: resolve + boot modules ──
-    const bootCtx: ModuleBootContext = {
-      cwd: this.config.cwd,
-      sessionDir: this.config.sessionDir,
-      config: this.config,
-      userMessage,
+    // ── Reentrancy guard ──────────────────────────────────────────────────
+    // The engine is single-turn per instance: every mutable field
+    // (currentTurnAbortController, systemPromptTokens, moduleBootResults,
+    // costTracker, the messages accumulator, _consecutiveCompactFailures,
+    // etc.) is shared. Two overlapping runTurn calls would silently
+    // overwrite each other's state — a sibling's `finally` could null
+    // the controller of the turn currently in flight. Reject the second
+    // call up front so callers can't accidentally race.
+    //
+    // Resolution paths:
+    //   1. Concurrent call → reject with a clear error before any work
+    //   2. For nested sub-agents, build a NEW ExecutionEngine per spawn
+    //      (AgentTool's factory pattern — already the supported path)
+    //   3. For "queue the next prompt", await the current turn and call
+    //      runTurn again — the flag clears in the `finally`.
+    if (this._turnInFlight) {
+      throw new Error(
+        'ExecutionEngine.runTurn rejected: another turn is already in progress on this engine instance. ' +
+        'Each ExecutionEngine is single-turn; await the in-flight turn or spawn a new engine via EngineConfig.agentFactory.',
+      )
     }
-    this.moduleBootResults = await Promise.all(
-      this.modules.map(m => Promise.resolve(m.boot(bootCtx))),
-    )
-    const moduleSections = this.moduleBootResults.flatMap(r => r.systemPromptSections ?? [])
-    const toolContextPatch = this.moduleBootResults.reduce(
-      (acc, r) => ({ ...acc, ...r.toolContextPatch }),
-      {} as Partial<ToolContext>,
-    )
-    // Collect tools provided by modules
-    const moduleTools = this.moduleBootResults.flatMap(r => r.tools ?? [])
-    this.allTools = [...this.tools, ...moduleTools]
+    this._turnInFlight = true
 
-    // Record boot trajectory (AgentOS pattern)
-    this.eventLog?.append('boot_context', 'engine', {
-      trajectory: 'boot_context',
-      modules: this.modules.map(m => m.name),
-      module_sections: moduleSections.length,
-      module_tools: moduleTools.length,
-      user_message_length: userMessage.length,
-    })
-
-    // Build system prompt (with module sections) and tool definitions
-    const systemPrompt = this.buildSystemPrompt(planMode, moduleSections)
-    // Estimate system prompt tokens for accurate context budget
-    this.systemPromptTokens = Math.ceil(systemPrompt.length / 3.5) + 20
-    const toolDefs = this.getToolDefinitions(planMode, moduleTools)
-
-    // Per-turn AbortController
-    const turnAbortController = new AbortController()
-    this.currentTurnAbortController = turnAbortController
-
-    // Initialize messages
-    const messages: OpenAIMessage[] = [...history, { role: 'user', content: userMessage }]
-
-    const toolContext = this.buildToolContext(
-      turnAbortController.signal,
-      { ...toolContextPatch, availableToolNames: toolDefs.map(t => t.function.name) },
-    )
-
-    // ── State machine driver ───────────────────────────────────────────
-    let state: QueryState = transitionQueryState({ kind: 'boot' }, { type: 'booted' })
-
-    let finalOutput = ''
-    let lastToolName: string | undefined
-    // Tool calls pending parse — stashed in llm_call, consumed in parse_response
-    let pendingToolCalls: StreamingToolCall[] = []
-    // Parsed tool calls — stashed in parse_response, consumed in tool_execution
-    let pendingParsedCalls: ParsedToolCall[] = []
-    // Continuation budget tracking (opt-in via config.enableContinuation)
-    const enableContinuation = this.config.enableContinuation ?? false
-    const turnTokenBudget =
-      this.config.turnTokenBudget ?? this.getEffectiveMaxOutputTokens() * 4
-    const budgetTracker = createBudgetTracker()
-    let turnTokensProduced = 0
-    let emptyResponseCount = 0
-    const MAX_EMPTY_RETRIES = 2
-    let lengthRetryCount = 0
-    const MAX_LENGTH_RETRIES = 3
-
+    // Every line of code below runs inside an OUTER try/finally whose
+    // sole job is releasing `_turnInFlight`. Critical: any throw between
+    // here and the existing inner try would previously have leaked the
+    // flag and permanently locked the engine. Setup steps that can
+    // throw include:
+    //   - clearFileState() (filesystem)
+    //   - module boot (each module's `boot()` is a third-party hook)
+    //   - buildSystemPrompt() (pure but allocates heavily)
+    //   - buildToolContext() (renders initial tool context)
+    // The outer finally is the single, unconditional release point —
+    // success, soft-abort, hard-abort, and ANY thrown error all flow
+    // through it, so the engine can never get stuck.
     let result: TurnResult
+    try {
+      const planMode = this.planModeActive
+
+      // Clear file read state for this turn (read-before-edit is per-turn, not cross-turn)
+      clearFileState()
+
+      // ── Boot Sequence: resolve + boot modules ──
+      const bootCtx: ModuleBootContext = {
+        cwd: this.config.cwd,
+        sessionDir: this.config.sessionDir,
+        config: this.config,
+        userMessage,
+      }
+      this.moduleBootResults = await Promise.all(
+        this.modules.map(m => Promise.resolve(m.boot(bootCtx))),
+      )
+      const moduleSections = this.moduleBootResults.flatMap(r => r.systemPromptSections ?? [])
+      const toolContextPatch = this.moduleBootResults.reduce(
+        (acc, r) => ({ ...acc, ...r.toolContextPatch }),
+        {} as Partial<ToolContext>,
+      )
+      // Collect tools provided by modules
+      const moduleTools = this.moduleBootResults.flatMap(r => r.tools ?? [])
+      this.allTools = [...this.tools, ...moduleTools]
+
+      // Record boot trajectory (AgentOS pattern)
+      this.eventLog?.append('boot_context', 'engine', {
+        trajectory: 'boot_context',
+        modules: this.modules.map(m => m.name),
+        module_sections: moduleSections.length,
+        module_tools: moduleTools.length,
+        user_message_length: userMessage.length,
+      })
+
+      // Build system prompt (with module sections) and tool definitions
+      const systemPrompt = this.buildSystemPrompt(planMode, moduleSections)
+      // Estimate system prompt tokens for accurate context budget
+      this.systemPromptTokens = Math.ceil(systemPrompt.length / 3.5) + 20
+      const toolDefs = this.getToolDefinitions(planMode, moduleTools)
+
+      // Per-turn AbortController
+      const turnAbortController = new AbortController()
+      this.currentTurnAbortController = turnAbortController
+
+      // Initialize messages
+      const messages: OpenAIMessage[] = [...history, { role: 'user', content: userMessage }]
+
+      const toolContext = this.buildToolContext(
+        turnAbortController.signal,
+        { ...toolContextPatch, availableToolNames: toolDefs.map(t => t.function.name) },
+      )
+
+      // ── State machine driver ───────────────────────────────────────────
+      let state: QueryState = transitionQueryState({ kind: 'boot' }, { type: 'booted' })
+
+      let finalOutput = ''
+      let lastToolName: string | undefined
+      // Tool calls pending parse — stashed in llm_call, consumed in parse_response
+      let pendingToolCalls: StreamingToolCall[] = []
+      // Parsed tool calls — stashed in parse_response, consumed in tool_execution
+      let pendingParsedCalls: ParsedToolCall[] = []
+      // Continuation budget tracking (opt-in via config.enableContinuation)
+      const enableContinuation = this.config.enableContinuation ?? false
+      const turnTokenBudget =
+        this.config.turnTokenBudget ?? this.getEffectiveMaxOutputTokens() * 4
+      const budgetTracker = createBudgetTracker()
+      let turnTokensProduced = 0
+      let emptyResponseCount = 0
+      const MAX_EMPTY_RETRIES = 2
+      let lengthRetryCount = 0
+      const MAX_LENGTH_RETRIES = 3
+
     try {
       while (!isTerminal(state)) {
         switch (state.kind) {
@@ -1115,7 +1264,7 @@ export class ExecutionEngine {
           }
 
           case 'budget_check': {
-            await this.evaluateContextBudget(messages, toolDefs)
+            await this.evaluateContextBudget(messages, toolDefs, turnAbortController.signal)
             state = transitionQueryState(state, { type: 'continue' })
             break
           }
@@ -1316,6 +1465,12 @@ export class ExecutionEngine {
       // Don't re-throw — construct error result so onComplete hooks still fire
       result = { stopped: true, reason: 'error', output: finalOutput || `[Error: ${errMsg}]` }
     } finally {
+      // Inner finally: cleans up ONLY what setup reached. If the outer
+      // try's setup threw before `turnAbortController` was constructed,
+      // this finally never runs — the outer finally handles that case
+      // with its own scope-bounded cleanup (it touches no setup-local
+      // symbols).
+      //
       // Ownership-aware cleanup: only release the singleton slot if it still
       // points at OUR controller. Without this check, an in-flight older
       // turn whose `finally` runs after a newer turn has installed its own
@@ -1354,6 +1509,16 @@ export class ExecutionEngine {
     this.config.hookRunner?.runOnComplete?.(result)
 
     return { result, newHistory: messages }
+    } finally {
+      // OUTER finally: the SINGLE point that releases _turnInFlight.
+      // Runs unconditionally — success, soft-abort, hard-abort, state-
+      // machine catch-and-suppress, AND any throw from setup (module
+      // boot, file state clear, buildSystemPrompt, buildToolContext)
+      // ALL flow through here. Without this outer finally the flag
+      // would leak on every setup throw, permanently locking the
+      // engine against future turns.
+      this._turnInFlight = false
+    }
   }
 
   getModel(): string {
