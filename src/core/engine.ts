@@ -215,6 +215,14 @@ export class ExecutionEngine {
   private currentTurnAbortController: AbortController | null = null
   /** Soft-interrupt flag: pause after current tool finishes */
   private softAbortRequested = false
+  /**
+   * Owner of the soft-abort request — the controller that was current at the
+   * moment {@link softAbort} was called. Lets the per-turn `finally` block
+   * decide whether the flag belongs to it (safe to clear) or to a sibling
+   * turn that started after this one (must be preserved). null means the
+   * request was queued while no turn was running; the next turn claims it.
+   */
+  private softAbortOwner: AbortController | null = null
   /** Event log — may be undefined if not configured */
   private eventLog: EngineConfig['eventLog']
   /** Enabled capability modules */
@@ -242,11 +250,11 @@ export class ExecutionEngine {
   /** Suppress compact warning after successful compaction (next turn only) */
   private _suppressCompactWarning = false
 
-  constructor(config: EngineConfig, renderer: Renderer) {
+  constructor(config: EngineConfig, renderer: Renderer, client?: OpenAI) {
     // Merge agent config into effective config (overrides legacy fields)
     this.config = applyAgentToConfig(config)
     this.renderer = renderer
-    this.client = new OpenAI({
+    this.client = client ?? new OpenAI({
       apiKey: config.apiKey,
       baseURL: config.baseURL,
       maxRetries: 5,      // SDK auto-retries 429/5xx with exponential backoff
@@ -321,6 +329,26 @@ export class ExecutionEngine {
   /** Soft interrupt — pause after current tool, preserve history */
   softAbort(): void {
     this.softAbortRequested = true
+    // Owner = the controller of whichever turn was current at the time of
+    // the request. If no turn is running, owner is null and the next turn
+    // claims the request on its first check_abort.
+    this.softAbortOwner = this.currentTurnAbortController
+  }
+
+  /**
+   * Attempt to claim a pending soft-abort request for the supplied turn
+   * controller. Returns true iff the flag was set AND its owner is either
+   * null (queued while idle) or matches our controller. On success, the
+   * flag and owner are cleared so subsequent turns see a clean slate.
+   */
+  private claimSoftAbort(turnAbortController: AbortController): boolean {
+    if (!this.softAbortRequested) return false
+    if (this.softAbortOwner !== null && this.softAbortOwner !== turnAbortController) {
+      return false
+    }
+    this.softAbortRequested = false
+    this.softAbortOwner = null
+    return true
   }
 
   // ── System prompt ───────────────────────────────────────────────────────
@@ -762,10 +790,11 @@ export class ExecutionEngine {
     parsedCalls: ParsedToolCall[],
     toolContext: ToolContext,
     planMode: boolean,
-    turnAbortSignal: AbortSignal,
+    turnAbortController: AbortController,
     messages: OpenAIMessage[],
     turnNumber: number,
   ): Promise<{ aborted: boolean }> {
+    const turnAbortSignal = turnAbortController.signal
     const batches = partitionToolCalls(parsedCalls, this.allTools)
 
     for (const batch of batches) {
@@ -866,17 +895,17 @@ export class ExecutionEngine {
             name: tc.name,
           })
 
-          // Soft-interrupt check after each serial tool
-          if (this.softAbortRequested) {
-            this.softAbortRequested = false
+          // Soft-interrupt check after each serial tool — ownership-aware:
+          // a sibling turn's soft-abort request must NOT be consumed here.
+          if (this.claimSoftAbort(turnAbortController)) {
             return { aborted: true }
           }
         }
       }
 
-      // Soft-interrupt check after each batch (parallel too)
-      if (this.softAbortRequested) {
-        this.softAbortRequested = false
+      // Soft-interrupt check after each batch (parallel too) — same
+      // ownership check as the serial path.
+      if (this.claimSoftAbort(turnAbortController)) {
         return { aborted: true }
       }
     }
@@ -1008,8 +1037,7 @@ export class ExecutionEngine {
           case 'check_abort': {
             if (turnAbortController.signal.aborted) {
               state = transitionQueryState(state, { type: 'hard_abort', output: finalOutput })
-            } else if (this.softAbortRequested) {
-              this.softAbortRequested = false
+            } else if (this.claimSoftAbort(turnAbortController)) {
               state = transitionQueryState(state, { type: 'soft_abort', output: finalOutput })
             } else if (state.iteration > this.config.maxIterations) {
               this.renderer.warn(
@@ -1182,7 +1210,7 @@ export class ExecutionEngine {
               pendingParsedCalls,
               toolContext,
               planMode,
-              turnAbortController.signal,
+              turnAbortController,
               messages,
               state.iteration,
             )
@@ -1224,7 +1252,23 @@ export class ExecutionEngine {
       // Don't re-throw — construct error result so onComplete hooks still fire
       result = { stopped: true, reason: 'error', output: finalOutput || `[Error: ${errMsg}]` }
     } finally {
-      this.currentTurnAbortController = null
+      // Ownership-aware cleanup: only release the singleton slot if it still
+      // points at OUR controller. Without this check, an in-flight older
+      // turn whose `finally` runs after a newer turn has installed its own
+      // controller would null out the new turn's slot, making subsequent
+      // `engine.abort()` calls silently no-op.
+      if (this.currentTurnAbortController === turnAbortController) {
+        this.currentTurnAbortController = null
+      }
+      // Ownership-aware soft-flag cleanup: if the flag is still set and its
+      // owner is OUR controller (we never claimed it via check_abort),
+      // clear it. If the owner is a different controller — meaning a newer
+      // turn called softAbort() while we were running — preserve it so the
+      // newer turn's check_abort can still see the request.
+      if (this.softAbortRequested && this.softAbortOwner === turnAbortController) {
+        this.softAbortRequested = false
+        this.softAbortOwner = null
+      }
     }
 
     // ── Module onComplete hooks (reflection, etc.) ──

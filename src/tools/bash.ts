@@ -1,13 +1,34 @@
 /**
- * BashTool — shell command execution with proper abort support
+ * BashTool — shell command execution with proper abort + process-group cleanup.
  *
- * Key change vs the previous promisified exec() approach:
- * We use exec() in callback form so we hold a reference to the ChildProcess.
- * When context.signal fires (Ctrl+C), we kill the entire process group
- * (SIGTERM → SIGKILL after 5 s)
+ * Linux/macOS: child is spawned with `detached: true` so it becomes the
+ * leader of its own process group; `process.kill(-pid, SIGTERM)` then
+ * signals the entire subtree (shell + every backgrounded `&` subprocess).
+ * Windows: falls back to `taskkill /F /T /PID` (tree kill).
+ *
+ * Output / timeout / hint contracts are unchanged from the previous
+ * `exec()`-based implementation so callers and existing tests behave the
+ * same way; only the abort path and cleanup guarantees are tightened.
+ *
+ * Cleanup state machines — promise lifecycle vs process lifecycle:
+ *
+ *   promise lifecycle  (settled / resolve)
+ *     ↳ resolves the outer Promise<ToolResult>
+ *     ↳ removes the abort listener
+ *     ↳ fires follow-mode cleanup
+ *     ↳ does NOT clear SIGKILL escalation (process may still be alive)
+ *
+ *   process lifecycle  (timeoutTimer / killTimer)
+ *     ↳ timeoutTimer cleared on EVERY terminal path (close / error /
+ *       abort / timeout-fire) so it can never double-fire after abort
+ *     ↳ killTimer cleared only on child close / error so the SIGKILL
+ *       escalation actually fires if SIGTERM is ignored by a stubborn
+ *       child (otherwise clearing it in settle would silently leak the
+ *       whole subprocess tree)
  */
 
-import { exec, spawn, execSync } from 'child_process'
+import { spawn, execSync } from 'child_process'
+import type { ChildProcess } from 'child_process'
 import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/types.js'
 import { BASH_DESCRIPTION } from '../prompts/tools.js'
 import { mkdirSync, accessSync, constants } from 'fs'
@@ -16,6 +37,7 @@ import { join } from 'path'
 const MAX_OUTPUT_LENGTH = 30_000
 const DEFAULT_TIMEOUT_MS = 1_800_000  // 30 min — long-running commands default
 const MAX_TIMEOUT_MS = 14_400_000    // 4 h — max for very long tasks
+const DEFAULT_SIGKILL_GRACE_MS = 5_000
 
 // Shell detection — prioritize user override, then platform default.
 // On Windows: prefer Git Bash if available, fall back to cmd.exe.
@@ -55,12 +77,68 @@ function truncateOutput(output: string, maxLen: number): string {
   return `${head}\n\n[... ${output.length - maxLen} characters truncated ...]\n\n${tail}`
 }
 
+/** Build the diagnostic hint appended to a non-zero-exit error message. */
+function buildErrorHint(out: string): string {
+  const lowerOut = out.toLowerCase()
+  if (lowerOut.includes('command not found')) {
+    return '\n\n[Hint: command not found — check if the tool is installed or in PATH. Try `which <cmd>` or install it.]'
+  }
+  if (lowerOut.includes('no such file or directory')) {
+    return '\n\n[Hint: file/directory not found — check the path. Use Glob to find the correct location.]'
+  }
+  if (lowerOut.includes('permission denied')) {
+    return '\n\n[Hint: permission denied — check file permissions or try with appropriate privileges.]'
+  }
+  if (lowerOut.includes('econnrefused') || lowerOut.includes('etimedout')) {
+    return '\n\n[Hint: connection error — check if the service is running and the port is correct.]'
+  }
+  if (lowerOut.includes('cannot find module') || lowerOut.includes('could not resolve')) {
+    return '\n\n[Hint: module not found — run `npm install` or check the import path.]'
+  }
+  if (lowerOut.includes('syntax error') || lowerOut.includes('unexpected token')) {
+    return '\n\n[Hint: syntax error — check for missing brackets, semicolons, or incorrect syntax.]'
+  }
+  return ''
+}
+
+/**
+ * Normalise a user-supplied SIGKILL grace value. Returns the default
+ * for any non-finite or negative input so a misconfigured constructor
+ * argument can never disable SIGKILL escalation (e.g. `NaN` or `-1`
+ * would otherwise pass through `setTimeout` and never fire).
+ */
+function normaliseGraceMs(value: number | undefined): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    return DEFAULT_SIGKILL_GRACE_MS
+  }
+  return value
+}
+
+/**
+ * Optional BashTool configuration.
+ *
+ * `sigkillGraceMs` — wall-clock delay between SIGTERM (polite kill) and
+ * SIGKILL (forced kill) when aborting / timing out a command. Default
+ * 5 000 ms. Pass a smaller value in tests to exercise the SIGKILL
+ * branch without sleeping for the production grace period.
+ */
+export interface BashToolOptions {
+  sigkillGraceMs?: number
+}
+
 export class BashTool implements Tool {
   name = 'Bash'
   metadata = {
     concurrencySafe: false,
     longRunning: true,
     mutatesState: true,
+  }
+
+  /** Wall-clock delay between SIGTERM and SIGKILL escalation. */
+  private readonly sigkillGraceMs: number
+
+  constructor(options: BashToolOptions = {}) {
+    this.sigkillGraceMs = normaliseGraceMs(options.sigkillGraceMs)
   }
 
   definition: ToolDefinition = {
@@ -101,6 +179,12 @@ export class BashTool implements Tool {
    * Per-input concurrency check (Claude Code pattern).
    * Read-only / query commands are safe to parallelize.
    * Mutating commands (install, build, write, git push) are NOT safe.
+   *
+   * Order matters: shell control operators (`&&`, `||`, `;`, `|`) and
+   * any unsafe-mutating pattern are checked BEFORE the safe read-only
+   * patterns. Otherwise a chained `ls && rm foo` would match the
+   * read-only `ls` pattern first and be classified as safe, even
+   * though the trailing `rm` makes the whole command unsafe.
    */
   isConcurrencySafe(input: Record<string, unknown>): boolean {
     const command = typeof input.command === 'string' ? input.command.toLowerCase() : ''
@@ -109,7 +193,28 @@ export class BashTool implements Tool {
     // Background commands still run the pattern check below — two parallel
     // `npm install` in background will corrupt node_modules just the same.
 
-    // Safe: read-only commands
+    // Step 1: any shell control operator makes the command non-safe.
+    // We can't reason about what each side does without parsing, so
+    // refuse to parallelize anything that chains multiple commands.
+    if (/(\|\||&&|;|\|)/.test(command)) return false
+
+    // Step 2: explicit unsafe mutating patterns win next — a `rm` is
+    // a `rm` regardless of how it's framed.
+    const unsafePatterns = [
+      /^(npm\s+(install|i|ci|uninstall|rm|publish)\b)/,
+      /^(pnpm\s+(install|add|remove|rm)\b)/,
+      /^(yarn\s+(add|remove|install)\b)/,
+      /^(git\s+(add|commit|push|pull|merge|rebase|reset|checkout|stash|cherry-pick)\b)/,
+      /^(rm\s|mv\s|cp\s|mkdir\s|rmdir\s|chmod\s|chown\s)/,
+      /^(curl\s|wget\s)/,
+      /^(docker\s|kubectl\s|terraform\s)/,
+      /^(npm\s+run\s|pnpm\s+run\s|yarn\s)/,
+    ]
+    for (const pattern of unsafePatterns) {
+      if (pattern.test(command)) return false
+    }
+
+    // Step 3: explicit safe read-only patterns.
     const safePatterns = [
       /^(ls|cat|head|tail|echo|pwd|whoami|date|which|whereis|file)\b/,
       /^(git\s+(status|log|diff|branch|show|blame|remote|rev-parse|config\s+--get)\b)/,
@@ -124,22 +229,6 @@ export class BashTool implements Tool {
     ]
     for (const pattern of safePatterns) {
       if (pattern.test(command)) return true
-    }
-
-    // Unsafe: commands that modify state
-    const unsafePatterns = [
-      /^(npm\s+(install|i|ci|uninstall|rm|publish)\b)/,
-      /^(pnpm\s+(install|add|remove|rm)\b)/,
-      /^(yarn\s+(add|remove|install)\b)/,
-      /^(git\s+(add|commit|push|pull|merge|rebase|reset|checkout|stash|cherry-pick)\b)/,
-      /^(rm\s|mv\s|cp\s|mkdir\s|rmdir\s|chmod\s|chown\s)/,
-      /^(curl\s|wget\s)/,
-      /^(docker\s|kubectl\s|terraform\s)/,
-      /^(npm\s+run\s|pnpm\s+run\s|yarn\s)/,
-      /(\|\||&&|;)/,  // chained commands — can't guarantee safety
-    ]
-    for (const pattern of unsafePatterns) {
-      if (pattern.test(command)) return false
     }
 
     // Default: conservative — treat unknown commands as unsafe
@@ -189,11 +278,16 @@ export class BashTool implements Tool {
 
       // Use appropriate shell flags: bash uses -c, cmd.exe uses /c
       const shellArgs = IS_WIN_CMD ? ['/c', actualCommand] : ['-c', actualCommand]
-      let child: ReturnType<typeof spawn>
+      let child: ChildProcess
       try {
+        // Background mode: detached + own process group. unref() so the
+        // foreground REPL can exit without waiting on every fire-and-forget
+        // task the model ever spawned.
         child = spawn(SHELL, shellArgs, {
           cwd: context.cwd,
           env: process.env,
+          detached: true,
+          stdio: 'ignore',
         })
       } catch (e) {
         return { content: `Failed to start background command: ${(e as Error).message}`, isError: true }
@@ -210,16 +304,66 @@ export class BashTool implements Tool {
     }
 
     // ── Foreground mode with abort support ──────────────────────
-    // Use exec() callback form so we can kill the child on abort.
-    // Kill by process group approach.
+    return this.runForeground(command, timeoutMs, follow_mode, context)
+  }
+
+  /**
+   * Run a foreground command, returning once it exits or is cancelled.
+   *
+   * Contract (unchanged from the previous `exec()`-based implementation):
+   *  - exit code 0          → isError=false, content = stdout/stderr
+   *  - non-zero exit code   → isError=false, content = "Exit code: N\n..."
+   *  - internal timeout     → isError=true, content = "Command timed out..."
+   *  - abort signal         → isError=true, content = "Command cancelled..."
+   *  - pre-abort            → isError=true, content = "Command cancelled (pre-abort)."
+   *
+   * New guarantees:
+   *  - pre-abort short-circuits before spawning
+   *  - abort kills the entire process group (Unix) / process tree (Windows)
+   *  - SIGKILL escalation survives promise resolution — fires on a
+   *    SIGTERM-ignoring child even after the cancel result was returned
+   *  - timeout timer is cleared on every terminal path so abort cannot
+   *    be followed by a spurious timeout
+   *  - abort listener is removed the moment the promise settles
+   */
+  private runForeground(
+    command: string,
+    timeoutMs: number,
+    followMode: boolean | undefined,
+    context: ToolContext,
+  ): Promise<ToolResult> {
+    // Pre-abort: if the signal is already aborted, refuse to spawn the
+    // process at all. Returning a plain cancelled result here avoids the
+    // wasted fork + immediate-kill path.
+    if (context.signal?.aborted) {
+      return Promise.resolve({
+        content: 'Command cancelled (pre-abort).',
+        isError: true,
+      })
+    }
+
     return new Promise<ToolResult>((resolve) => {
+      // Promise-lifecycle state
       let settled = false
+      // Abort listener — tracked so we can remove it the moment the
+      // promise settles (avoids the listener firing on a dead signal).
+      let abortListener: (() => void) | null = null
+
+      // Process-lifecycle state — these outlive the promise.
+      let timeoutTimer: NodeJS.Timeout | null = null
+      let killTimer: NodeJS.Timeout | null = null
+      // Set when the internal timeout fires so the child.on('close')
+      // handler can route to the timeout contract rather than reporting
+      // a fresh non-zero exit.
+      let timedOut = false
+
+      // follow-mode cleanup — fired on settle, NOT on child close
+      let followCleanup: (() => void) | null = null
 
       // ── follow_mode: set up tmux spectator pane ───────────────
       let actualCommand = command
-      let followCleanup: (() => void) | null = null
       let followModeHint = ''
-      if (follow_mode) {
+      if (followMode) {
         const followLogDir = context.sessionDir ? join(context.sessionDir, '.bg_logs') : join(context.cwd, '.bg_logs')
         try { mkdirSync(followLogDir, { recursive: true }) } catch { /* best-effort */ }
         const ts = Date.now()
@@ -249,7 +393,7 @@ export class BashTool implements Tool {
           try {
             const currentTmux = process.env.TMUX_PANE ? process.env.TMUX?.split(',')[0]?.replace(/^\//, '') : null
             if (currentTmux) {
-              spawn('tmux', ['join-pane', '-t', `${currentTmux}`, '-s', `${tmuxSessionName}`, '-l', '15'], {
+              spawn('tmux', ['join-pane', '-t', `${currentTmux}`, `-s`, `${tmuxSessionName}`, '-l', '15'], {
                 cwd: context.cwd,
               }).on('error', () => {})
               paneJoined = true
@@ -266,123 +410,180 @@ export class BashTool implements Tool {
         } catch { /* tmux not available, degrade gracefully */ }
       }
 
-      const child = exec(
-        actualCommand,
-        {
-          cwd: context.cwd,
-          timeout: timeoutMs,
-          maxBuffer: 50 * 1024 * 1024,
-          env: { ...process.env, TERM: 'dumb' },
-          shell: SHELL,
-        },
-        (err, stdout, stderr) => {
-          // Remove the abort listener to prevent it firing after process ends
-          if (context.signal) {
-            context.signal.removeEventListener('abort', onAbort)
-          }
+      // Choose shell args based on platform
+      const shellArgs = IS_WIN_CMD ? ['/c', actualCommand] : ['-c', actualCommand]
 
-          // Clean up follow mode resources
-          if (followCleanup) {
-            followCleanup()
-          }
+      // Spawn detached so the child is its own process group leader.
+      // Then `process.kill(-pid, SIGTERM)` reaches the shell + every
+      // backgrounded subprocess (the original exec()-based path missed
+      // these because the child shared the parent's pgid).
+      const child: ChildProcess = spawn(SHELL, shellArgs, {
+        cwd: context.cwd,
+        env: process.env,
+        detached: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
 
-          if (settled) return
-          settled = true
+      // ── Output capture ────────────────────────────────────────
+      let stdoutBuf = ''
+      let stderrBuf = ''
+      child.stdout?.setEncoding('utf8')
+      child.stderr?.setEncoding('utf8')
+      child.stdout?.on('data', (d: string) => { stdoutBuf += d })
+      child.stderr?.on('data', (d: string) => { stderrBuf += d })
 
-          // Check if we were cancelled
-          if (context.signal?.aborted) {
-            const partialOut = [stdout, stderr].filter(Boolean).join('\n').trimEnd()
-            const partial = partialOut ? `\n\nPartial output before cancellation:\n${truncateOutput(partialOut, 5000)}` : ''
-            resolve({ content: `Command cancelled (abort signal).${partial}\n\nHint: re-run with a smaller scope, or use run_in_background:true for long commands.`, isError: true })
-            return
-          }
-
-          if (!err) {
-            const combined = [stdout, stderr].filter(Boolean).join('\n').trimEnd()
-            const prefix = follow_mode ? `[Spectator mode: output streamed to tmux pane] ${followModeHint}\n` : ''
-            resolve({ content: truncateOutput(prefix + combined, MAX_OUTPUT_LENGTH) || '(no output)', isError: false })
-            return
-          }
-
-          const nodeErr = err as NodeJS.ErrnoException & {
-            killed?: boolean
-            signal?: string
-            stdout?: string
-            stderr?: string
-            code?: number
-          }
-
-          if (nodeErr.killed || nodeErr.signal === 'SIGTERM') {
-            const partialOut = [nodeErr.stdout ?? stdout, nodeErr.stderr ?? stderr].filter(Boolean).join('\n').trimEnd()
-            const partial = partialOut ? `\n\nPartial output before timeout:\n${truncateOutput(partialOut, 5000)}` : ''
-            resolve({ content: `Command timed out after ${timeoutMs / 1000}s.${partial}\n\nHint: for long-running commands, use run_in_background:true and check results with TaskGet, or raise the timeout argument.`, isError: true })
-            return
-          }
-
-          // Non-zero exit — provide stdout+stderr so the LLM can diagnose
-          const out = [nodeErr.stdout ?? stdout, nodeErr.stderr ?? stderr].filter(Boolean).join('\n').trimEnd()
-          const exitCode = nodeErr.code ?? 1
-          const prefix = follow_mode ? `[Spectator mode: output streamed to tmux pane] ${followModeHint}\n` : ''
-
-          // Error pattern detection — help the LLM diagnose common coding errors
-          let hint = ''
-          const lowerOut = out.toLowerCase()
-          if (lowerOut.includes('command not found')) {
-            hint = '\n\n[Hint: command not found — check if the tool is installed or in PATH. Try `which <cmd>` or install it.]'
-          } else if (lowerOut.includes('no such file or directory')) {
-            hint = '\n\n[Hint: file/directory not found — check the path. Use Glob to find the correct location.]'
-          } else if (lowerOut.includes('permission denied')) {
-            hint = '\n\n[Hint: permission denied — check file permissions or try with appropriate privileges.]'
-          } else if (lowerOut.includes('econnrefused') || lowerOut.includes('etimedout')) {
-            hint = '\n\n[Hint: connection error — check if the service is running and the port is correct.]'
-          } else if (lowerOut.includes('cannot find module') || lowerOut.includes('could not resolve')) {
-            hint = '\n\n[Hint: module not found — run `npm install` or check the import path.]'
-          } else if (lowerOut.includes('syntax error') || lowerOut.includes('unexpected token')) {
-            hint = '\n\n[Hint: syntax error — check for missing brackets, semicolons, or incorrect syntax.]'
-          }
-
-          resolve({
-            content: truncateOutput(prefix + `Exit code: ${exitCode}\n${out}${hint}`, MAX_OUTPUT_LENGTH).trimEnd(),
-            isError: false,  // non-zero exit is not necessarily fatal
-          })
-        },
-      )
-
-      // ── Abort handler — kill process (platform-aware) ─────────
-      const onAbort = () => {
+      // ── Cleanup helpers ──────────────────────────────────────
+      // settle() only resolves the promise + removes the listener +
+      // runs follow cleanup. It does NOT touch the SIGKILL escalation
+      // timer — that one is owned by the child lifecycle (close/error).
+      const settle = (result: ToolResult) => {
         if (settled) return
         settled = true
+        if (abortListener && context.signal) {
+          context.signal.removeEventListener('abort', abortListener)
+          abortListener = null
+        }
+        if (followCleanup) {
+          try { followCleanup() } catch { /* best-effort */ }
+          followCleanup = null
+        }
+        resolve(result)
+      }
+      const clearTimeoutTimer = () => {
+        if (timeoutTimer) {
+          clearTimeout(timeoutTimer)
+          timeoutTimer = null
+        }
+      }
+      const clearKillTimer = () => {
+        if (killTimer) {
+          clearTimeout(killTimer)
+          killTimer = null
+        }
+      }
 
+      // ── Kill the entire process tree (Linux/macOS = process group,
+      //    Windows = taskkill /T). Best-effort — swallow ESRCH etc. ──
+      const killProcessTree = (signal: NodeJS.Signals) => {
         const pid = child.pid
-        if (pid !== undefined) {
-          if (process.platform === 'win32') {
-            // Windows: taskkill /F /T /PID kills the process tree
-            try { execSync(`taskkill /F /T /PID ${pid}`, { stdio: 'ignore', timeout: 5000 }) } catch { /* best-effort */ }
-            try { child.kill() } catch { /* ignore */ }
-          } else {
-            // Unix: kill process group (includes subshells)
-            try { process.kill(-pid, 'SIGTERM') } catch {
-              try { child.kill('SIGTERM') } catch { /* ignore */ }
-            }
-            // SIGKILL fallback after 5s for stubborn processes
-            setTimeout(() => {
-              try { process.kill(-pid, 'SIGKILL') } catch {
-                try { child.kill('SIGKILL') } catch { /* ignore */ }
-              }
-            }, 5_000)
-          }
-        }
-
-        resolve({ content: 'Command cancelled.', isError: true })
-      }
-
-      if (context.signal) {
-        if (context.signal.aborted) {
-          onAbort()
+        if (pid === undefined) return
+        if (process.platform === 'win32') {
+          try {
+            execSync(`taskkill /F /T /PID ${pid}`, { stdio: 'ignore', timeout: 5000 })
+          } catch { /* best-effort */ }
+          try { child.kill(signal) } catch { /* ignore */ }
         } else {
-          context.signal.addEventListener('abort', onAbort, { once: true })
+          // Negative pid = process group; valid because detached:true
+          try { process.kill(-pid, signal) } catch { /* ESRCH if already gone */ }
         }
       }
+
+      // ── Internal timeout (mirrors the previous exec() behaviour) ──
+      timeoutTimer = setTimeout(() => {
+        // Abort may have settled first — in that case the killTimer
+        // already runs SIGTERM/SIGKILL escalation, so do nothing here.
+        if (settled) return
+        timedOut = true
+        killProcessTree('SIGTERM')
+        // Independent killTimer — only cleared when child actually dies
+        // (in child.on('close') / 'error'). NOT cleared by settle().
+        killTimer = setTimeout(() => {
+          killTimer = null
+          killProcessTree('SIGKILL')
+        }, this.sigkillGraceMs)
+        if (typeof killTimer.unref === 'function') killTimer.unref()
+      }, timeoutMs)
+      if (typeof timeoutTimer.unref === 'function') timeoutTimer.unref()
+
+      // ── Abort handler ─────────────────────────────────────────
+      const onAbort = () => {
+        if (settled) return
+        killProcessTree('SIGTERM')
+        // SIGKILL escalation timer — survives promise resolution.
+        // Only child.on('close') / 'error' clears it, so a SIGTERM-
+        // ignoring child is still guaranteed to die.
+        killTimer = setTimeout(() => {
+          killTimer = null
+          killProcessTree('SIGKILL')
+        }, this.sigkillGraceMs)
+        if (typeof killTimer.unref === 'function') killTimer.unref()
+        // clearTimeoutTimer is called inside child.on('close')/error;
+        // but we also call it here so a slow-to-die child doesn't keep
+        // the timeout scheduled. child.on('close') clears it again
+        // (idempotent: clearTimeout(null) is a no-op).
+        clearTimeoutTimer()
+        const partialOut = [stdoutBuf, stderrBuf].filter(Boolean).join('\n').trimEnd()
+        const partial = partialOut ? `\n\nPartial output before cancellation:\n${truncateOutput(partialOut, 5000)}` : ''
+        settle({
+          content: `Command cancelled (abort signal).${partial}\n\nHint: re-run with a smaller scope, or use run_in_background:true for long commands.`,
+          isError: true,
+        })
+      }
+      abortListener = onAbort
+      context.signal?.addEventListener('abort', abortListener, { once: true })
+
+      // ── Child error (e.g. ENOENT on the shell) ─────────────────
+      child.on('error', (err) => {
+        clearTimeoutTimer()
+        clearKillTimer()
+        if (settled) return
+        settle({
+          content: `Failed to start command: ${err.message}`,
+          isError: true,
+        })
+      })
+
+      // ── Child close: normal exit OR termination signal ──────────
+      child.on('close', (code, signal) => {
+        // Process is dead — clear every timer. settle() may have run
+        // earlier (abort path); these are idempotent no-ops then.
+        clearTimeoutTimer()
+        clearKillTimer()
+        if (settled) return
+
+        const partialOut = [stdoutBuf, stderrBuf].filter(Boolean).join('\n').trimEnd()
+        const prefix = followMode ? `[Spectator mode: output streamed to tmux pane] ${followModeHint}\n` : ''
+
+        // Internal timeout fired the kill — child exits with non-zero
+        // (or signal). Surface it as the timeout contract.
+        if (timedOut) {
+          const partial = partialOut ? `\n\nPartial output before timeout:\n${truncateOutput(partialOut, 5000)}` : ''
+          settle({
+            content: `Command timed out after ${timeoutMs / 1000}s.${partial}\n\nHint: for long-running commands, use run_in_background:true and check results with TaskGet, or raise the timeout argument.`,
+            isError: true,
+          })
+          return
+        }
+
+        if (code === 0 && !signal) {
+          const combined = partialOut || '(no output)'
+          settle({
+            content: truncateOutput(prefix + combined, MAX_OUTPUT_LENGTH),
+            isError: false,
+          })
+          return
+        }
+
+        // Killed by an external signal (not via our timeout or abort).
+        // Treat as a timeout-shaped error so callers see a useful message.
+        if (signal === 'SIGTERM' || signal === 'SIGKILL') {
+          const partial = partialOut ? `\n\nPartial output before timeout:\n${truncateOutput(partialOut, 5000)}` : ''
+          settle({
+            content: `Command timed out.${partial}\n\nHint: for long-running commands, use run_in_background:true and check results with TaskGet, or raise the timeout argument.`,
+            isError: true,
+          })
+          return
+        }
+
+        // Non-zero exit — return stdout+stderr so the LLM can diagnose
+        const exitCode = code ?? 1
+        const out = partialOut
+        const hint = buildErrorHint(out)
+        settle({
+          content: truncateOutput(prefix + `Exit code: ${exitCode}\n${out}${hint}`, MAX_OUTPUT_LENGTH).trimEnd(),
+          isError: false,
+        })
+      })
     })
   }
 }
