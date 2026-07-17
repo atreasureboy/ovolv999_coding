@@ -8,6 +8,7 @@ export default tseslint.config(
     languageOptions: {
       parserOptions: {
         project: './tsconfig.json',
+        extraFileExtensions: ['.tsx'],
       },
     },
     rules: {

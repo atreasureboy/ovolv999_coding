@@ -212,6 +212,7 @@ describe('WebSearch — signal contract (fake timers)', () => {
     // signal listener. The new contract guarantees the parse phase is
     // also cancellable.
     let parseStarted = false
+    // eslint-disable-next-line @typescript-eslint/unbound-method
     const origJson = Response.prototype.json
     Object.assign(Response.prototype, {
       json: function patchedJson() {

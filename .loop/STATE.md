@@ -4,9 +4,9 @@
 > 我（glm-5.2）是指挥者，通过 amux 委托 Claude Code (MiniMax-M3) 执行实现，节省 token。
 
 ## 当前阶段
-**Iteration 6 完成**。重点：修复 `/` 命令系统 — 实现实时斜杠命令自动补全（SlashSuggester）+ `/resume` 会话恢复 + `/history` 消息预览。通过 amux 委托 Claude Code 实现。
+**Iteration 7 进行中** — Ink/React 组件树基础设施搭建完成（12 个组件 + UIStore + InkRenderer + 入口函数）。通过 amux 委托 + 自实现混合模式。
 
-## 当前目标适配度：约 88%
+## 当前目标适配度：约 90%
 
 ### 已适配（可直接保留）
 - 统一 Harness（ExecutionEngine）+ 7 步 Boot Sequence
