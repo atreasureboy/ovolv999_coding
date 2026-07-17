@@ -61,6 +61,12 @@ export interface InputHandlerOptions {
   terminal?: boolean
   /** readline history size. */
   historySize?: number
+  /**
+   * Readline Tab completer. Called by readline when the user hits Tab; the
+   * returned `[matches, originalLine]` pair drives readline's in-line
+   * completion overlay. Pass `undefined` to disable Tab completion (default).
+   */
+  completer?: (line: string) => [string[], string]
 }
 
 export class InputHandler {
@@ -92,6 +98,10 @@ export class InputHandler {
       output: this.streams.output,
       terminal: this.streams.terminal,
       historySize: this.historySize,
+      // Tab completer is opt-in. When unset, readline falls back to the
+      // built-in default (path completion). SlashSuggest.complete is the
+      // production completer wired in bin/ovogogogo.ts runRepl.
+      completer: opts.completer,
     })
     // Prevent readline from closing on Ctrl+C (SIGINT).
     // Without this handler readline emits 'close', which kills the REPL.
@@ -101,6 +111,15 @@ export class InputHandler {
 
   /** Exposed for tests that need to inspect the underlying readline. */
   get readline(): Interface { return this.rl }
+
+  /** Current line in the readline buffer (empty before/after readLine resolves). */
+  getLine(): string { return this.rl.line }
+
+  /** Underlying output stream — used by live overlays (e.g. slash suggester). */
+  get output(): NodeJS.WritableStream { return this.streams.output }
+
+  /** TTY mode flag — slash suggester is auto-disabled when false. */
+  get isTTY(): boolean { return this.streams.terminal }
 
   /**
    * Read a line via the REPL's owned readline.

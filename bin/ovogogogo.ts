@@ -60,6 +60,7 @@ import { fileURLToPath, pathToFileURL } from 'url'
 import { ExecutionEngine } from '../src/core/engine.js'
 import { Renderer } from '../src/ui/renderer.js'
 import { InputHandler, readStdin, type SharedPrompt } from '../src/ui/input.js'
+import { SlashSuggester } from '../src/ui/slashSuggest.js'
 import { runWithDeadline } from '../src/ui/turnDeadline.js'
 import { trimHistoryForNextTurn } from '../src/ui/historyTrimmer.js'
 import type { EngineConfig, OpenAIMessage } from '../src/core/types.js'
@@ -83,7 +84,7 @@ import { McpModule } from '../src/modules/mcp.js'
 import { detectProjectContext, formatProjectContext } from '../src/config/projectContext.js'
 import { createLoadSkillTool } from '../src/tools/loadSkill.js'
 import { createTerminalAskUserHandler } from '../src/tools/askUser.js'
-import { dispatchSlashCommand, type SlashCommandContext } from '../src/commands/index.js'
+import { dispatchSlashCommand, listCommands, type SlashCommandContext } from '../src/commands/index.js'
 import '../src/commands/builtin.js' // register all built-in commands
 import { tmuxLayout } from '../src/ui/tmuxLayout.js'
 import { PermissionManager } from '../src/core/permissionSystem.js'
@@ -626,25 +627,67 @@ async function runRepl(
   sessionDir?: string,
   resumedHistory?: OpenAIMessage[],
 ): Promise<void> {
-  const input = new InputHandler()
+  const history: OpenAIMessage[] = resumedHistory ? [...resumedHistory] : []
+
+  // Live slash suggester — see src/ui/slashSuggest.ts. Tab completes +
+  // overlays filtered command/skill matches below the line as the user
+  // types. Disabled automatically in non-TTY (pipe, CI) — the existing
+  // post-Enter "Did you mean?" path still covers that case.
+  //
+  // We construct it BEFORE the InputHandler so we can pass its `complete`
+  // method to readline's `completer` callback. The keypress listener
+  // lives on `process.stdin` globally and would otherwise keep firing
+  // across AskUserQuestion / ExitPlanMode prompts that share this
+  // readline; we detach() on every prompt boundary.
+  let getLineFn: () => string = () => ''
+  const slashSuggester = new SlashSuggester({
+    source: {
+      isTTY: Boolean(process.stdout.isTTY),
+      getCommands: () => listCommands().map((c) => ({ name: c.name, description: c.description })),
+      getSkills: () => [...skills.values()].map((s) => ({ name: s.name, description: s.description })),
+    },
+    stream: process.stdout,
+    getLine: () => getLineFn(),
+  })
+
+  const input = new InputHandler({ completer: slashSuggester.complete })
   // Wire this readline into the shared router so AskUserQuestion and
   // ExitPlanMode (configured on the engine in main()) use THIS readline
   // instead of creating their own. Without this wiring, tool prompts
   // would race the REPL for stdin and one would lose keystrokes.
   activePrompt = input.sharedPrompt()
 
-  const history: OpenAIMessage[] = resumedHistory ? [...resumedHistory] : []
+  // Now that the readline exists, wire its line accessor into the suggester.
+  getLineFn = () => input.getLine()
 
   // Idempotent save — wired into the cleanup() in main() so any exit
   // path (SIGINT, SIGTERM, normal end, Ctrl+D, /exit) persists the
   // latest history. We also call it directly on EOF and on force-exit
   // for safety, but the cleanup path is the real source of truth.
+  // `currentSessionDir` is rebound on `/resume <name>` so future saves
+  // land in the newly loaded session directory.
+  let currentSessionDir = sessionDir
   saveOnExit = (): void => {
-    if (!sessionDir) return
+    if (!currentSessionDir) return
     try {
-      saveSession(sessionDir, history)
+      saveSession(currentSessionDir, history)
     } catch (err: unknown) {
       renderer.warn(`Failed to persist session: ${(err as Error).message}`)
+    }
+  }
+
+  const loadSessionByRef = (ref: string): OpenAIMessage[] | null => {
+    try {
+      const dir = resolveSessionPath(cwd, ref)
+      const msgs = loadSession(dir)
+      currentSessionDir = dir
+      return msgs
+    } catch (err: unknown) {
+      if (err instanceof SessionNotFoundError || err instanceof AmbiguousSessionError) {
+        return null
+      }
+      renderer.warn(`Failed to resume session: ${(err as Error).message}`)
+      return null
     }
   }
 
@@ -872,15 +915,17 @@ async function runRepl(
 
   while (true) {
     renderer.writePrompt()
+    slashSuggester.attach()
     const { text, eof } = await input.readLine('')
+    slashSuggester.detach()
 
     if (eof) {
       // Ctrl+D at the prompt — save the session before exiting so the
       // user can resume with `--continue` or `--resume <session>`.
       // saveOnExit is also wired into cleanup() in main(), but we save
       // here too for a tight, deterministic path.
-      if (sessionDir) {
-        try { saveSession(sessionDir, history) } catch { /* best-effort */ }
+      if (currentSessionDir) {
+        try { saveSession(currentSessionDir, history) } catch { /* best-effort */ }
       }
       renderer.newline()
       renderer.info('Goodbye.')
@@ -979,6 +1024,7 @@ async function runRepl(
           const skill = skills.get(name)
           return skill ? expandSkillPrompt(skill, args) : null
         },
+        loadSession: (name: string) => loadSessionByRef(name),
       }
 
       const slashResult = await dispatchSlashCommand(trimmed, slashCtx)
@@ -986,9 +1032,9 @@ async function runRepl(
       if (slashResult !== null) {
         // Handle new command system result
         if (slashResult.type === 'exit') {
-          if (sessionDir) {
+          if (currentSessionDir) {
             try {
-              saveSession(sessionDir, history)
+              saveSession(currentSessionDir, history)
             } catch (err: unknown) {
               renderer.warn(`Failed to persist session on exit: ${(err as Error).message}`)
             }
@@ -1004,11 +1050,11 @@ async function runRepl(
         }
         if (slashResult.type === 'clear-history') {
           history.length = 0
-          if (sessionDir) {
+          if (currentSessionDir) {
             // /clear: atomically persist the empty history so the cleared state
             // survives a crash. No tmp file should remain afterwards.
             try {
-              saveSession(sessionDir, history)
+              saveSession(currentSessionDir, history)
             } catch (err: unknown) {
               renderer.warn(`Failed to persist cleared history: ${(err as Error).message}`)
             }

@@ -12,6 +12,7 @@ import { getCurrentMode, setCurrentMode, cycleMode, getAllModes, type Mode } fro
 import type { PermissionMode } from '../core/permissionSystem.js'
 import { saveProjectSettings } from '../config/settings.js'
 import { estimateTokens, calculateContextState, microCompact } from '../core/compact.js'
+import type { OpenAIMessage } from '../core/types.js'
 import { existsSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { execSync, execFileSync } from 'child_process'
@@ -66,12 +67,49 @@ registerCommand({
   },
 })
 
+function previewMessage(msg: OpenAIMessage, max: number): string {
+  const raw = typeof msg.content === 'string'
+    ? msg.content
+    : JSON.stringify(msg.content ?? msg.tool_calls ?? '')
+  const oneLine = raw.replace(/\s+/g, ' ').trim()
+  return oneLine.length <= max ? oneLine : oneLine.slice(0, Math.max(0, max - 1)) + '…'
+}
+
+function roleLabel(role: string): string {
+  if (role === 'user') return 'You'
+  if (role === 'assistant') return 'AI'
+  if (role === 'tool') return 'Tool'
+  if (role === 'system') return 'Sys'
+  return role
+}
+
 registerCommand({
   name: 'history',
-  description: 'Show message count in current session',
-  handler: (_args, ctx) => {
+  description: 'Show recent messages (default 10) and current session stats',
+  usage: '/history [N]',
+  handler: (args, ctx) => {
+    const trimmed = args.trim()
+    const parsed = trimmed ? Number.parseInt(trimmed, 10) : 10
+    const n = Number.isInteger(parsed) && parsed > 0 ? parsed : 10
+
+    const total = ctx.history.length
     const tokens = estimateTokens(ctx.history)
-    return text(`Session: ${ctx.history.length} messages, ~${tokens.toLocaleString()} tokens estimated.`)
+    const lines: string[] = []
+
+    if (total === 0) {
+      lines.push('No messages in this session yet.')
+    } else {
+      const recent = ctx.history.slice(-n)
+      const skipped = total - recent.length
+      if (skipped > 0) lines.push(`Showing last ${recent.length} of ${total} messages:`)
+      else lines.push(`Showing all ${total} messages:`)
+      for (const msg of recent) {
+        lines.push('  [' + roleLabel(msg.role).padEnd(4) + '] ' + previewMessage(msg, 80))
+      }
+    }
+
+    lines.push('', `Session: ${total} messages, ~${tokens.toLocaleString()} tokens estimated.`)
+    return text(lines.join('\n'))
   },
 })
 
@@ -661,11 +699,23 @@ registerCommand({
 
 registerCommand({
   name: 'resume',
-  description: 'List or resume saved sessions',
+  description: 'List saved sessions, or resume one by name/prefix/path',
   usage: '/resume [session_name]',
-  handler: (_args, _ctx) => {
-    // Delegate to the old handler which has session listing logic
-    return text('Use: ovolv999 --resume <session_name>  or  ovolv999 --continue\nOr use /sessions to list available sessions.')
+  handler: (args, ctx) => {
+    const name = args.trim()
+    if (!name) {
+      // No arg → list available sessions so the user can pick one.
+      return text(ctx.getSessionsText?.() ?? 'No saved sessions found.')
+    }
+    if (!ctx.loadSession) {
+      return text('In-session resume is not available in this context. Use ovolv999 --resume <session_name>  or  ovolv999 --continue from the command line.')
+    }
+    const loaded = ctx.loadSession(name)
+    if (!loaded) {
+      return text(`Session not found: "${name}". Use /resume with no args to list available sessions.`)
+    }
+    ctx.setHistory(loaded)
+    return text(`Resumed session: ${loaded.length} messages loaded.`)
   },
 })
 

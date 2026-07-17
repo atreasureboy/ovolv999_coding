@@ -1,5 +1,38 @@
 # DEVLOG — 非平凡决策与问题
 
+## D7 — readline 实时自动补全：ANSI 覆盖层 vs Ink/React
+
+### 现象
+用户要求 `/` 命令有实时自动补全（像 Claude Code 那样，键入 `/r` 即时显示 `/resume`/`/review`）。但 ovolv999 用的是 Node.js readline（非 React/Ink），没有组件渲染框架。
+
+### 根因
+Claude Code 的 `useTypeahead` hook 基于 React/Ink，有完整的组件树来渲染下拉列表。ovolv999 的 InputHandler 直接包装 `readline.createInterface`，只有 ANSI 转义序列可用。
+
+### 采用的解决方案
+双层方案：
+1. **Tab 补全**：给 `readline.createInterface` 传 `completer` 函数（readline 原生支持）。`SlashSuggester.complete()` 实现 Completer 接口，仅对 `/` 开头无空格的行返回匹配命令。
+2. **实时覆盖层**：监听 `process.stdin` 的 `keypress` 事件（`emitKeypressEvents`），每次按键后 `setImmediate(refresh)` 重新计算匹配并用 ANSI 转义序列渲染：
+   - `\n` 下移一行
+   - 每行 `  \x1b[36m/name\x1b[0m  \x1b[2mdescription\x1b[0m`
+   - `\x1b[NA` 上移 N 行回到提示符位置
+   - `\x1b[J` 清除之前的覆盖层
+
+### 为什么选择该方案
+- 零依赖（纯 Node.js ANSI）
+- TTY 门控（管道/CI 自动禁用）
+- 生命周期清晰（attach/detach 绕 AskUserQuestion/ExitPlanMode 共享 readline）
+- 纯函数 `filterMatches()` 可独立测试
+
+### 验证证据
+- 27 个新测试覆盖过滤逻辑、类行为、命令功能
+- build/lint/test 全绿（1136 tests）
+- Claude Code 自主修复了 `no-control-regex` lint 规则冲突
+
+### 可以横向应用
+任何需要在 readline 之上叠加实时 UI 的场景（如文件路径补全、参数提示）都可用相同的 ANSI 覆盖层模式。
+
+---
+
 ## D6 — Iteration 5 功能借鉴：规格适配 vs 照抄
 
 ### 现象

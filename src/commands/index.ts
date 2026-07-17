@@ -35,6 +35,13 @@ export interface SlashCommandContext {
   persistPermissions?: (mode: PermissionMode, rules: PermissionRule[]) => string | undefined
   /** Resolve a dynamic skill slash command into an executable prompt. */
   resolveSkillPrompt?: (name: string, args: string) => string | null
+  /**
+   * Load a session's history into the current REPL. Returning a non-empty
+   * array means success; returning `null`/`undefined` means no such session.
+   * The REPL is responsible for swapping `history` and rebinding its save
+   * target so future saves land in the resumed session directory.
+   */
+  loadSession?: (name: string) => OpenAIMessage[] | null | undefined
 }
 
 export type SlashCommandResult =
