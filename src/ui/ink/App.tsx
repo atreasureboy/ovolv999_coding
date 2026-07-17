@@ -219,6 +219,11 @@ export function App({
             onInterrupt={handleInterrupt}
             skills={skills}
             history={inputHistory.current}
+            cwd={cwd}
+            onRetry={() => {
+              const last = inputHistory.current[inputHistory.current.length - 1]
+              if (last) void handleSubmit(last)
+            }}
           />
         </Box>
       )}

@@ -15,8 +15,10 @@
  */
 
 import { Text, Box, useInput } from 'ink'
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useMemo } from 'react'
 import { SlashMenu, type SlashEntry } from './SlashMenu.js'
+import { FileSuggestMenu } from './FileSuggestMenu.js'
+import { suggestFiles } from '../fileSuggest.js'
 import { listCommands } from '../../../commands/index.js'
 
 export interface PromptInputProps {
@@ -30,6 +32,10 @@ export interface PromptInputProps {
   skills: Array<{ name: string; description: string }>
   /** History for Up/Down navigation. */
   history: string[]
+  /** Working directory for @-mention file autocomplete. */
+  cwd: string
+  /** Called when user presses Ctrl+R (retry last turn). */
+  onRetry?: () => void
 }
 
 export function PromptInput({
@@ -38,11 +44,14 @@ export function PromptInput({
   onInterrupt,
   skills,
   history,
+  cwd,
+  onRetry,
 }: PromptInputProps): React.ReactElement {
   const [text, setText] = useState('')
   const [cursor, setCursor] = useState(0)
   const [histIdx, setHistIdx] = useState(-1)
   const [menuSelected, setMenuSelected] = useState(0)
+  const [fileSelected, setFileSelected] = useState(0)
 
   // ── Compute slash menu entries ────────────────────────────────────────────
 
@@ -73,6 +82,38 @@ export function PromptInput({
     if (menuSelected >= menuEntries.length) setMenuSelected(0)
   }, [menuEntries.length, menuSelected])
 
+  // ── @-mention file suggestions ───────────────────────────────────────────
+
+  const fileContext = useMemo((): { active: boolean; query: string; atIdx: number } => {
+    if (disabled || showMenu) return { active: false, query: '', atIdx: -1 }
+    const beforeCursor = text.slice(0, cursor)
+    // Find the last @ that is preceded by start-of-string or whitespace
+    const atMatch = beforeCursor.match(/(?:^|\s)@([^\s]*)$/)
+    if (!atMatch) return { active: false, query: '', atIdx: -1 }
+    const atIdx = beforeCursor.lastIndexOf('@')
+    return { active: true, query: atMatch[1], atIdx }
+  }, [text, cursor, disabled, showMenu])
+
+  const fileSuggestions = useMemo(() => {
+    if (!fileContext.active) return []
+    return suggestFiles(cwd, fileContext.query)
+  }, [fileContext.active, fileContext.query, cwd])
+
+  useEffect(() => {
+    if (fileSelected >= fileSuggestions.length) setFileSelected(0)
+  }, [fileSuggestions.length, fileSelected])
+
+  const autocompleteFile = useCallback(() => {
+    if (fileSuggestions.length === 0) return
+    const sel = fileSuggestions[Math.min(fileSelected, fileSuggestions.length - 1)]
+    const before = text.slice(0, fileContext.atIdx)
+    const after = text.slice(cursor)
+    const insertion = '@' + sel.path + (sel.isDir ? '/' : ' ')
+    const newText = before + insertion + after
+    setText(newText)
+    setCursor(before.length + insertion.length)
+  }, [fileSuggestions, fileSelected, fileContext.atIdx, text, cursor])
+
   // ── Input handling ────────────────────────────────────────────────────────
 
   const autocomplete = useCallback(() => {
@@ -85,8 +126,11 @@ export function PromptInput({
 
   const handleSubmit = useCallback(() => {
     if (showMenu && menuEntries.length > 0) {
-      // Enter in slash menu = autocomplete (same as Tab)
       autocomplete()
+      return
+    }
+    if (fileContext.active && fileSuggestions.length > 0) {
+      autocompleteFile()
       return
     }
     const trimmed = text.trim()
@@ -96,7 +140,7 @@ export function PromptInput({
       setCursor(0)
       setHistIdx(-1)
     }
-  }, [text, showMenu, menuEntries, autocomplete, onSubmit])
+  }, [text, showMenu, menuEntries, autocomplete, fileContext, fileSuggestions, autocompleteFile, onSubmit])
 
   useInput((input, key) => {
     // ── ESC: interrupt ───────────────────────────────────────────────────
@@ -115,7 +159,14 @@ export function PromptInput({
 
     // ── Tab: autocomplete ────────────────────────────────────────────────
     if (key.tab) {
-      if (showMenu) autocomplete()
+      if (showMenu) { autocomplete(); return }
+      if (fileContext.active && fileSuggestions.length > 0) { autocompleteFile(); return }
+      return
+    }
+
+    // ── Ctrl+R: retry last turn ──────────────────────────────────────────
+    if (input === '\x12') {
+      onRetry?.()
       return
     }
 
@@ -127,6 +178,18 @@ export function PromptInput({
       }
       if (key.downArrow) {
         setMenuSelected((s) => (s + 1) % menuEntries.length)
+        return
+      }
+    }
+
+    // ── File menu navigation (arrows) ────────────────────────────────────
+    if (fileContext.active && fileSuggestions.length > 0) {
+      if (key.upArrow) {
+        setFileSelected((s) => (s - 1 + fileSuggestions.length) % fileSuggestions.length)
+        return
+      }
+      if (key.downArrow) {
+        setFileSelected((s) => (s + 1) % fileSuggestions.length)
         return
       }
     }
@@ -250,6 +313,9 @@ export function PromptInput({
       ) : null}
       {showMenu && menuEntries.length === 0 && text.length > 1 ? (
         <Text dimColor> No matching commands. Type / for all commands.</Text>
+      ) : null}
+      {fileContext.active && fileSuggestions.length > 0 ? (
+        <FileSuggestMenu suggestions={fileSuggestions} selected={fileSelected} query={fileContext.query} />
       ) : null}
     </Box>
   )
