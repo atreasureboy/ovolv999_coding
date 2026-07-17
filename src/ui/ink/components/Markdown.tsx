@@ -17,6 +17,7 @@
 
 import { Text, Box } from 'ink'
 import type { ReactNode } from 'react'
+import { highlight } from '../highlight.js'
 
 // ── Inline parsing ──────────────────────────────────────────────────────────
 
@@ -190,20 +191,31 @@ function parseBlocks(text: string): Block[] {
 // ── Component ───────────────────────────────────────────────────────────────
 
 function CodeBlock({ content, lang }: { content: string; lang: string }): ReactNode {
-  const lines = content.split('\n').filter((l) => l.trim() || true) // keep all lines
+  const lines = content.split('\n')
+  const shown = lines.slice(0, 50)
+  const hidden = lines.length - shown.length
+
   return (
     <Box flexDirection="column" marginY={0}>
-      {lines.slice(0, 50).map((line, i) => (
-        <Box key={i}>
-          <Text backgroundColor="gray" color="white" dimColor>
-            {' '}
-            {line.length > 100 ? line.slice(0, 97) + '...' : line || ' '}
-            {' '}
-          </Text>
-        </Box>
-      ))}
-      {lines.length > 50 ? <Text dimColor> ... +{lines.length - 50} more</Text> : null}
-      {lang ? <Text dimColor> {lang}</Text> : null}
+      {shown.map((line, i) => {
+        const tokens = highlight(line, lang)
+        return (
+          <Box key={i}>
+            <Text dimColor>{String(i + 1).padStart(3, ' ')} │ </Text>
+            <Text>
+              {tokens.length > 0
+                ? tokens.map((tok, j) => (
+                    <Text key={j} color={tok.color} bold={tok.bold} dimColor={tok.dim}>
+                      {tok.text}
+                    </Text>
+                  ))
+                : line || ' '}
+            </Text>
+          </Box>
+        )
+      })}
+      {hidden > 0 ? <Text dimColor>   ... +{hidden} more lines</Text> : null}
+      {lang ? <Text dimColor>   {lang}</Text> : null}
     </Box>
   )
 }

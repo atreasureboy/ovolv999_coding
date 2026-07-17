@@ -28,7 +28,7 @@ export function DiffView({
   const hidden = lines.length - shown.length
 
   return (
-    <Box flexDirection="column" marginLeft={2}>
+    <Box flexDirection="column" marginLeft={1}>
       {shown.map((line, i) => {
         const prefix =
           line.type === 'add' ? '+' : line.type === 'remove' ? '-' : ' '
@@ -39,9 +39,13 @@ export function DiffView({
               ? 'redBright'
               : undefined
         const dim = line.type === 'context'
+        const lineNum = line.type === 'remove'
+          ? (line.oldLineNum ?? '')
+          : (line.newLineNum ?? '')
 
         return (
           <Box key={i}>
+            <Text dimColor>{String(lineNum).padStart(4, ' ')} </Text>
             <Text color={color} dimColor={dim}>
               {prefix} {line.text.length > 100 ? line.text.slice(0, 97) + '...' : line.text}
             </Text>
@@ -49,7 +53,7 @@ export function DiffView({
         )
       })}
       {hidden > 0 ? (
-        <Text dimColor> ... {hidden} more lines</Text>
+        <Text dimColor>     ... {hidden} more lines</Text>
       ) : null}
     </Box>
   )

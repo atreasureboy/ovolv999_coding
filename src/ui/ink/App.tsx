@@ -27,6 +27,7 @@ import { PermissionDialog } from './components/PermissionDialog.js'
 import { SelectPicker } from './components/SelectPicker.js'
 import { Markdown } from './components/Markdown.js'
 import { getGitBranch } from './gitInfo.js'
+import { HelpOverlay } from './components/HelpOverlay.js'
 import type { OpenAIMessage } from '../../core/types.js'
 
 // ── Context calculation (lightweight — avoids importing full compact module) ──
@@ -76,6 +77,7 @@ export function App({
   const state: UIState = useUIStore(store)
   const { exit } = useApp()
   const [history, setHistory] = useState<OpenAIMessage[]>(initialHistory)
+  const [showHelp, setShowHelp] = useState(false)
   const inputHistory = useRef<string[]>([])
 
   // ── Turn execution ────────────────────────────────────────────────────────
@@ -124,6 +126,11 @@ export function App({
 
   const sigintCount = useRef(0)
   useInput((input, key) => {
+    // `?` toggles help overlay (only when no overlay/turn is active)
+    if (input === '?' && !state.running && !store.hasOverlay()) {
+      setShowHelp((v) => !v)
+      return
+    }
     if (key.ctrl && input === 'c') {
       sigintCount.current++
       if (sigintCount.current >= 2) {
@@ -194,8 +201,13 @@ export function App({
         />
       ) : null}
 
+      {/* Help overlay (? key) */}
+      {showHelp && !store.hasOverlay() ? (
+        <HelpOverlay onDismiss={() => setShowHelp(false)} />
+      ) : null}
+
       {/* Input or "running..." indicator */}
-      {state.running || store.hasOverlay() ? (
+      {state.running || store.hasOverlay() || showHelp ? (
         <Box marginTop={1}>
           <Text dimColor italic>  (turn in progress — ESC to interrupt)</Text>
         </Box>
