@@ -86,6 +86,9 @@ export async function runInkRepl(opts: InkReplOptions): Promise<void> {
     try {
       const result = await engine.runTurn(prompt, history)
       history = result.newHistory
+      // Update cost tracking after each turn
+      const ct = engine.getCostTracker()
+      store.setCost(ct.getTotalCost(), ct.getTotalAPICalls())
       return { newHistory: result.newHistory, reason: result.result.reason }
     } catch (err: unknown) {
       const error = err as Error
@@ -137,6 +140,30 @@ export async function runInkRepl(opts: InkReplOptions): Promise<void> {
             } else {
               store.addError(`Failed to load session: ${selected}`)
             }
+          }
+          return true
+        }
+
+        // ── Interactive /model (no args) → SelectPicker ──────────────────────
+        if (input.trim() === '/model') {
+          const currentModel = engine.getModel()
+          const models = [
+            { label: 'glm-4.6', description: 'ZhipuAI GLM-4.6 (default)', value: 'glm-4.6' },
+            { label: 'glm-4.5', description: 'ZhipuAI GLM-4.5', value: 'glm-4.5' },
+            { label: 'gpt-4o', description: 'OpenAI GPT-4o', value: 'gpt-4o' },
+            { label: 'gpt-4o-mini', description: 'OpenAI GPT-4o-mini (fast)', value: 'gpt-4o-mini' },
+            { label: 'claude-sonnet-4-20250514', description: 'Claude Sonnet 4', value: 'claude-sonnet-4-20250514' },
+            { label: 'deepseek-chat', description: 'DeepSeek Chat (cheap)', value: 'deepseek-chat' },
+          ]
+          const items = models.map((m) => ({
+            ...m,
+            description: m.value === currentModel ? `${m.description} ← current` : m.description,
+          }))
+          const selected = await store.showSelectPicker('Switch Model', items)
+          if (selected && selected !== currentModel) {
+            engine.setModel(selected)
+            store.setModel(selected)
+            store.addInfo(`Switched model: ${selected}`)
           }
           return true
         }

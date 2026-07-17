@@ -1,6 +1,9 @@
 /**
  * StatusBar — compact info bar at the bottom showing model, context pressure,
  * cost, and plan mode.
+ *
+ * Context pressure is shown as a visual bar: [████████░░░░░░░░] 50%
+ * Color shifts: green < 50%, yellow 50-80%, red > 80%.
  */
 
 import { Text, Box } from 'ink'
@@ -10,23 +13,38 @@ export interface StatusBarProps {
   messageCount: number
   contextPct: number // 0..1
   cost: number
+  apiCalls: number
   planMode: boolean
 }
 
-export function StatusBar({ model, messageCount, contextPct, cost, planMode }: StatusBarProps): React.ReactElement {
+function contextBar(pct: number): { bar: string; color: string } {
+  const rounded = Math.round(pct * 100)
+  const width = 12
+  const filled = Math.min(width, Math.round(pct * width))
+  const empty = width - filled
+  const bar = '█'.repeat(filled) + '░'.repeat(empty)
+  const color = rounded > 80 ? 'redBright' : rounded > 50 ? 'yellow' : 'green'
+  return { bar, color }
+}
+
+export function StatusBar({ model, messageCount, contextPct, cost, apiCalls, planMode }: StatusBarProps): React.ReactElement {
   const pct = Math.round(contextPct * 100)
-  const ctxColor = pct > 85 ? 'red' : pct > 60 ? 'yellow' : 'green'
+  const { bar, color } = contextBar(contextPct)
+  const costStr = cost < 0.01 ? cost.toFixed(4) : cost < 1 ? cost.toFixed(3) : cost.toFixed(2)
 
   return (
     <Box justifyContent="space-between" marginTop={1}>
       <Box gap={1}>
-        <Text dimColor>{model}</Text>
+        <Text bold color="cyan">{model}</Text>
         {planMode ? <Text color="blueBright">◆ PLAN</Text> : null}
         <Text dimColor>· {messageCount} msgs</Text>
       </Box>
       <Box gap={1}>
-        <Text color={ctxColor}>ctx {pct}%</Text>
-        <Text dimColor>${cost.toFixed(4)}</Text>
+        <Text color={color}>[{bar}]</Text>
+        <Text color={color}>{pct}%</Text>
+        {apiCalls > 0 ? (
+          <Text dimColor>${costStr} · {apiCalls} API</Text>
+        ) : null}
       </Box>
     </Box>
   )

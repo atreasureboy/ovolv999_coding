@@ -132,7 +132,6 @@ export function App({
 
   const tokens = estimateTokens(history)
   const contextPct = maxContextTokens > 0 ? tokens / maxContextTokens : 0
-  const cost = 0 // TODO: wire cost tracker
 
   // ── Render ────────────────────────────────────────────────────────────────
 
@@ -211,10 +210,11 @@ export function App({
 
       {/* Status bar */}
       <StatusBar
-        model={model}
+        model={state.banner?.model ?? model}
         messageCount={history.length}
         contextPct={contextPct}
-        cost={cost}
+        cost={state.cost}
+        apiCalls={state.apiCalls}
         planMode={state.planMode}
       />
     </Box>

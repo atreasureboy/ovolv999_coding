@@ -81,6 +81,9 @@ export interface UIState {
   pendingPermission: UIPermissionRequest | null
   /** Pending select picker overlay. */
   selectOverlay: { title: string; items: UISelectItem[] } | null
+  /** Cost tracking (updated after each turn). */
+  cost: number
+  apiCalls: number
 }
 
 const INITIAL_STATE: UIState = {
@@ -95,6 +98,8 @@ const INITIAL_STATE: UIState = {
   pendingPlan: null,
   pendingPermission: null,
   selectOverlay: null,
+  cost: 0,
+  apiCalls: 0,
 }
 
 // ── Store implementation ────────────────────────────────────────────────────
@@ -225,6 +230,16 @@ export class UIStore {
 
   setPlanMode(active: boolean): void {
     this.state = { ...this.state, planMode: active }
+    this.emit()
+  }
+
+  setCost(cost: number, apiCalls: number): void {
+    this.state = { ...this.state, cost, apiCalls }
+    this.emit()
+  }
+
+  setModel(model: string): void {
+    this.state = { ...this.state, banner: this.state.banner ? { ...this.state.banner, model } : null }
     this.emit()
   }
 

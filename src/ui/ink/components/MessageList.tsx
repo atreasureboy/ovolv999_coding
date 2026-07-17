@@ -9,6 +9,7 @@
 import { Text, Box } from 'ink'
 import type { UIMessage } from '../store.js'
 import { ToolCallView } from '../ToolCallView.js'
+import { TodoListView, type TodoItem } from './TodoListView.js'
 
 function MessageRow({ msg }: { msg: UIMessage }): React.ReactElement {
   switch (msg.type) {
@@ -30,6 +31,14 @@ function MessageRow({ msg }: { msg: UIMessage }): React.ReactElement {
       )
 
     case 'tool':
+      // TodoWrite gets its own rich rendering
+      if (msg.name === 'TodoWrite' && Array.isArray(msg.input.todos)) {
+        return (
+          <Box marginTop={1}>
+            <TodoListView todos={msg.input.todos as TodoItem[]} />
+          </Box>
+        )
+      }
       return (
         <Box marginTop={1}>
           <ToolCallView

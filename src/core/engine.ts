@@ -1661,6 +1661,10 @@ export class ExecutionEngine {
     return this.config.model
   }
 
+  setModel(model: string): void {
+    this.config.model = model
+  }
+
   /** Expose the cost tracker for end-of-session cost display */
   getCostTracker(): CostTracker {
     return this.costTracker

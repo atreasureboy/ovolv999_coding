@@ -83,10 +83,10 @@ export function ToolCallView({ name, input, result, isError }: ToolCallProps): R
   const v = viz(name)
   const preview = previewTool(name, input)
 
-  // Show inline diff for Edit tools when result is available
-  const showDiff = name === 'Edit' && result !== undefined && !isError
-  const oldText = showDiff ? str(input.old_string) : ''
-  const newText = showDiff ? str(input.new_string) : ''
+  // Show inline diff for Edit/Write tools when result is available
+  const showDiff = (name === 'Edit' || name === 'Write') && result !== undefined && !isError
+  const oldText = name === 'Edit' ? str(input.old_string) : ''
+  const newText = name === 'Edit' ? str(input.new_string) : name === 'Write' ? str(input.content) : ''
 
   return (
     <Box flexDirection="column">
