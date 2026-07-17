@@ -59,6 +59,8 @@ import { fileURLToPath, pathToFileURL } from 'url'
 }
 import { ExecutionEngine } from '../src/core/engine.js'
 import { Renderer } from '../src/ui/renderer.js'
+import type { UIStore } from '../src/ui/ink/store.js'
+import type { InkRenderer } from '../src/ui/ink/inkRenderer.js'
 import { InputHandler, readStdin, type SharedPrompt } from '../src/ui/input.js'
 import { SlashSuggester } from '../src/ui/slashSuggest.js'
 import { runWithDeadline } from '../src/ui/turnDeadline.js'
@@ -147,6 +149,7 @@ interface Args {
   loopMaxIters: number
   continueSession: boolean
   resumeSession?: string
+  ink: boolean
 }
 
 /**
@@ -356,6 +359,7 @@ function parseArgs(argv: string[]): Args {
   let loopMaxIters = 12
   let continueSession = false
   let resumeSession: string | undefined
+  let ink = false
 
   try {
     for (let i = 0; i < args.length; i++) {
@@ -397,6 +401,7 @@ function parseArgs(argv: string[]): Args {
         case '--resume': case '-r':
           resumeSession = requireValue(arg, args[++i])
           break
+        case '--ink': ink = true; break
         default:
           if (!arg.startsWith('-')) task = task ? task + ' ' + arg : arg
       }
@@ -408,7 +413,7 @@ function parseArgs(argv: string[]): Args {
     }
     throw err
   }
-  return { task, model, maxIter, cwd, help, version, loop, loopMaxIters, continueSession, resumeSession }
+  return { task, model, maxIter, cwd, help, version, loop, loopMaxIters, continueSession, resumeSession, ink }
 }
 
 interface ResolvedApiEnvironment {
@@ -468,6 +473,7 @@ OPTIONS
   --loop-max-iters <n>      Cap on loop iterations  (env: OVOGO_LOOP_MAX_ITERS, default: 12)
   -c, --continue            Resume the most recent session under <cwd>/sessions/
   -r, --resume <ref>        Resume a specific session by name, prefix, dir, or history.json
+  --ink                     Launch with Ink/React UI (full component tree, live autocomplete)
   -v, --version             Print version and exit
   -h, --help                Show this help
 
@@ -1213,7 +1219,7 @@ async function runSingleTask(
 // ─────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  const { task, model, maxIter, cwd: rawCwd, help, version, loop, loopMaxIters, continueSession, resumeSession } = parseArgs(process.argv)
+  const { task, model, maxIter, cwd: rawCwd, help, version, loop, loopMaxIters, continueSession, resumeSession, ink } = parseArgs(process.argv)
   const cwd = resolve(rawCwd)
   const apiEnvironment = resolveApiEnvironment()
 
@@ -1479,7 +1485,19 @@ async function main(): Promise<void> {
     enabledModules: ['memory', 'workspace'],
   }
 
-  const engine = new ExecutionEngine(config, renderer)
+  // ── Ink UI mode: create UIStore + InkRenderer for the engine ──────────────
+  let uiStore: UIStore | undefined
+  let inkRendererInstance: InkRenderer | undefined
+  if (ink) {
+    const { UIStore } = await import('../src/ui/ink/store.js')
+    const { InkRenderer } = await import('../src/ui/ink/inkRenderer.js')
+    uiStore = new UIStore()
+    inkRendererInstance = new InkRenderer(uiStore)
+  }
+
+  const engine = new ExecutionEngine(config, inkRendererInstance
+    ? (inkRendererInstance as unknown as Renderer)
+    : renderer)
 
   // Cleanup on any exit path — must be IDEMPOTENT (signal handlers may fire
   // alongside the natural `exit` event). Order matters: save session first
@@ -1555,6 +1573,24 @@ async function main(): Promise<void> {
   }
 
   // Interactive REPL
+  if (ink && uiStore && inkRendererInstance) {
+    const { runInkRepl } = await import('../src/ui/ink/runInkRepl.js')
+    const skillsArray = [...skills.values()].map((s) => ({ name: s.name, description: s.description }))
+    await runInkRepl({
+      store: uiStore,
+      engine,
+      inkRenderer: inkRendererInstance as unknown as Renderer,
+      version: VERSION,
+      model,
+      skills: skillsArray,
+      cwd,
+      sessionDir,
+      resumedHistory,
+      maxContextTokens: maxCtxTokens,
+    })
+    return
+  }
+
   await runRepl(engine, planConfig, renderer, cwd, skills, hookRunner, {
     config, semanticMemory, episodicMemory,
   }, sessionDir, resumedHistory)
