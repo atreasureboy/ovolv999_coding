@@ -43,6 +43,7 @@ import type { Renderer } from '../ui/renderer.js'
 import {
   maybeCompact,
   microCompact,
+  maybeTimeBasedMicroCompact,
   estimateTokens,
   estimateToolDefinitionTokens,
   getCompressionStrategy,
@@ -56,6 +57,7 @@ import {
 import type { AgentModule, ModuleBootResult, ModuleBootContext } from './module.js'
 import { globalModuleRegistry } from './moduleRegistry.js'
 import { applyAgentToConfig } from './agentPresets.js'
+import { filterToolsForSubAgent } from './agentToolFilter.js'
 import { clearFileState } from './fileState.js'
 import {
   transitionQueryState,
@@ -69,6 +71,7 @@ import { BackgroundTaskManager } from './backgroundTaskManager.js'
 import { FileHistory } from './fileHistory.js'
 import { PermissionManager } from './permissionSystem.js'
 import { classifyCommandRisk } from './riskClassifier.js'
+import { normalizeCJKInput } from './strings.js'
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -317,6 +320,25 @@ export class ExecutionEngine {
    * branch of priority-1.
    */
   private _turnInFlight = false
+  /**
+   * Wall-clock timestamp (epoch ms) of the most recent assistant message
+   * the engine has seen. Used by {@link maybeTimeBasedMicroCompact} to
+   * decide when the prompt cache has gone cold — after the cache TTL,
+   * clearing old tool results is "free" because the next LLM call would
+   * reprocess the full prefix anyway. Updated in the `llm_call` state
+   * after the streamed response is parsed into an assistant message.
+   */
+  private lastAssistantTs: number | undefined = undefined
+  /**
+   * Queued "keep_recent" count for manual context pruning. Set by the
+   * `/snip [N]` slash command via {@link queueSnip}; consumed at the
+   * start of the next `runTurn`. `null` when nothing is queued.
+   *
+   * Zero-LLM-cost alternative to `microCompact`/`maybeCompact`: just drops
+   * old messages and inserts a boundary marker. Useful when the user
+   * wants an instant context reduction.
+   */
+  private pendingSnipCount: number | null = null
 
   /**
    * Resolve the model-aware context window (cached for the engine's
@@ -427,6 +449,10 @@ export class ExecutionEngine {
    * which have their own BackgroundTaskManager distinct from the parent's —
    * are disposed when the sub-agent completes, aborts, or errors.
    *
+   * Also calls dispose() on each module that implements it (e.g. McpModule
+   * closes its stdio server processes). Modules that don't expose dispose()
+   * are skipped — this method is opt-in per module.
+   *
    * Safe to call multiple times (the underlying manager's dispose is
    * idempotent). Safe to call before any turn has run (no-op on an
    * empty task map). Never throws.
@@ -437,6 +463,14 @@ export class ExecutionEngine {
     } catch {
       // disposal must not throw — AgentTool calls this from a finally
       // block and any throw would propagate out of the host's runTurn
+    }
+    for (const module of this.modules) {
+      const dispose = (module as { dispose?: () => void | Promise<void> }).dispose
+      if (typeof dispose === 'function') {
+        Promise.resolve(dispose.call(module)).catch(() => {
+          // module dispose failures must never break engine disposal
+        })
+      }
     }
   }
 
@@ -484,11 +518,24 @@ export class ExecutionEngine {
     // Merge base tools + module-provided tools
     const allTools = [...this.tools, ...moduleTools]
     let defs = getToolDefinitions(allTools)
-    // Filter by agent tool whitelist (if configured)
-    const whitelist = this.config.agent?.tools
-    if (whitelist) {
-      const allowed = new Set(whitelist)
-      defs = defs.filter((t) => allowed.has(t.function.name))
+    // Filter by agent tool list when a sub-agent config is in play.
+    //
+    // Two shapes of filtering here:
+    //   1. Sub-agent (config.agent set): delegate to filterToolsForSubAgent
+    //      so the global denylist (Agent, EnterPlanMode, …) is enforced in
+    //      addition to the per-agent allow/deny lists.
+    //   2. Main thread with an explicit `agent.tools` (rare — agent.tools on
+    //      the main thread is an unusual override path) — just apply the
+    //      allowlist, no global denylist.
+    if (this.config.agent) {
+      const allNames = defs.map(t => t.function.name)
+      const filtered = filterToolsForSubAgent(
+        allNames,
+        this.config.agent.tools,
+        this.config.agent.disallowedTools,
+      )
+      const allowedSet = new Set(filtered)
+      defs = defs.filter(t => allowedSet.has(t.function.name))
     }
     // Filter by plan mode (read-only tools only)
     if (planMode) {
@@ -549,30 +596,20 @@ export class ExecutionEngine {
     const shouldCompact = pct >= CONTEXT_COMPACT_PCT
     const strategy = getCompressionStrategy(pct)
 
-    // ── Time-based microCompact: when the session was idle for >5 min,
-    // the prompt cache is guaranteed cold — clearing old tool results
-    // costs nothing (the full prefix will be rewritten anyway).
+    // ── Time-based microCompact: when the session has been idle past the
+    // prompt-cache TTL, the next LLM call will re-process the full
+    // prefix anyway — clearing old tool results NOW is "free" (no cache
+    // hit to forfeit). Uses the engine's tracked `lastAssistantTs` so
+    // the gate is wall-clock-based rather than a message-count proxy.
     if (!shouldCompact) {
-      let lastAssistantIdx = -1
-      for (let i = messages.length - 1; i >= 0; i--) {
-        if (messages[i].role === 'assistant') { lastAssistantIdx = i; break }
-      }
-      if (lastAssistantIdx >= 0) {
-        // Heuristic: if there are many messages since the last assistant turn,
-        // the session was likely idle. We can't know the wall-clock from messages
-        // alone, so we use message count as a proxy for elapsed time.
-        const messagesSinceLastTurn = messages.length - lastAssistantIdx
-        if (messagesSinceLastTurn > 20) {
-          const mcResult = microCompact(messages)
-          if (mcResult.compacted) {
-            this.eventLog?.append('context_compact', 'engine', {
-              type: 'time_based_microcompact',
-              tokens_before: mcResult.tokensBefore,
-              tokens_after: mcResult.tokensAfter,
-              tools_cleared: mcResult.toolsCleared,
-            })
-          }
-        }
+      const tbResult = maybeTimeBasedMicroCompact(messages, this.lastAssistantTs)
+      if (tbResult.compacted) {
+        this.eventLog?.append('context_compact', 'engine', {
+          type: 'time_based_microcompact',
+          tokens_before: tbResult.tokensBefore,
+          tokens_after: tbResult.tokensAfter,
+          tools_cleared: tbResult.toolsCleared,
+        })
       }
     }
 
@@ -933,9 +970,29 @@ export class ExecutionEngine {
       }
     }
 
-    // Enforce agent tool whitelist (defence in depth — LLM shouldn't see non-whitelisted tools)
-    const whitelist = this.config.agent?.tools
-    if (whitelist && !whitelist.includes(toolName)) {
+    // Enforce agent tool list (defence in depth — LLM shouldn't see tools
+    // it hasn't been granted, AND we re-check the global sub-agent
+    // denylist at call time so a model that guesses a tool name can't
+    // reach it via a parallel call that slipped past `getToolDefinitions`).
+    // The locals below sidestep a TS narrowing quirk where `else if
+    // (this.config.agent?.tools)` collapses to `never` after the outer
+    // `if (this.config.agent)` narrows the property to non-undefined.
+    const agent = this.config.agent
+    const agentToolsFallback = agent?.tools
+    if (agent) {
+      const allNames = this.allTools.map(t => t.name)
+      const filtered = filterToolsForSubAgent(
+        allNames,
+        agent.tools,
+        agent.disallowedTools,
+      )
+      if (!filtered.includes(toolName)) {
+        return {
+          content: `Tool "${toolName}" is not available to this agent.`,
+          isError: true,
+        }
+      }
+    } else if (agentToolsFallback && !agentToolsFallback.includes(toolName)) {
       return {
         content: `Tool "${toolName}" is not available to this agent.`,
         isError: true,
@@ -1125,6 +1182,7 @@ export class ExecutionEngine {
         if (approved) this.exitPlanMode()
         return approved
       },
+      enterPlanMode: () => { this.enterPlanMode() },
       fileHistory: this.fileHistory ?? undefined,
       // Module patches override/extend the base context (incl. availableToolNames)
       ...modulePatches,
@@ -1228,11 +1286,28 @@ export class ExecutionEngine {
       this.currentTurnAbortController = turnAbortController
 
       // Initialize messages
-      const messages: OpenAIMessage[] = [...history, { role: 'user', content: userMessage }]
+      const messages: OpenAIMessage[] = [...history, { role: 'user', content: normalizeCJKInput(userMessage) }]
+
+      // Apply a queued `/snip [N]` first, if any. See `queueSnip`. The
+      // boundary marker is inserted into `messages` here so the very
+      // first LLM call of this turn sees the truncated history.
+      if (this.pendingSnipCount !== null) {
+        const queuedKeep = this.pendingSnipCount
+        this.pendingSnipCount = null
+        this.applySnipToMessages(messages, queuedKeep, 'queued via /snip')
+      }
 
       const toolContext = this.buildToolContext(
         turnAbortController.signal,
-        { ...toolContextPatch, availableToolNames: toolDefs.map(t => t.function.name) },
+        {
+          ...toolContextPatch,
+          availableToolNames: toolDefs.map(t => t.function.name),
+          // `snipMessages` mutates the live `messages` array held by
+          // this `runTurn`. Provided here (not via module patch) because
+          // it needs closure over the *local* `messages` reference.
+          snipMessages: (keepRecent: number, reason?: string) =>
+            this.applySnipToMessages(messages, keepRecent, reason),
+        },
       )
 
       // ── State machine driver ───────────────────────────────────────────
@@ -1334,6 +1409,12 @@ export class ExecutionEngine {
                   : undefined,
             }
             messages.push(assistantMsg)
+
+            // Stamp the wall-clock time of THIS assistant message so the
+            // next evaluateContextBudget pass can decide whether the prompt
+            // cache has gone cold. Recorded AFTER the message is pushed
+            // because the time-based compact gate uses this as its baseline.
+            this.lastAssistantTs = Date.now()
 
             // Detect empty response (no text AND no tool calls) — nudge the model
             if (!assistantText && rawToolCalls.length === 0 && emptyResponseCount < MAX_EMPTY_RETRIES) {
@@ -1589,9 +1670,89 @@ export class ExecutionEngine {
     return this.planModeActive
   }
 
+  /**
+   * Expose the live EngineConfig reference so slash commands (e.g. /poor)
+   * can mutate fields and have modules see the change immediately. The
+   * returned object is the SAME reference modules hold via ModuleContext.config,
+   * so mutations propagate live.
+   */
+  getConfig(): EngineConfig {
+    return this.config
+  }
+
   /** Exit plan mode — called by the ExitPlanMode tool after user approval */
   exitPlanMode(): void {
     this.planModeActive = false
+  }
+
+  /** Enter plan mode — called by the EnterPlanMode tool */
+  enterPlanMode(): void {
+    this.planModeActive = true
+  }
+
+  /**
+   * Queue a manual "snip" for the start of the next `runTurn`.
+   * Called by the `/snip [N]` slash command. Drops all but the most
+   * recent `keepRecent` messages and inserts a `[snip]` boundary marker
+   * before the first LLM call of the next turn.
+   *
+   * The snip is applied at runTurn entry — not synchronously here —
+   * because the messages array lives inside `runTurn` and we don't have
+   * a stable reference outside it.
+   */
+  queueSnip(keepRecent: number): void {
+    if (typeof keepRecent === 'number' && keepRecent >= 0) {
+      this.pendingSnipCount = Math.floor(keepRecent)
+    }
+  }
+
+  /**
+   * Mutate `messages` in place: drop all but the last `keepRecent`
+   * entries, prepend a `[snip]` boundary marker, log the event, and
+   * return `{ removed, tokensFreed }`. Shared by the `Snip` tool
+   * (mid-turn) and the queued-from-slash-command path (pre-turn).
+   *
+   * `removed` reflects how many messages were actually dropped — when
+   * the conversation is already shorter than `keepRecent`, nothing
+   * happens and `removed === 0`.
+   */
+  private applySnipToMessages(
+    messages: OpenAIMessage[],
+    keepRecent: number,
+    reason: string | undefined,
+  ): { removed: number; tokensFreed: number } {
+    const total = messages.length
+    const removeCount = Math.max(0, total - keepRecent)
+    if (removeCount === 0) {
+      return { removed: 0, tokensFreed: 0 }
+    }
+
+    const tokensBefore = estimateTokens(messages)
+    const kept = messages.slice(-keepRecent)
+    const boundary: OpenAIMessage = {
+      role: 'user',
+      content:
+        `[snip] ${removeCount} older messages were removed to free context space` +
+        (reason ? ` (${reason})` : '') +
+        '. Continue working from the current context — earlier details are no longer available.',
+    }
+
+    // Mutate in place — same pattern as `microCompact` / `maybeCompact`
+    messages.length = 0
+    messages.push(boundary, ...kept)
+
+    const tokensAfter = estimateTokens(messages)
+
+    this.eventLog?.append('context_compact', 'snip', {
+      type: 'manual_snip',
+      removed: removeCount,
+      tokens_before: tokensBefore,
+      tokens_after: tokensAfter,
+      tokens_freed: tokensBefore - tokensAfter,
+      reason: reason ?? null,
+    })
+
+    return { removed: removeCount, tokensFreed: tokensBefore - tokensAfter }
   }
 
   /** Get the file history tracker (null if no sessionDir) */

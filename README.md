@@ -7,7 +7,7 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript)](https://www.typescriptlang.org/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/Node-%3E%3D20-339933?logo=node.js)](https://nodejs.org/)
-[![Tests](https://img.shields.io/badge/Tests-637%20passed-brightgreen)]()
+[![Tests](https://img.shields.io/badge/Tests-974%20passed-brightgreen)]()
 
 > `ovolv999 "任何你需要它完成的任务"`
 
@@ -37,6 +37,9 @@ ovolv999 是一个**纯 Agent 基座框架**，仿 Claude Code，核心设计参
 - **流式引擎** — Streaming LLM API，tool_call 解析 → 分区调度 → 结果注入 → 循环
 - **上下文预算** — 统一百分比阈值 (70% warn / 85% compact)，**含系统提示词 token**，tool_call 对保护
 - **API 重试** — SDK 指数退避 5 次重试 (429/5xx/ECONNRESET)，120s 超时
+- **Poor/Budget 模式** — `/poor on` 跳过 critic 自纠错与 reflection 知识提取等非必要 LLM 调用，显著降低 token 消耗（token 受限场景）
+- **Plan 工具闭环** — `EnterPlanMode`（主动进入只读分析）/ `ExitPlanMode`（提交计划待批准）/ `VerifyPlanExecution`（实现后自检 build/lint/test）
+- **MCP 客户端（stdio）** — 经 `.ovogo/settings.json` 的 `mcp.servers` 连接任意 stdio MCP server，工具以 `mcp__<server>__<tool>` 命名空间动态注入（零新依赖）
 - **零领域绑定** — 核心是 Agent 基础设施，业务逻辑通过 Module + Tool 插件注入
 
 ## 架构全景
@@ -85,7 +88,7 @@ ovolv999 是一个**纯 Agent 基座框架**，仿 Claude Code，核心设计参
 ║  │  Abort: softAbort(ESC) / hardAbort(Ctrl+C)                            │   ║
 ║  └────────────────────────────────────────────────────────────────────────┘   ║
 ║                                                                              ║
-║  ┌─ Modules (4) ──────┐  ┌─ Tools (26) ────────┐  ┌─ Memory ───────────┐    ║
+║  ┌─ Modules (4) ──────┐  ┌─ Tools (28 + MCP) ──┐  ┌─ Memory ───────────┐    ║
 ║  │ memory             │  │ Bash / file tools     │  │ Semantic:          │    ║
 ║  │  ├ boot: 相关性检索│  │ Web / Agent / Skill   │  │  关键词去重 +       │    ║
 ║  │  ├ tools: write/   │  │ Task lifecycle tools  │  │  来源优先级冲突解决  │    ║

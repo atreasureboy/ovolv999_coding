@@ -12,9 +12,10 @@
  * The notebook is read as JSON, modified, and written back.
  */
 
-import { readFileSync, writeFileSync } from 'fs'
+import { readFileSync } from 'fs'
 import { extname, resolve, isAbsolute } from 'path'
 import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/types.js'
+import { atomicWrite } from '../core/atomicWrite.js'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -107,11 +108,11 @@ NotebookEdit({
     return false // File-writing tool — serial execution
   }
 
-  execute(input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
-    return Promise.resolve(this.doEdit(input, ctx))
+  async execute(input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    return this.doEdit(input, ctx)
   }
 
-  private doEdit(input: Record<string, unknown>, ctx: ToolContext): ToolResult {
+  private async doEdit(input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const notebookPath = input.notebook_path as string
     const cellId = input.cell_id as string | undefined
     const newSource = input.new_source as string
@@ -225,9 +226,10 @@ NotebookEdit({
     // Back up before modifying (undo/checkpoint support)
     ctx.fileHistory?.trackEdit(fullPath)
 
-    // Write back
+    // Write back — atomic so a crash mid-write cannot leave a half-
+    // written notebook on disk (which Jupyter would refuse to open).
     try {
-      writeFileSync(fullPath, JSON.stringify(notebook, null, 1), 'utf8')
+      await atomicWrite(fullPath, JSON.stringify(notebook, null, 1), { encoding: 'utf8' })
     } catch (err) {
       return { content: `Error writing notebook: ${(err as Error).message}`, isError: true }
     }

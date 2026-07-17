@@ -10,10 +10,11 @@ import type { SlashCommandContext, SlashCommandResult } from './index.js'
 import { listCommands } from './index.js'
 import { getCurrentMode, setCurrentMode, cycleMode, getAllModes, type Mode } from '../core/modes.js'
 import type { PermissionMode } from '../core/permissionSystem.js'
+import { saveProjectSettings } from '../config/settings.js'
 import { estimateTokens, calculateContextState, microCompact } from '../core/compact.js'
 import { existsSync, writeFileSync } from 'fs'
 import { join } from 'path'
-import { execSync } from 'child_process'
+import { execSync, execFileSync } from 'child_process'
 import { homedir } from 'os'
 import { ClaudeCodeWorkerManager } from '../core/claudeCodeWorkerManager.js'
 
@@ -92,6 +93,23 @@ registerCommand({
       return text(`Micro-compacted: cleared ${mc.toolsCleared} old tool results (${mc.tokensBefore}→${mc.tokensAfter} tokens). Full LLM compaction will trigger automatically at 85% pressure.`)
     }
     return text('Nothing to micro-compact. Full LLM summarization will trigger automatically at 85% context pressure.')
+  },
+})
+
+// ── /snip — manual context pruning (zero LLM cost) ─────────────────────────
+
+registerCommand({
+  name: 'snip',
+  description: 'Manually remove old messages to free context (zero LLM cost, applies at start of next turn)',
+  usage: '/snip [N]  (N = messages to keep, default 10)',
+  handler: (args, ctx) => {
+    const trimmed = args.trim()
+    const keepRecent = trimmed ? Number.parseInt(trimmed, 10) : 10
+    if (!Number.isFinite(keepRecent) || keepRecent < 0) {
+      return text(`Invalid number of messages to keep: "${trimmed}". Usage: /snip [N]`)
+    }
+    ctx.engine.queueSnip(keepRecent)
+    return text(`Queued: will snip to last ${keepRecent} messages at the start of the next turn.`)
   },
 })
 
@@ -233,6 +251,30 @@ registerCommand({
     }
 
     return text('Usage: /permissions [mode|cycle|rules|allow <Tool> <pattern>|deny <Tool> <pattern>|remove <index>|clear]')
+  },
+})
+
+// ── /poor — toggle budget mode ───────────────────────────────────────
+
+registerCommand({
+  name: 'poor',
+  description: 'Toggle Poor/Budget mode (skip critic + reflection LLM calls)',
+  usage: '/poor [on|off]',
+  handler: (args, ctx) => {
+    const liveConfig = ctx.engine.getConfig()
+    const action = args.trim().split(/\s+/)[0]
+    const current = liveConfig.poor?.enabled === true
+
+    if (!action) {
+      return text('Poor mode: ' + (current ? 'ON' : 'OFF') + '\n\nUse /poor on or /poor off to toggle. Skips critic self-correction and reflection LLM calls.')
+    }
+    if (action !== 'on' && action !== 'off') {
+      return text('Usage: /poor [on|off]')
+    }
+    const enabled = action === 'on'
+    liveConfig.poor = { enabled }
+    saveProjectSettings(ctx.cwd, { poor: { enabled } })
+    return text('Poor mode: ' + (enabled ? 'ON' : 'OFF') + ' (saved to .ovogo/settings.json)')
   },
 })
 
@@ -454,8 +496,8 @@ registerCommand({
       return text('Usage: /commit <commit message>')
     }
     try {
-      execSync('git add -A', { cwd: ctx.cwd, timeout: 10_000 })
-      execSync(`git commit -m "${args.replace(/"/g, '\\"')}"`, { cwd: ctx.cwd, encoding: 'utf8', timeout: 30_000 })
+      execFileSync('git', ['add', '-A'], { cwd: ctx.cwd, timeout: 10_000 })
+      execFileSync('git', ['commit', '-m', args], { cwd: ctx.cwd, encoding: 'utf8', timeout: 30_000 })
       return text(`Committed: ${args}`)
     } catch (err) {
       return text(`Commit failed: ${(err as Error).message}`)
@@ -604,10 +646,10 @@ registerCommand({
   handler: (args, ctx) => {
     try {
       if (args.trim()) {
-        execSync('git checkout -b ' + args.trim(), { cwd: ctx.cwd, timeout: 10_000 })
+        execFileSync('git', ['checkout', '-b', args.trim()], { cwd: ctx.cwd, timeout: 10_000 })
         return text('Created and switched to branch: ' + args.trim())
       }
-      const branches = execSync('git branch -v', { cwd: ctx.cwd, encoding: 'utf8', timeout: 10_000 }).trim()
+      const branches = execFileSync('git', ['branch', '-v'], { cwd: ctx.cwd, encoding: 'utf8', timeout: 10_000 }).trim()
       return text('Git branches:\n' + branches)
     } catch {
       return text('Not a git repository or git not available.')

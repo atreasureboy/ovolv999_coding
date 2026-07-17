@@ -802,3 +802,61 @@ export function microCompact(messages: OpenAIMessage[]): MicroCompactResult {
   return { compacted: true, messages, tokensBefore, tokensAfter, toolsCleared }
 }
 
+/**
+ * Time-based micro-compact: if enough wall-clock time has passed since the
+ * last assistant message, the prompt cache has likely expired — the next
+ * LLM call will re-process the full prefix anyway, so it's "free" to clear
+ * old tool results NOW (they're going to be re-sent regardless). Inspired
+ * by Claude Code's time-based microCompact trigger.
+ *
+ * Contract:
+ *   - If `lastAssistantTimestamp` is undefined OR the gap to `now` is
+ *     below `thresholdMs`, return `{ compacted: false, ... }` without
+ *     touching the messages. This is the conservative no-op path.
+ *   - Otherwise delegate to {@link microCompact} (which has the actual
+ *     clearing policy — keep N most recent, replace the rest with a
+ *     placeholder). The time check is just a gate.
+ *
+ * `now` is injectable so tests can pin wall-clock without monkey-patching
+ * Date.now. `thresholdMs` defaults to 5 minutes (the same value Claude
+ * Code uses; it's a deliberate constant, not a per-deployment knob, to
+ * match the cache-warmth model).
+ *
+ * Pure function: mutates `messages` only when delegating to microCompact,
+ * and only when the underlying check decides to clear results.
+ */
+export function maybeTimeBasedMicroCompact(
+  messages: OpenAIMessage[],
+  lastAssistantTimestamp: number | undefined,
+  now: number = Date.now(),
+  thresholdMs: number = 5 * 60 * 1000,
+): MicroCompactResult {
+  if (lastAssistantTimestamp === undefined) {
+    // No assistant turn yet — no time baseline to measure from. Return
+    // a fresh no-op result so the caller can keep its log structure
+    // consistent.
+    return {
+      compacted: false,
+      messages,
+      tokensBefore: estimateTokens(messages),
+      tokensAfter: estimateTokens(messages),
+      toolsCleared: 0,
+    }
+  }
+  const gap = now - lastAssistantTimestamp
+  if (gap < thresholdMs) {
+    // Still inside the cache-warm window — clearing would forfeit a
+    // real cache hit for marginal token savings. Skip.
+    return {
+      compacted: false,
+      messages,
+      tokensBefore: estimateTokens(messages),
+      tokensAfter: estimateTokens(messages),
+      toolsCleared: 0,
+    }
+  }
+  // Cache is cold — clearing is free. Delegate to the standard
+  // microCompact (same clearing policy as the pressure-based path).
+  return microCompact(messages)
+}
+

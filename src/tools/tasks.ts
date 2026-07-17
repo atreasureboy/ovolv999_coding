@@ -93,7 +93,16 @@ The task runs detached. Use TaskGet with block=true to wait for completion.`,
       metadata: input.metadata as Record<string, unknown> | undefined,
     })
 
-    const task = manager.getTask(id)!
+    const task = manager.getTask(id)
+    if (!task) {
+      // createTask returned an id but the lookup came back empty — a
+      // background manager inconsistency. Surface as an error rather
+      // than crashing the tool with a non-null deref.
+      return Promise.resolve({
+        content: `Task created (id=${id}) but could not be retrieved immediately. Try TaskGet with task_id="${id}".`,
+        isError: true,
+      })
+    }
     return Promise.resolve({
       content: `Background task created: ${id}\nCommand: ${task.command}\nPID: ${task.pid ?? 'unknown'}\nStatus: running\n\nUse TaskGet with task_id="${id}" to check status and retrieve output.`,
       isError: false,
@@ -278,7 +287,16 @@ export class TaskUpdateTool implements Tool {
       return Promise.resolve({ content: `Task not found: ${taskId}. Hint: use TaskList to see all task IDs.`, isError: true })
     }
 
-    const task = manager.getTask(taskId)!
+    const task = manager.getTask(taskId)
+    if (!task) {
+      // updateTask reported success but getTask returned nothing. Should
+      // be unreachable (they share the same backing map), but guard so a
+      // future refactor can't silently null-deref.
+      return Promise.resolve({
+        content: `Task ${taskId} updated but could not be read back.`,
+        isError: true,
+      })
+    }
     return Promise.resolve({
       content: `Updated task ${taskId}: ${task.description}`,
       isError: false,

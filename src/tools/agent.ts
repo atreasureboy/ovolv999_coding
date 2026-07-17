@@ -102,7 +102,7 @@ export function detectVerifyCommands(cwd: string): string[] {
  * Run verification commands and return results.
  * Returns null if no commands or all pass, or a formatted failure summary.
  */
-function runVerification(cwd: string): { passed: boolean; output: string } | null {
+export function runVerification(cwd: string): { passed: boolean; output: string } | null {
   const commands = detectVerifyCommands(cwd)
   if (commands.length === 0) return null
 

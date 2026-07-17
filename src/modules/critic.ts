@@ -26,7 +26,7 @@ export class CriticModule implements AgentModule {
   constructor(
     private client: OpenAI,
     private model: string,
-    private planMode: boolean,
+    private config: { planMode?: boolean; poor?: { enabled: boolean } },
   ) {}
 
   boot(): ModuleBootResult {
@@ -34,7 +34,8 @@ export class CriticModule implements AgentModule {
   }
 
   async onIteration(ctx: ModuleIterationContext): Promise<ModuleIterationResult | void> {
-    if (this.planMode) return
+    if (this.config.planMode) return
+    if (this.config.poor?.enabled) return
     if (ctx.iteration < CRITIC_MIN_ITERATIONS) return
     if (ctx.iteration % CRITIC_INTERVAL !== 0) return
 

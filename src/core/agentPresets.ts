@@ -45,6 +45,16 @@ export interface AgentConfig {
   modules?: ModuleConfig
   /** Tool whitelist — undefined = all registered tools */
   tools?: string[]
+  /**
+   * Tool DENYLIST — applied AFTER `tools` so entries here are removed
+   * even if they appear in the allowlist. Lets a preset ship a default
+   * allowlist while still letting the caller take a specific tool away
+   * (e.g. an explore preset that defaults to read-only tools but ALSO
+   * asserts "no Bash" as a defense-in-depth check on top of `tools`).
+   * Sub-agents also get a global denylist applied on top — see
+   * {@link SUB_AGENT_DISALLOWED_TOOLS}.
+   */
+  disallowedTools?: string[]
   /** Skill IDs (future — for lazy-loaded skill system) */
   skills?: string[]
   /** Execution limits */
@@ -164,6 +174,9 @@ export function validateAgentConfig(raw: unknown): AgentConfig | null {
       ? obj.modules
       : undefined,
     tools: Array.isArray(obj.tools) ? (obj.tools as unknown[]).filter((t): t is string => typeof t === 'string') : undefined,
+    disallowedTools: Array.isArray(obj.disallowedTools)
+      ? (obj.disallowedTools as unknown[]).filter((t): t is string => typeof t === 'string')
+      : undefined,
     maxIterations: typeof obj.maxIterations === 'number' ? Math.min(obj.maxIterations, 200) : undefined,
     temperature: typeof obj.temperature === 'number' ? Math.min(Math.max(obj.temperature, 0), 2) : undefined,
     maxOutputTokens: typeof obj.maxOutputTokens === 'number' ? obj.maxOutputTokens : undefined,

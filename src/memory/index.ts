@@ -9,6 +9,7 @@
 import { existsSync, readFileSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
+import { createHash } from 'crypto'
 
 interface SemanticEntry {
   id: string
@@ -19,9 +20,21 @@ interface SemanticEntry {
   confidence: number
 }
 
-/** Compute the project slug the same way bin/ovogogogo.ts does */
+/**
+ * Compute the project slug. Must match bin/ovogogogo.ts so the memory
+ * directory written here matches the directory the agent reads from.
+ *
+ * Two distinct paths can collapse to the same human-readable prefix after
+ * sanitization (e.g. `/home/u/proj-foo` and `/home/u/proj foo` both become
+ * `home_u_proj_foo`); without a disambiguating suffix those projects would
+ * share a memory directory and read each other's notes. Append an 8-char
+ * sha256 hash of the raw path so collisions are effectively impossible
+ * while keeping the slug short and human-debuggable.
+ */
 function projectSlug(cwd: string): string {
-  return cwd.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 32)
+  const prefix = cwd.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 24)
+  const suffix = createHash('sha256').update(cwd).digest('hex').slice(0, 8)
+  return prefix + '_' + suffix
 }
 
 /** Get the memory directory for a given cwd (matches SemanticMemory's path) */

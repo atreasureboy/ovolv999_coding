@@ -24,7 +24,10 @@ import {
 } from './tasks.js'
 import { AskUserQuestionTool } from './askUser.js'
 import { ExitPlanModeTool } from './exitPlanMode.js'
+import { EnterPlanModeTool } from './enterPlanMode.js'
+import { VerifyPlanExecutionTool } from './verifyPlanExecution.js'
 import { SleepTool } from './sleep.js'
+import { SnipTool } from './snip.js'
 import { NotebookEditTool } from './notebookEdit.js'
 import { ClaudeCodeTool } from './claudeCode.js'
 
@@ -73,7 +76,10 @@ export function createTools(
     new TaskStopTool(),
     new AskUserQuestionTool(),
     new ExitPlanModeTool(),
+    new EnterPlanModeTool(),
+    new VerifyPlanExecutionTool(),
     new SleepTool(),
+    new SnipTool(),
     new NotebookEditTool(),
     new ClaudeCodeTool(),
     ...extraTools,
@@ -108,7 +114,10 @@ export {
   TaskStopTool,
   AskUserQuestionTool,
   ExitPlanModeTool,
+  EnterPlanModeTool,
+  VerifyPlanExecutionTool,
   SleepTool,
+  SnipTool,
   NotebookEditTool,
   ClaudeCodeTool,
 }

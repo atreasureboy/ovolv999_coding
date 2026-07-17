@@ -28,6 +28,7 @@
 
 import { resolve, join, dirname, basename } from 'path'
 import { writeFileSync, readFileSync, existsSync, statSync, realpathSync } from 'fs'
+import { createHash } from 'crypto'
 import { homedir } from 'os'
 import { fileURLToPath, pathToFileURL } from 'url'
 
@@ -78,6 +79,7 @@ import { MemoryModule } from '../src/modules/memory.js'
 import { CriticModule } from '../src/modules/critic.js'
 import { WorkspaceModule } from '../src/modules/workspace.js'
 import { ReflectionModule, consolidateSession } from '../src/modules/reflection.js'
+import { McpModule } from '../src/modules/mcp.js'
 import { detectProjectContext, formatProjectContext } from '../src/config/projectContext.js'
 import { createLoadSkillTool } from '../src/tools/loadSkill.js'
 import { createTerminalAskUserHandler } from '../src/tools/askUser.js'
@@ -1045,6 +1047,7 @@ async function runRepl(
       const result = await consolidateSession(
         client, consolidate.config.model,
         consolidate.episodicMemory, consolidate.semanticMemory,
+        consolidate.config.poor,
       )
       if (result.knowledgeExtracted > 0) {
         renderer.info(`Memory consolidated: ${result.knowledgeExtracted} entries from ${result.episodes} episodes`)
@@ -1312,7 +1315,12 @@ async function main(): Promise<void> {
   const eventLog = new EventLog(sessionDir)
   renderer.info(`EventLog: ${eventLog.getFilePath()}`)
 
-  const projectSlug = cwd.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 32)
+  // Project slug must match src/memory/index.ts:projectSlug — otherwise the
+  // memory directory written here would be invisible to the memory loader
+  // on the next session. Hash-suffixed to prevent collisions between paths
+  // that sanitize to the same prefix (e.g. `/a/proj foo` and `/a/proj-foo`).
+  const projectSlug = cwd.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 24) +
+    '_' + createHash('sha256').update(cwd).digest('hex').slice(0, 8)
   const semanticMemory = new SemanticMemory(join(homedir(), '.ovogo', 'projects', projectSlug))
   const episodicMemory = new EpisodicMemory(join(homedir(), '.ovogo', 'projects', projectSlug))
 
@@ -1320,11 +1328,12 @@ async function main(): Promise<void> {
   globalModuleRegistry.register('memory', (ctx) =>
     new MemoryModule(ctx.config.semanticMemory!, ctx.config.episodicMemory!))
   globalModuleRegistry.register('critic', (ctx) =>
-    new CriticModule(ctx.client, ctx.model, ctx.config.planMode ?? false))
+    new CriticModule(ctx.client, ctx.model, ctx.config))
   globalModuleRegistry.register('workspace', (ctx) =>
     new WorkspaceModule(ctx.config.sessionDir))
   globalModuleRegistry.register('reflection', (ctx) =>
-    new ReflectionModule(ctx.client, ctx.model, ctx.config.semanticMemory!))
+    new ReflectionModule(ctx.client, ctx.model, ctx.config.semanticMemory!, ctx.config))
+  globalModuleRegistry.register('mcp', () => new McpModule())
 
   const maxCtxTokens = process.env.OVOGO_MAX_CONTEXT_TOKENS
     ? parseInt(process.env.OVOGO_MAX_CONTEXT_TOKENS, 10)
@@ -1356,11 +1365,15 @@ async function main(): Promise<void> {
     maxContextTokens: maxCtxTokens,
     temperature: process.env.OVOGO_TEMPERATURE ? parseFloat(process.env.OVOGO_TEMPERATURE) : undefined,
     maxOutputTokens: process.env.OVOGO_MAX_OUTPUT_TOKENS ? parseInt(process.env.OVOGO_MAX_OUTPUT_TOKENS, 10) : undefined,
+    poor: settings.poor ?? (process.env.OVOGO_POOR === '1' ? { enabled: true } : undefined),
+    mcp: settings.mcp,
     eventLog,
     semanticMemory,
     episodicMemory,
     extraTools: skills.size > 0 ? [loadSkillTool] : [],
-    enabledModules: ['memory', 'critic', 'workspace', 'reflection'],
+    enabledModules: settings.mcp?.servers?.length
+      ? ['memory', 'critic', 'workspace', 'reflection', 'mcp']
+      : ['memory', 'critic', 'workspace', 'reflection'],
     agentFactory,
     askUserQuestion: createTerminalAskUserHandler({
       // The handler reads `activePrompt` lazily (it can be null before

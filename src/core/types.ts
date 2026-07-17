@@ -7,6 +7,7 @@ import type { AgentConfig } from './agentPresets.js'
 import type { BackgroundTaskManager } from './backgroundTaskManager.js'
 import type { FileHistory } from './fileHistory.js'
 import type { PermissionManager } from './permissionSystem.js'
+import type { McpServerConfig } from './mcpClient.js'
 
 // OpenAI-compatible tool call format
 export interface ToolCall {
@@ -143,8 +144,21 @@ export interface ToolContext {
    * Provided by the REPL; absent in sub-agents / piped mode.
    */
   exitPlanMode?: (plan: string) => Promise<boolean>
+  /**
+   * Enter-plan-mode callback — lets the EnterPlanMode tool switch the
+   * engine into plan mode (read-only analysis). Absent in sub-agents /
+   * piped mode.
+   */
+  enterPlanMode?: () => void
   /** File history — backs up files before edits for undo/checkpoint */
   fileHistory?: FileHistory
+  /**
+   * Snip old messages from the conversation. Returns how many were removed
+   * and approximate tokens freed. Provided by `runTurn` so the Snip tool
+   * can prune context without an LLM call (zero-cost context reduction).
+   * Absent in sub-agents / tests that don't model the live messages array.
+   */
+  snipMessages?: (keepRecent: number, reason?: string) => { removed: number; tokensFreed: number }
 }
 
 // ── AskUserQuestion types (shared between tool, context, and REPL) ──────────
@@ -231,6 +245,10 @@ export interface EngineConfig {
    * The agent analyzes and plans but cannot write, edit, or execute.
    */
   planMode?: boolean
+  /** Poor/Budget mode — skip non-essential LLM calls (critic, reflection) */
+  poor?: { enabled: boolean }
+  /** MCP servers — tools are dynamically injected at boot. See McpModule. */
+  mcp?: { servers: McpServerConfig[] }
   /** Hook runner for PreToolCall / PostToolCall / UserPromptSubmit events */
   hookRunner?: IHookRunner
   /** Session output directory — injected into sub-agent prompts */
@@ -286,6 +304,12 @@ export interface EngineConfig {
    * Absent in sub-agents / piped mode (tool auto-approves).
    */
   exitPlanMode?: (plan: string) => Promise<boolean>
+  /**
+   * Enter-plan-mode callback — provided by the REPL so the EnterPlanMode
+   * tool can switch the engine into plan mode. Absent in sub-agents /
+   * piped mode (tool degrades gracefully).
+   */
+  enterPlanMode?: () => void
   /**
    * Factory for spawning a child engine from AgentTool. Optional: an
    * ExecutionEngine can be built without one (e.g. for tests / REPLs that

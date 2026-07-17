@@ -45,6 +45,7 @@ export class ReflectionModule implements AgentModule {
     private client: OpenAI,
     private model: string,
     private semantic: SemanticMemory,
+    private config: { planMode?: boolean; poor?: { enabled: boolean } },
   ) {}
 
   boot(): ModuleBootResult {
@@ -52,6 +53,7 @@ export class ReflectionModule implements AgentModule {
   }
 
   async onComplete(ctx: ModuleRunContext): Promise<void> {
+    if (this.config.poor?.enabled) return
     // Skip if the run was too short to yield useful insights
     const toolCallCount = ctx.messages.filter(m => m.role === 'tool').length
     if (toolCallCount < 3) return
@@ -159,7 +161,11 @@ export async function consolidateSession(
   model: string,
   episodic: EpisodicMemory,
   semantic: SemanticMemory,
+  poor?: { enabled: boolean },
 ): Promise<{ episodes: number; knowledgeExtracted: number }> {
+  if (poor?.enabled) {
+    return { episodes: 0, knowledgeExtracted: 0 }
+  }
   const episodes = episodic.recent(100)
   if (episodes.length < 5) {
     return { episodes: episodes.length, knowledgeExtracted: 0 }

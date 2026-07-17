@@ -8,6 +8,7 @@ import {
   calculateContextState,
   getCompressionStrategy,
   microCompact,
+  maybeTimeBasedMicroCompact,
   resolveContextWindow,
   KNOWN_MODEL_CONTEXT_WINDOWS,
   MODEL_MAX_CONTEXT_TOKENS,
@@ -216,6 +217,99 @@ describe('microCompact', () => {
       { role: 'assistant', content: 'Hi there' },
     ]
     const result = microCompact(msgs)
+    expect(result.compacted).toBe(false)
+  })
+})
+
+// ── maybeTimeBasedMicroCompact ───────────────────────────────────────────────
+
+describe('maybeTimeBasedMicroCompact', () => {
+  /** Helper: build enough tool results to exceed KEEP_RECENT (6) */
+  function makeOldToolResultConversation(count: number): OpenAIMessage[] {
+    const msgs: OpenAIMessage[] = []
+    for (let i = 0; i < count; i++) {
+      msgs.push({
+        role: 'assistant',
+        content: null,
+        tool_calls: [{ id: `tc_${i}`, type: 'function', function: { name: 'Read', arguments: '{}' } }],
+      })
+      msgs.push({
+        role: 'tool',
+        tool_call_id: `tc_${i}`,
+        content: 'X'.repeat(500), // substantial content
+        name: 'Read',
+      })
+    }
+    return msgs
+  }
+
+  it('does NOT compact when time gap is below threshold', () => {
+    // 10 tool results would normally trigger microCompact (>6), so the
+    // time-based path is the only thing gating this call.
+    const msgs = makeOldToolResultConversation(10)
+    const now = 1_000_000
+    const lastAssistantTs = now - 60_000 // 1 minute ago, below 5 min default
+    const result = maybeTimeBasedMicroCompact(msgs, lastAssistantTs, now)
+    expect(result.compacted).toBe(false)
+    expect(result.toolsCleared).toBe(0)
+  })
+
+  it('DOES compact when time gap exceeds threshold', () => {
+    const msgs = makeOldToolResultConversation(10)
+    const now = 1_000_000
+    const lastAssistantTs = now - 10 * 60_000 // 10 min ago, above 5 min default
+    const result = maybeTimeBasedMicroCompact(msgs, lastAssistantTs, now)
+    expect(result.compacted).toBe(true)
+    expect(result.toolsCleared).toBeGreaterThan(0)
+  })
+
+  it('does NOT compact when lastAssistantTimestamp is undefined', () => {
+    // No baseline to measure from — conservative no-op, never clears.
+    const msgs = makeOldToolResultConversation(10)
+    const result = maybeTimeBasedMicroCompact(msgs, undefined, Date.now())
+    expect(result.compacted).toBe(false)
+    expect(result.toolsCleared).toBe(0)
+  })
+
+  it('respects custom threshold', () => {
+    const msgs = makeOldToolResultConversation(10)
+    const now = 1_000_000
+    // 2 min gap with 1 min threshold → should compact
+    const gap2min = now - 2 * 60_000
+    const r1 = maybeTimeBasedMicroCompact(msgs.slice(), gap2min, now, 60_000)
+    expect(r1.compacted).toBe(true)
+
+    // 5 min gap with 10 min threshold → should NOT compact
+    const gap5min = now - 5 * 60_000
+    const r2 = maybeTimeBasedMicroCompact(msgs.slice(), gap5min, now, 10 * 60_000)
+    expect(r2.compacted).toBe(false)
+  })
+
+  it('uses default 5-minute threshold when none provided', () => {
+    // 5 min - 1ms gap with default threshold → no compact (just under)
+    const msgs = makeOldToolResultConversation(10)
+    const now = 1_000_000
+    const justUnder = now - (5 * 60_000 - 1)
+    const r1 = maybeTimeBasedMicroCompact(msgs.slice(), justUnder, now)
+    expect(r1.compacted).toBe(false)
+
+    // 5 min + 1ms gap → compact (just over)
+    const justOver = now - (5 * 60_000 + 1)
+    const r2 = maybeTimeBasedMicroCompact(msgs.slice(), justOver, now)
+    expect(r2.compacted).toBe(true)
+  })
+
+  it('is a no-op when there are no compactable tool results', () => {
+    // Pure conversation, no tool results. Even past the cache TTL,
+    // there's nothing to clear — the gate should not flip `compacted`
+    // to true and confuse the caller.
+    const msgs: OpenAIMessage[] = [
+      { role: 'user', content: 'Hello' },
+      { role: 'assistant', content: 'Hi there' },
+    ]
+    const now = 1_000_000
+    const lastAssistantTs = now - 60 * 60_000 // 1 hour ago, well past TTL
+    const result = maybeTimeBasedMicroCompact(msgs, lastAssistantTs, now)
     expect(result.compacted).toBe(false)
   })
 })

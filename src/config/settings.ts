@@ -31,6 +31,7 @@ import { randomBytes } from 'crypto'
 import { resolve, join, dirname } from 'path'
 import { homedir } from 'os'
 import type { PermissionMode, PermissionRule } from '../core/permissionSystem.js'
+import type { McpServerConfig } from '../core/mcpClient.js'
 
 const PERMISSION_MODES = new Set(['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions'])
 const PERMISSION_BEHAVIORS = new Set(['allow', 'deny', 'ask'])
@@ -79,6 +80,8 @@ export interface OvogoSettings {
   hooks?: HooksConfig
   taskContext?: TaskContext
   permissions?: PermissionsConfig
+  poor?: { enabled: boolean }
+  mcp?: { servers: McpServerConfig[] }
 }
 
 function tryParse(path: string): OvogoSettings {
@@ -108,6 +111,30 @@ function normalizePermissionRule(value: unknown): PermissionRule | null {
   }
 }
 
+function normalizeMcpServer(value: unknown): McpServerConfig | null {
+  if (!isObject(value)) return null
+  if (typeof value.name !== 'string' || !value.name.trim()) return null
+  if (!Array.isArray(value.command) || value.command.length === 0) return null
+  if (!value.command.every((c) => typeof c === 'string')) return null
+  const type = value.type === 'stdio' ? 'stdio' : 'stdio'
+  const env =
+    isObject(value.env)
+      ? (Object.fromEntries(
+          Object.entries(value.env).filter(([, v]) => typeof v === 'string'),
+        ) as Record<string, string>)
+      : undefined
+  const cwd = typeof value.cwd === 'string' ? value.cwd : undefined
+  return { name: value.name, type, command: [...value.command], env, cwd }
+}
+
+function normalizeMcp(value: unknown): { servers: McpServerConfig[] } | undefined {
+  if (!isObject(value) || !Array.isArray(value.servers)) return undefined
+  const servers = value.servers
+    .map(normalizeMcpServer)
+    .filter((s): s is McpServerConfig => s !== null)
+  return servers.length > 0 ? { servers } : undefined
+}
+
 function normalizeSettings(value: unknown): OvogoSettings {
   if (!isObject(value)) return {}
   const settings = value as OvogoSettings
@@ -121,6 +148,10 @@ function normalizeSettings(value: unknown): OvogoSettings {
   return {
     hooks: settings.hooks,
     taskContext: settings.taskContext,
+    poor: isObject(value.poor) && typeof value.poor.enabled === 'boolean'
+      ? { enabled: value.poor.enabled }
+      : undefined,
+    mcp: normalizeMcp(value.mcp),
     permissions: rawPermissions
       ? {
           mode: typeof rawMode === 'string' && PERMISSION_MODES.has(rawMode)
@@ -159,6 +190,8 @@ function mergeSettings(a: OvogoSettings, b: OvogoSettings): OvogoSettings {
     },
     taskContext: mergedTaskContext,
     permissions: mergedPermissions,
+    poor: b.poor ?? a.poor,
+    mcp: b.mcp ?? a.mcp,
   }
 }
 
