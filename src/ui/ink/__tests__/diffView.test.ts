@@ -72,4 +72,41 @@ describe('computeLineDiff', () => {
     expect(removes).toHaveLength(2) // b, c removed
     expect(adds).toHaveLength(2) // B, C added
   })
+
+  it('LCS produces interleaved add/remove for modified lines', () => {
+    const old = 'line1\nold1\nline3\nold2\nline5'
+    const newText = 'line1\nnew1\nline3\nnew2\nline5'
+    const diff = computeLineDiff(old, newText)
+    // LCS should interleave: remove old1, add new1, context line3, remove old2, add new2
+    const types = diff.map((l) => l.type)
+    expect(types).toContain('remove')
+    expect(types).toContain('add')
+    expect(types).toContain('context')
+    // Verify interleaving (not all removes then all adds)
+    const firstRemove = types.indexOf('remove')
+    const lastAdd = types.lastIndexOf('add')
+    const contextBetween = types.slice(firstRemove, lastAdd + 1).includes('context')
+    expect(contextBetween).toBe(true)
+  })
+
+  it('trims long runs of context lines', () => {
+    const old = Array.from({ length: 50 }, (_, i) => `line${i}`).join('\n')
+    const newText = old.replace('line25', 'CHANGED')
+    const diff = computeLineDiff(old, newText)
+    // Should not include all 50 lines — context should be trimmed
+    expect(diff.length).toBeLessThan(20)
+    // Should include the change
+    expect(diff.some((l) => l.text === 'CHANGED' && l.type === 'add')).toBe(true)
+  })
+
+  it('handles line swaps correctly', () => {
+    const old = 'a\nb\nc'
+    const newText = 'c\nb\na'
+    const diff = computeLineDiff(old, newText)
+    const removes = diff.filter((l) => l.type === 'remove')
+    const adds = diff.filter((l) => l.type === 'add')
+    // LCS of [a,b,c] and [c,b,a] is [b] (length 1) or [a] or [c]
+    // So 2 removals + 2 additions
+    expect(removes.length + adds.length).toBeGreaterThanOrEqual(3)
+  })
 })
