@@ -1550,6 +1550,79 @@ registerCommand({
   },
 })
 
+registerCommand({
+  name: 'debug-tool-call',
+  aliases: ['dtc'],
+  description: 'Inspect recent tool calls and results from conversation. Usage: /debug-tool-call [n]',
+  handler: (args, ctx) => {
+    const n = parseInt(args.trim(), 10) || 5
+    // Extract tool calls and results from history
+    const toolCalls: Array<{
+      index: number
+      name: string
+      args: string
+      result: string | null
+      isError: boolean
+      toolCallId: string
+    }> = []
+
+    for (let i = 0; i < ctx.history.length; i++) {
+      const msg = ctx.history[i]
+      if (msg.role === 'assistant' && msg.tool_calls) {
+        for (const tc of msg.tool_calls) {
+          toolCalls.push({
+            index: i,
+            name: tc.function.name,
+            args: tc.function.arguments,
+            result: null,
+            isError: false,
+            toolCallId: tc.id,
+          })
+        }
+      }
+      if (msg.role === 'tool' && msg.tool_call_id) {
+        const tc = toolCalls.find(t => t.toolCallId === msg.tool_call_id)
+        if (tc) {
+          tc.result = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)
+          // Detect errors from content
+          if (typeof msg.content === 'string') {
+            tc.isError = msg.content.toLowerCase().includes('error') ||
+                         msg.content.toLowerCase().includes('failed')
+          }
+        }
+      }
+    }
+
+    if (toolCalls.length === 0) {
+      return text('No tool calls in conversation history.')
+    }
+
+    const recent = toolCalls.slice(-n)
+    const lines: string[] = [`Recent ${recent.length} tool call(s) (of ${toolCalls.length} total):`]
+    lines.push('')
+
+    for (let i = 0; i < recent.length; i++) {
+      const tc = recent[i]
+      const status = tc.isError ? '✗ ERROR' : '✓ OK'
+      lines.push(`── #${i + 1} [msg ${tc.index}] ${tc.name} ${status} ──`)
+      lines.push(`  Args: ${truncate(tc.args, 200)}`)
+      if (tc.result) {
+        lines.push(`  Result: ${truncate(tc.result, 300)}`)
+      } else {
+        lines.push('  Result: (none)')
+      }
+      lines.push('')
+    }
+
+    return text(lines.join('\n'))
+  },
+})
+
+function truncate(s: string, max: number): string {
+  if (s.length <= max) return s
+  return s.slice(0, max) + `... (${s.length - max} more chars)`
+}
+
 // ── Export for REPL ─────────────────────────────────────────────────────────
 
 export { registerCommand } from './index.js'
