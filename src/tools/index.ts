@@ -30,6 +30,7 @@ import { SleepTool } from './sleep.js'
 import { SnipTool } from './snip.js'
 import { NotebookEditTool } from './notebookEdit.js'
 import { ClaudeCodeTool } from './claudeCode.js'
+import { EnterWorktreeTool, ExitWorktreeTool, ListWorktreesTool } from './worktree.js'
 
 /**
  * Wiring for the per-engine AgentTool instance. All fields are REQUIRED
@@ -82,6 +83,9 @@ export function createTools(
     new SnipTool(),
     new NotebookEditTool(),
     new ClaudeCodeTool(),
+    new EnterWorktreeTool(),
+    new ExitWorktreeTool(),
+    new ListWorktreesTool(),
     ...extraTools,
   ]
 }
@@ -120,4 +124,7 @@ export {
   SnipTool,
   NotebookEditTool,
   ClaudeCodeTool,
+  EnterWorktreeTool,
+  ExitWorktreeTool,
+  ListWorktreesTool,
 }

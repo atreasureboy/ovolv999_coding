@@ -51,11 +51,11 @@ describe('resolveAgentConfig', () => {
 // ── AGENT_PRESETS ───────────────────────────────────────────────────────────
 
 describe('AGENT_PRESETS', () => {
-  it('has 4 built-in presets', () => {
+  it('has 5 built-in presets', () => {
     expect(PRESET_NAMES).toEqual(
-      expect.arrayContaining(['explore', 'plan', 'code-reviewer', 'general-purpose']),
+      expect.arrayContaining(['explore', 'plan', 'code-reviewer', 'general-purpose', 'coordinator']),
     )
-    expect(PRESET_NAMES).toHaveLength(4)
+    expect(PRESET_NAMES).toHaveLength(5)
   })
 
   it('explore preset is read-only', () => {
@@ -81,6 +81,28 @@ describe('AGENT_PRESETS', () => {
     expect(c.identity.planMode).toBeUndefined()
     expect(c.modules?.memory?.enabled).toBe(true)
     expect(c.modules?.workspace?.enabled).toBe(true)
+  })
+
+  it('coordinator preset can dispatch agents but cannot edit files', () => {
+    const c = AGENT_PRESETS['coordinator']
+    // Has Agent tool for dispatch
+    expect(c.tools).toContain('Agent')
+    // Has worktree tools for isolation
+    expect(c.tools).toContain('EnterWorktree')
+    expect(c.tools).toContain('ExitWorktree')
+    // Does NOT have direct file editing tools
+    expect(c.tools).not.toContain('Write')
+    expect(c.tools).not.toContain('Edit')
+    expect(c.tools).not.toContain('Bash')
+    // Read-only investigation tools are available
+    expect(c.tools).toContain('Read')
+    expect(c.tools).toContain('Grep')
+  })
+
+  it('coordinator preset has higher iteration budget than workers', () => {
+    const c = AGENT_PRESETS['coordinator']
+    const worker = AGENT_PRESETS['general-purpose']
+    expect(c.maxIterations!).toBeGreaterThan(worker.maxIterations!)
   })
 
   it('all presets have systemPrompt builders', () => {

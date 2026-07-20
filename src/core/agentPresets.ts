@@ -120,6 +120,32 @@ export const AGENT_PRESETS: Record<string, AgentConfig> = {
     tools: ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'TodoWrite', 'WebFetch', 'WebSearch', 'TmuxSession', 'ShellSession', 'load_skill', 'memory_write', 'memory_search', 'memory_recall'],
     maxIterations: 60,
   },
+
+  /**
+   * Coordinator — pure orchestrator. Cannot edit files directly; dispatches
+   * work to general-purpose workers via the Agent tool. Use for large
+   * multi-step tasks that benefit from parallelism and decomposition.
+   *
+   * Anti-recursion: the coordinator CAN call Agent (its only writing tool),
+   * but each spawned general-purpose worker CANNOT (enforced by the
+   * general-purpose preset above).
+   */
+  coordinator: {
+    identity: {
+      systemPrompt: (cwd: string) =>
+        `Working directory: ${cwd}\n\nYou are a Coordinator. You decompose complex tasks into subtasks and dispatch them to worker agents. You do NOT edit files, run bash, or write code directly — that is the workers' job.\n\nStrategy:\n1. Read the task. Use Read/Glob/Grep to understand scope if needed.\n2. Break the task into independent, well-scoped subtasks.\n3. For each subtask, dispatch a worker via the Agent tool with a clear, complete prompt.\n4. If subtasks are independent, dispatch them in parallel (multiple Agent calls in one turn).\n5. Use EnterWorktree before dispatching parallel workers that modify files, so they don't conflict.\n6. After workers return, verify their work (read the changed files, run tests).\n7. Synthesize a final report for the user.\n\nRules:\n- Prefer parallel dispatch when subtasks don't share files.\n- Each worker prompt must be self-contained: include file paths, acceptance criteria, and constraints.\n- If a worker fails, analyze the failure and either retry with a refined prompt or fix the approach.\n- You are responsible for the final result — verify before reporting success.`,
+    },
+    modules: {},
+    // Read-only tools for investigation + Agent tool for dispatch +
+    // worktree tools for isolation + Task* for async + TodoWrite for planning
+    tools: [
+      'Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch',
+      'Agent', 'TodoWrite',
+      'EnterWorktree', 'ExitWorktree', 'ListWorktrees',
+      'TaskCreate', 'TaskGet', 'TaskList', 'TaskUpdate', 'TaskStop',
+    ],
+    maxIterations: 80,
+  },
 }
 
 /** List of valid preset names (for tool enum) */
