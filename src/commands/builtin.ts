@@ -2021,6 +2021,76 @@ registerCommand({
   },
 })
 
+registerCommand({
+  name: 'timer',
+  aliases: ['timers', 'tm'],
+  description: 'Track task time. Usage: /timer [start <name> | stop <id> | pause <id> | resume <id> | list | stats | remove <id>]',
+  handler: (args, ctx) => {
+    const {
+      startTimer, stopTimer, pauseTimer, resumeTimer, removeTimer,
+      getAllTimers, getRunningTimers, getTimerStats,
+      formatTimer, formatTimerList, formatTimerStats,
+    } = require('../core/taskTimer.js') as typeof import('../core/taskTimer.js')
+
+    const parts = args.trim().split(/\s+/)
+    const sub = parts[0] ?? 'list'
+
+    if (sub === 'start') {
+      const name = parts.slice(1).join(' ')
+      if (!name) return text('Usage: /timer start <task name>')
+      const t = startTimer(ctx.cwd, name)
+      return text(`✓ Timer started: "${name}" (id: ${t.id})`)
+    }
+
+    if (sub === 'stop' || sub === 'done') {
+      const target = parts.slice(1).join(' ')
+      if (!target) return text('Usage: /timer stop <id|name>')
+      const t = stopTimer(ctx.cwd, target)
+      if (!t) return text('No running timer found matching that id/name')
+      return text(formatTimer(t))
+    }
+
+    if (sub === 'pause') {
+      const target = parts.slice(1).join(' ')
+      if (!target) return text('Usage: /timer pause <id|name>')
+      const t = pauseTimer(ctx.cwd, target)
+      if (!t) return text('No running timer found matching that id/name')
+      return text(`⏸ Paused: "${t.name}"`)
+    }
+
+    if (sub === 'resume') {
+      const target = parts.slice(1).join(' ')
+      if (!target) return text('Usage: /timer resume <id|name>')
+      const t = resumeTimer(ctx.cwd, target)
+      if (!t) return text('No paused timer found matching that id/name')
+      return text(`▶ Resumed: "${t.name}"`)
+    }
+
+    if (sub === 'remove' || sub === 'rm') {
+      const target = parts.slice(1).join(' ')
+      if (!target) return text('Usage: /timer remove <id|name>')
+      return text(removeTimer(ctx.cwd, target) ? '✓ Timer removed' : 'Timer not found')
+    }
+
+    if (sub === 'stats') {
+      const stats = getTimerStats(ctx.cwd)
+      return text(formatTimerStats(stats))
+    }
+
+    if (sub === 'running') {
+      const timers = getRunningTimers(ctx.cwd)
+      return text(formatTimerList(timers))
+    }
+
+    if (sub === 'list' || !sub) {
+      const timers = getAllTimers(ctx.cwd)
+      return text(formatTimerList(timers))
+    }
+
+    return text(`Usage: /timer [start|stop|pause|resume|list|running|stats|remove]`)
+  },
+})
+
 // ── Export for REPL ─────────────────────────────────────────────────────────
 
 export { registerCommand } from './index.js'
