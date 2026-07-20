@@ -12,6 +12,8 @@ import { describe, it, expect } from 'vitest'
 import { render } from 'ink-testing-library'
 import { SelectPicker, type SelectPickerItem } from '../components/SelectPicker.js'
 import { PermissionDialog } from '../components/PermissionDialog.js'
+import { MessageList } from '../components/MessageList.js'
+import type { UIMessage } from '../store.js'
 
 describe('SelectPicker rendering', () => {
   it('renders items with title and navigation hint', () => {
@@ -110,5 +112,48 @@ describe('PermissionDialog rendering', () => {
     expect(frame).toContain('[y]')
     expect(frame).toContain('[n]')
     expect(frame).toContain('[a]')
+  })
+})
+
+describe('MessageList scrollback', () => {
+  function makeMessages(n: number): UIMessage[] {
+    return Array.from({ length: n }, (_, i): UIMessage => ({
+      id: i,
+      type: 'info',
+      text: `msg-${String(i).padStart(3, '0')}`,
+    }))
+  }
+
+  it('renders all messages when under the limit', () => {
+    const { lastFrame } = render(<MessageList messages={makeMessages(10)} />)
+    const frame = lastFrame() ?? ''
+    expect(frame).toContain('msg-000')
+    expect(frame).toContain('msg-009')
+    expect(frame).not.toContain('hidden')
+  })
+
+  it('truncates and shows indicator when over limit', () => {
+    const msgs = makeMessages(60)
+    const { lastFrame } = render(<MessageList messages={msgs} maxMessages={20} />)
+    const frame = lastFrame() ?? ''
+    // Should show the indicator
+    expect(frame).toContain('hidden')
+    expect(frame).toContain('showing last 20')
+    // Should NOT show early messages
+    expect(frame).not.toContain('msg-000')
+    expect(frame).not.toContain('msg-039')
+    // Should show recent messages
+    expect(frame).toContain('msg-059')
+  })
+
+  it('default limit is 50', () => {
+    const msgs = makeMessages(55)
+    const { lastFrame } = render(<MessageList messages={msgs} />)
+    const frame = lastFrame() ?? ''
+    expect(frame).toContain('hidden')
+    expect(frame).toContain('5 earlier')
+    // msg-004 is the first hidden one, msg-005 should be visible
+    expect(frame).not.toContain('msg-004')
+    expect(frame).toContain('msg-054')
   })
 })

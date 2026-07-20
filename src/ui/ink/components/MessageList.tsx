@@ -1,9 +1,10 @@
 /**
- * MessageList — renders the full conversation as a scrollable column of messages.
+ * MessageList — renders the conversation as a column of messages.
  *
- * Each UIMessage type gets its own visual treatment. The list grows downward
- * as the engine emits events. Ink handles terminal scrolling automatically
- * (it only re-renders the visible portion).
+ * Implements scrollback limiting: only the most recent `maxMessages` are
+ * rendered (default 50). When truncated, a dim indicator shows the count.
+ * This prevents terminal flooding in long conversations while keeping
+ * the terminal's native scrollback buffer intact for full history.
  */
 
 import { Text, Box } from 'ink'
@@ -131,10 +132,25 @@ function MessageRow({ msg }: { msg: UIMessage }): React.ReactElement {
   }
 }
 
-export function MessageList({ messages }: { messages: UIMessage[] }): React.ReactElement {
+export interface MessageListProps {
+  messages: UIMessage[]
+  /** Maximum number of messages to render (default 50). */
+  maxMessages?: number
+}
+
+export function MessageList({ messages, maxMessages = 50 }: MessageListProps): React.ReactElement {
+  const total = messages.length
+  const truncated = total > maxMessages
+  const visible = truncated ? messages.slice(total - maxMessages) : messages
+
   return (
     <Box flexDirection="column">
-      {messages.map((msg) => (
+      {truncated ? (
+        <Box marginBottom={1}>
+          <Text dimColor italic>↑ {total - maxMessages} earlier message{(total - maxMessages) !== 1 ? 's' : ''} hidden (showing last {maxMessages})</Text>
+        </Box>
+      ) : null}
+      {visible.map((msg) => (
         <MessageRow key={msg.id} msg={msg} />
       ))}
     </Box>
