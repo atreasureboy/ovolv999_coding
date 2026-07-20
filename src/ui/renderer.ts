@@ -162,6 +162,9 @@ export class Renderer {
     this.w(token)
   }
 
+  /** Stream reasoning/thinking content (from <think> tags). Optional — default is no-op. */
+  streamReasoning?(token: string): void
+
   endAssistantText(): void {
     if (this.streaming) {
       this.w('\n')

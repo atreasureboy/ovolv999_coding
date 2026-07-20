@@ -860,6 +860,11 @@ export class ExecutionEngine {
 
         if (delta.content) {
           const visibleContent = thinkingTagFilter.push(delta.content)
+          // Route reasoning content to renderer (if supported)
+          const thinkingContent = thinkingTagFilter.drainThinking()
+          if (thinkingContent) {
+            this.renderer.streamReasoning?.(thinkingContent)
+          }
           if (visibleContent) {
             if (firstToken) {
               this.renderer.stopSpinner()
@@ -895,6 +900,10 @@ export class ExecutionEngine {
       }
 
       const trailingContent = thinkingTagFilter.finish()
+      const trailingThinking = thinkingTagFilter.drainThinking()
+      if (trailingThinking) {
+        this.renderer.streamReasoning?.(trailingThinking)
+      }
       if (trailingContent) {
         if (firstToken) {
           this.renderer.stopSpinner()

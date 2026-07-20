@@ -188,6 +188,16 @@ export function App({
       {/* Conversation messages */}
       <MessageList messages={state.messages} />
 
+      {/* Reasoning / thinking display */}
+      {state.streamingReasoning ? (
+        <Box marginLeft={2} flexDirection="column">
+          <Text dimColor italic>
+            {state.streamingReasoning.split('\n').slice(0, 6).join('\n')}
+            {state.streamingReasoning.split('\n').length > 6 ? '\n...' : ''}
+          </Text>
+        </Box>
+      ) : null}
+
       {/* Live streaming text */}
       {state.streamingText ? (
         <Box marginLeft={2} flexDirection="column">

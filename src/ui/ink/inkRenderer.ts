@@ -50,6 +50,10 @@ export class InkRenderer {
     this.store.appendStreamingToken(token)
   }
 
+  streamReasoning(token: string): void {
+    this.store.appendStreamingReasoning(token)
+  }
+
   endAssistantText(): void {
     this.store.flushStreamingText()
   }

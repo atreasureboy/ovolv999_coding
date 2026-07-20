@@ -64,6 +64,8 @@ export interface UIState {
   messages: UIMessage[]
   /** Currently streaming assistant text (accumulated token by token). */
   streamingText: string
+  /** Currently streaming reasoning/thinking text (from <think> tags). */
+  streamingReasoning: string
   /** True while engine.runTurn() is in flight. */
   running: boolean
   /** Spinner state. */
@@ -89,6 +91,7 @@ export interface UIState {
 const INITIAL_STATE: UIState = {
   messages: [],
   streamingText: '',
+  streamingReasoning: '',
   running: false,
   spinnerActive: false,
   spinnerVerb: '',
@@ -165,10 +168,16 @@ export class UIStore {
     this.emit()
   }
 
+  /** Streaming: accumulate reasoning tokens (from <think> tags). */
+  appendStreamingReasoning(token: string): void {
+    this.state.streamingReasoning += token
+    this.emit()
+  }
+
   /** Flush accumulated streaming text as a message, then clear the buffer. */
   flushStreamingText(): void {
     const text = this.state.streamingText.trim()
-    this.state = { ...this.state, streamingText: '' }
+    this.state = { ...this.state, streamingText: '', streamingReasoning: '' }
     if (text) this.add({ type: 'assistant', text })
     else this.emit()
   }
