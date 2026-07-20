@@ -1389,6 +1389,55 @@ registerCommand({
   },
 })
 
+registerCommand({
+  name: 'plugins',
+  aliases: ['plugin'],
+  description: 'Manage plugins. Usage: /plugins [list|enable <id>|disable <id>|init <name>]',
+  handler: (args, ctx) => {
+    const parts = args.trim().split(/\s+/)
+    const subcommand = parts[0] ?? 'list'
+    const {
+      loadPlugins, formatPluginList, enablePlugin, disablePlugin, createPluginScaffold,
+    } = require('../core/plugins.js') as typeof import('../core/plugins.js')
+
+    if (subcommand === 'list' || subcommand === '' || !subcommand) {
+      const home = require('os').homedir() as string
+      const registry = loadPlugins(ctx.cwd, home)
+      return text(formatPluginList(registry))
+    }
+
+    if (subcommand === 'enable') {
+      const id = parts[1]
+      if (!id) return text('Usage: /plugins enable <id>')
+      const result = enablePlugin(ctx.cwd, id)
+      if (!result.success) return text(`⚠ ${result.error}`)
+      return text(`✓ Plugin "${id}" enabled`)
+    }
+
+    if (subcommand === 'disable') {
+      const id = parts[1]
+      if (!id) return text('Usage: /plugins disable <id>')
+      const result = disablePlugin(ctx.cwd, id)
+      if (!result.success) return text(`⚠ ${result.error}`)
+      return text(`✓ Plugin "${id}" disabled`)
+    }
+
+    if (subcommand === 'init' || subcommand === 'create') {
+      const name = parts[1]
+      if (!name) return text('Usage: /plugins init <name> [tools|commands]')
+      const withTools = parts.includes('tools')
+      const withCommands = parts.includes('commands')
+      const path = createPluginScaffold(ctx.cwd, name, {
+        tools: withTools || (!withTools && !withCommands),
+        commands: withCommands,
+      })
+      return text(`✓ Created plugin scaffold: ${path}\nEdit plugin.json to configure, then run /plugins to see it.`)
+    }
+
+    return text(`Unknown subcommand: ${subcommand}\nUsage: /plugins [list|enable <id>|disable <id>|init <name>]`)
+  },
+})
+
 // ── Export for REPL ─────────────────────────────────────────────────────────
 
 export { registerCommand } from './index.js'
