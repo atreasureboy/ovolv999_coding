@@ -46,6 +46,17 @@ function estimateTokens(messages: OpenAIMessage[]): number {
   return Math.ceil(chars / 4)
 }
 
+// ── Streaming cursor — blinking block at end of streaming text ──
+
+function StreamingCursor(): React.ReactElement {
+  const [visible, setVisible] = useState(true)
+  useEffect(() => {
+    const timer = setInterval(() => setVisible((v) => !v), 500)
+    return () => clearInterval(timer)
+  }, [])
+  return <Text color="cyan">{visible ? '▋' : ' '}</Text>
+}
+
 // ── Props ────────────────────────────────────────────────────────────────────
 
 export interface AppProps {
@@ -249,6 +260,7 @@ export function App({
       {state.streamingText ? (
         <Box marginLeft={2} flexDirection="column">
           <StreamingMarkdown>{state.streamingText}</StreamingMarkdown>
+          <StreamingCursor />
         </Box>
       ) : null}
 

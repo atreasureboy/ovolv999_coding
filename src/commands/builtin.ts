@@ -68,6 +68,16 @@ registerCommand({
   },
 })
 
+registerCommand({
+  name: 'reset',
+  description: 'Reset everything: history + cost + context (fresh start)',
+  handler: (_args, ctx) => {
+    ctx.setHistory([])
+    ctx.engine.getCostTracker().reset()
+    return { type: 'clear-history' }
+  },
+})
+
 function previewMessage(msg: OpenAIMessage, max: number): string {
   const raw = typeof msg.content === 'string'
     ? msg.content
