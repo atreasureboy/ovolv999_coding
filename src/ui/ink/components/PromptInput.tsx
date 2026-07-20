@@ -36,6 +36,8 @@ export interface PromptInputProps {
   cwd: string
   /** Called when user presses Ctrl+R (retry last turn). */
   onRetry?: () => void
+  /** Called when user presses Ctrl+Y (copy last reply). */
+  onCopy?: () => void
 }
 
 export function PromptInput({
@@ -46,6 +48,7 @@ export function PromptInput({
   history,
   cwd,
   onRetry,
+  onCopy,
 }: PromptInputProps): React.ReactElement {
   const [text, setText] = useState('')
   const [cursor, setCursor] = useState(0)
@@ -167,6 +170,12 @@ export function PromptInput({
     // ── Ctrl+R: retry last turn ──────────────────────────────────────────
     if (input === '\x12') {
       onRetry?.()
+      return
+    }
+
+    // ── Ctrl+Y: copy last assistant reply ────────────────────────────────
+    if (input === '\x19') {
+      onCopy?.()
       return
     }
 

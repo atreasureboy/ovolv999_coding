@@ -29,6 +29,8 @@ const GROUPS: ShortcutGroup[] = [
     title: 'Navigation',
     items: [
       { key: 'ESC', desc: 'Interrupt running turn' },
+      { key: 'Ctrl+R', desc: 'Retry last turn' },
+      { key: 'Ctrl+Y', desc: 'Copy last assistant reply' },
       { key: 'Ctrl+C ×2', desc: 'Exit ovolv999' },
       { key: '?', desc: 'Toggle this help overlay' },
     ],
@@ -42,6 +44,7 @@ const GROUPS: ShortcutGroup[] = [
       { key: '/compact', desc: 'Compact conversation context' },
       { key: '/clear', desc: 'Clear conversation history' },
       { key: '/snip N', desc: 'Snip old messages (keep N recent)' },
+      { key: '/copy', desc: 'Copy last reply to clipboard' },
       { key: '/plan', desc: 'Enter plan mode (read-only analysis)' },
       { key: '/exit', desc: 'Exit ovolv999' },
     ],

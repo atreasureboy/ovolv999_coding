@@ -29,6 +29,7 @@ import { Markdown } from './components/Markdown.js'
 import { getGitBranch } from './gitInfo.js'
 import { HelpOverlay } from './components/HelpOverlay.js'
 import { expandAtMentions } from './expandAtMentions.js'
+import { copyToClipboard } from '../../utils/clipboard.js'
 import type { OpenAIMessage } from '../../core/types.js'
 
 // ── Context calculation (lightweight — avoids importing full compact module) ──
@@ -127,6 +128,20 @@ export function App({
   const handleInterrupt = useCallback(() => {
     store.setInterrupt(false)
   }, [store])
+
+  // ── Copy last reply ───────────────────────────────────────────────────────
+
+  const handleCopy = useCallback(() => {
+    for (let i = history.length - 1; i >= 0; i--) {
+      const m = history[i]
+      if (m.role === 'assistant' && m.content) {
+        const ok = copyToClipboard(m.content)
+        store.addInfo(ok ? '✓ Copied to clipboard' : '⚠ No clipboard tool found')
+        return
+      }
+    }
+    store.addInfo('No assistant reply to copy')
+  }, [history, store])
 
   // ── Ctrl+C: exit (double-press) ───────────────────────────────────────────
 
@@ -230,6 +245,7 @@ export function App({
               const last = inputHistory.current[inputHistory.current.length - 1]
               if (last) void handleSubmit(last)
             }}
+            onCopy={handleCopy}
           />
         </Box>
       )}

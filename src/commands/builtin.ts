@@ -18,6 +18,7 @@ import { join } from 'path'
 import { execSync, execFileSync } from 'child_process'
 import { homedir } from 'os'
 import { ClaudeCodeWorkerManager } from '../core/claudeCodeWorkerManager.js'
+import { copyToClipboard } from '../utils/clipboard.js'
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -829,6 +830,24 @@ registerCommand({
   description: 'Show ovolv999 version',
   aliases: ['v'],
   handler: () => text('ovolv999 v0.1.0'),
+})
+
+registerCommand({
+  name: 'copy',
+  description: 'Copy last assistant reply to clipboard',
+  handler: (_args, ctx) => {
+    // Walk history backward to find the last assistant message
+    for (let i = ctx.history.length - 1; i >= 0; i--) {
+      const m = ctx.history[i]
+      if (m.role === 'assistant' && m.content) {
+        const ok = copyToClipboard(m.content)
+        return ok
+          ? text('✓ Copied to clipboard')
+          : text('⚠ No clipboard tool found (install xclip or wl-copy)')
+      }
+    }
+    return text('No assistant reply to copy')
+  },
 })
 
 // ── Export for REPL ─────────────────────────────────────────────────────────
