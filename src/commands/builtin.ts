@@ -1251,6 +1251,50 @@ registerCommand({
   },
 })
 
+registerCommand({
+  name: 'skill-save',
+  description: 'Extract a reusable skill from the current session. Usage: /skill-save <name> [description]',
+  handler: (args, ctx) => {
+    const parts = args.trim().split(/\s+/)
+    const name = parts[0]
+    const description = parts.slice(1).join(' ')
+
+    if (!name) {
+      return text('Usage: /skill-save <name> [description]\n\nThe skill will be extracted from the current session and saved to .ovolv999/skills/<name>.md')
+    }
+
+    const { extractSkill, saveSkill, skillExists } =
+      require('../skills/extractor.js') as typeof import('../skills/extractor.js')
+
+    if (skillExists(ctx.cwd, name)) {
+      return text(`⚠ Skill "${name}" already exists. Use a different name or delete the file first.`)
+    }
+
+    if (ctx.history.length === 0) {
+      return text('No conversation history to extract from. Have a conversation first, then save.')
+    }
+
+    try {
+      const extraction = extractSkill(ctx.history, { name, description: description || undefined })
+      const path = saveSkill(ctx.cwd, extraction)
+
+      const lines = [
+        `✓ Saved skill: ${name}`,
+        `  File: ${path}`,
+        `  Category: ${extraction.category}`,
+        `  Tools used: ${extraction.toolSequence.length} call(s) across ${extraction.turnCount} turn(s)`,
+        '',
+        `Description: ${extraction.description}`,
+        '',
+        `Use /${name} to invoke it. Edit the file to customize the prompt.`,
+      ]
+      return text(lines.join('\n'))
+    } catch (err) {
+      return text(`Failed to save skill: ${(err as Error).message}`)
+    }
+  },
+})
+
 // ── Export for REPL ─────────────────────────────────────────────────────────
 
 export { registerCommand } from './index.js'
