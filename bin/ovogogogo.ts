@@ -67,6 +67,7 @@ import { runWithDeadline } from '../src/ui/turnDeadline.js'
 import { trimHistoryForNextTurn } from '../src/ui/historyTrimmer.js'
 import type { EngineConfig, OpenAIMessage } from '../src/core/types.js'
 import { getProjectSettingsPath, loadSettings, saveProjectSettings } from '../src/config/settings.js'
+import { loadProjectConfig } from '../src/config/projectConfig.js'
 import { HookRunner, NoopHookRunner } from '../src/config/hooks.js'
 import { loadSkills, expandSkillPrompt, formatSkillIndex } from '../src/skills/loader.js'
 import type { Skill } from '../src/skills/loader.js'
@@ -1251,6 +1252,10 @@ async function main(): Promise<void> {
 
   // Load settings + hooks
   const settings = loadSettings(cwd)
+  const projectConfig = loadProjectConfig(cwd)
+  if (projectConfig) {
+    renderer.info(`Project config: .ovolv999.json loaded`)
+  }
   const hookRunner = settings.hooks
     ? new HookRunner(settings.hooks, { sink: { warn: (m) => renderer.warn(m) } })
     : new NoopHookRunner()
@@ -1414,28 +1419,32 @@ async function main(): Promise<void> {
   }
 
   const config: EngineConfig = {
-    model,
+    model: projectConfig?.model ?? model,
     apiKey,
     baseURL: apiEnvironment.baseURL,
-    maxIterations: maxIter,
+    maxIterations: projectConfig?.maxIterations ?? maxIter,
     cwd,
-    permissionMode: 'auto',
+    permissionMode: projectConfig?.permissionMode ?? 'auto',
     permissionManager,
     hookRunner,
-    systemPrompt,
+    systemPrompt: projectConfig?.systemPrompt
+      ? systemPrompt + '\n\n' + projectConfig.systemPrompt
+      : systemPrompt,
     sessionDir,
-    maxContextTokens: maxCtxTokens,
-    temperature: process.env.OVOGO_TEMPERATURE ? parseFloat(process.env.OVOGO_TEMPERATURE) : undefined,
+    maxContextTokens: projectConfig?.maxContextTokens ?? maxCtxTokens,
+    temperature: projectConfig?.temperature
+      ?? (process.env.OVOGO_TEMPERATURE ? parseFloat(process.env.OVOGO_TEMPERATURE) : undefined),
     maxOutputTokens: process.env.OVOGO_MAX_OUTPUT_TOKENS ? parseInt(process.env.OVOGO_MAX_OUTPUT_TOKENS, 10) : undefined,
-    poor: settings.poor ?? (process.env.OVOGO_POOR === '1' ? { enabled: true } : undefined),
+    poor: projectConfig?.poor ?? settings.poor ?? (process.env.OVOGO_POOR === '1' ? { enabled: true } : undefined),
     mcp: settings.mcp,
     eventLog,
     semanticMemory,
     episodicMemory,
     extraTools: skills.size > 0 ? [loadSkillTool] : [],
-    enabledModules: settings.mcp?.servers?.length
-      ? ['memory', 'critic', 'workspace', 'reflection', 'mcp']
-      : ['memory', 'critic', 'workspace', 'reflection'],
+    enabledModules: projectConfig?.enabledModules
+      ?? (settings.mcp?.servers?.length
+        ? ['memory', 'critic', 'workspace', 'reflection', 'mcp']
+        : ['memory', 'critic', 'workspace', 'reflection']),
     agentFactory,
     askUserQuestion: createTerminalAskUserHandler({
       // The handler reads `activePrompt` lazily (it can be null before

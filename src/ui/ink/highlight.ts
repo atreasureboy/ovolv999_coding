@@ -76,7 +76,7 @@ function getKeywords(lang: string): Set<string> {
   }
 }
 
-// ── Tokenizer ───────────────────────────────────────────────────────────────
+// ── Tokenizer with memoization ─────────────────────────────────────────────
 
 const TOKEN_RE = new RegExp(
   '(' +
@@ -93,7 +93,15 @@ const TOKEN_RE = new RegExp(
   'gy',
 )
 
-export function tokenize(code: string, lang: string): HighlightToken[] {
+const _cache = new Map<string, HighlightToken[]>()
+const _MAX_CACHE = 500
+
+/** Clear the highlight cache (for tests). */
+export function clearHighlightCache(): void {
+  _cache.clear()
+}
+
+function _tokenizeImpl(code: string, lang: string): HighlightToken[] {
   const keywords = getKeywords(lang)
   const tokens: HighlightToken[] = []
   TOKEN_RE.lastIndex = 0
@@ -111,12 +119,10 @@ export function tokenize(code: string, lang: string): HighlightToken[] {
       tokens.push({ text, color: 'yellow' })
     } else if (g.identifier) {
       if (keywords.has(text)) {
-        tokens.push({ text, color: 'magenta', bold: false })
+        tokens.push({ text, color: 'magenta' })
       } else if (/^[A-Z]/.test(text) && text.length > 1) {
-        // Type / class name
         tokens.push({ text, color: 'cyan' })
       } else {
-        // Look ahead for ( → function call
         const rest = code.slice(TOKEN_RE.lastIndex)
         if (rest[0] === '(') {
           tokens.push({ text, color: 'blue' })
@@ -133,6 +139,21 @@ export function tokenize(code: string, lang: string): HighlightToken[] {
   }
 
   return tokens
+}
+
+export function tokenize(code: string, lang: string): HighlightToken[] {
+  const key = lang + '\0' + code
+  const cached = _cache.get(key)
+  if (cached) return cached
+
+  const result = _tokenizeImpl(code, lang)
+
+  if (_cache.size >= _MAX_CACHE) {
+    const firstKey = _cache.keys().next().value
+    if (firstKey !== undefined) _cache.delete(firstKey)
+  }
+  _cache.set(key, result)
+  return result
 }
 
 /** Convenience: tokenize and return as segments suitable for Ink <Text> children. */
