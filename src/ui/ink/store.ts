@@ -118,7 +118,7 @@ export class UIStore {
   private nextId = 1
   // Resolvers for interactive overlays (kept outside state — not serializable)
   private planResolver: ((approved: boolean) => void) | null = null
-  private permissionResolver: ((result: { approved: boolean; alwaysAllow: boolean }) => void) | null = null
+  private permissionResolver: ((result: { approved: boolean; alwaysAllow: boolean; feedback?: string }) => void) | null = null
   private selectResolver: ((value: unknown) => void) | null = null
 
   getState = (): UIState => this.state
@@ -284,16 +284,16 @@ export class UIStore {
     this.emit()
   }
 
-  showPermissionDialog(request: UIPermissionRequest): Promise<{ approved: boolean; alwaysAllow: boolean }> {
-    return new Promise<{ approved: boolean; alwaysAllow: boolean }>((resolve) => {
+  showPermissionDialog(request: UIPermissionRequest): Promise<{ approved: boolean; alwaysAllow: boolean; feedback?: string }> {
+    return new Promise<{ approved: boolean; alwaysAllow: boolean; feedback?: string }>((resolve) => {
       this.permissionResolver = resolve
       this.state = { ...this.state, pendingPermission: request }
       this.emit()
     })
   }
 
-  resolvePermission(approved: boolean, alwaysAllow: boolean): void {
-    this.permissionResolver?.({ approved, alwaysAllow })
+  resolvePermission(approved: boolean, alwaysAllow: boolean, feedback?: string): void {
+    this.permissionResolver?.({ approved, alwaysAllow, feedback })
     this.permissionResolver = null
     this.state = { ...this.state, pendingPermission: null }
     this.emit()

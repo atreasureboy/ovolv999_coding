@@ -1023,10 +1023,13 @@ export class ExecutionEngine {
     if (permission === 'ask') {
       if (this.config.requestPermission) {
         const riskLevel = isDangerous ? 'dangerous' : 'needs-approval'
-        const approved = await this.config.requestPermission(toolName, input, riskLevel)
-        if (!approved) {
+        const permResult = await this.config.requestPermission(toolName, input, riskLevel)
+        if (!permResult.approved) {
+          const feedback = permResult.feedback?.trim()
           return {
-            content: `Permission denied by user for ${toolName}.`,
+            content: feedback
+              ? `Permission denied by user for ${toolName}. Feedback: ${feedback}`
+              : `Permission denied by user for ${toolName}.`,
             isError: true,
           }
         }

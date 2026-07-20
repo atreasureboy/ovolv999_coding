@@ -57,6 +57,7 @@ const GROUPS: ShortcutGroup[] = [
       { key: 'y', desc: 'Approve tool / plan' },
       { key: 'n', desc: 'Deny tool / plan' },
       { key: 'a', desc: 'Always allow this tool' },
+      { key: 't / Tab', desc: 'Deny with natural-language feedback' },
     ],
   },
 ]

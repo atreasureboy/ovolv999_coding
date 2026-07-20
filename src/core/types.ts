@@ -327,7 +327,7 @@ export interface EngineConfig {
     toolName: string,
     input: Record<string, unknown>,
     riskLevel: 'safe' | 'needs-approval' | 'dangerous',
-  ) => Promise<boolean>
+  ) => Promise<{ approved: boolean; feedback?: string }>
   /**
    * Factory for spawning a child engine from AgentTool. Optional: an
    * ExecutionEngine can be built without one (e.g. for tests / REPLs that

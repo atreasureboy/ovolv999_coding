@@ -1500,16 +1500,16 @@ async function main(): Promise<void> {
           const preview = toolName === 'Bash' && typeof input.command === 'string'
             ? input.command
             : JSON.stringify(input).slice(0, 100)
-          const result = await uiStore.showPermissionDialog({ toolName, preview, riskLevel })
-          if (result.alwaysAllow) {
-            permissionManager.addRule({
-              toolName,
-              ruleContent: '*',
-              behavior: 'allow',
-              source: 'user',
-            })
-          }
-          return result.approved
+           const result = await uiStore.showPermissionDialog({ toolName, preview, riskLevel })
+           if (result.alwaysAllow) {
+             permissionManager.addRule({
+               toolName,
+               ruleContent: '*',
+               behavior: 'allow',
+               source: 'user',
+             })
+           }
+           return { approved: result.approved, feedback: result.feedback }
         }
       : undefined,
   }
