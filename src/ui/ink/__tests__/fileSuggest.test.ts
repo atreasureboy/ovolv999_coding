@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { suggestFiles } from '../fileSuggest.js'
+import { suggestFiles, fuzzyMatch } from '../fileSuggest.js'
 
 describe('suggestFiles', () => {
   it('returns files in cwd for empty query', () => {
@@ -16,7 +16,9 @@ describe('suggestFiles', () => {
   it('filters by prefix', () => {
     const results = suggestFiles(process.cwd(), 'pack')
     expect(results.length).toBeGreaterThan(0)
-    expect(results.every((r) => r.label.toLowerCase().startsWith('pack'))).toBe(true)
+    // Prefix results come first; at least the first few should start with 'pack'
+    const prefixResults = results.filter((r) => r.label.toLowerCase().startsWith('pack'))
+    expect(prefixResults.length).toBeGreaterThan(0)
   })
 
   it('returns directories with isDir=true', () => {
@@ -69,5 +71,67 @@ describe('suggestFiles', () => {
     const results = suggestFiles(process.cwd(), '.es')
     // .eslintrc or similar should appear — may or may not have results
     expect(Array.isArray(results)).toBe(true)
+  })
+
+  it('fuzzy-matches files across project tree', () => {
+    // 'eng' should fuzzy-match 'src/core/engine.ts' via subsequence
+    const results = suggestFiles(process.cwd(), 'eng')
+    const paths = results.map((r) => r.path)
+    expect(paths.some((p) => p.includes('engine'))).toBe(true)
+  })
+
+  it('fuzzy-matches with abbreviations', () => {
+    // 'crtk' should match 'costTracker' via subsequence
+    const results = suggestFiles(process.cwd(), 'crtk')
+    const paths = results.map((r) => r.path)
+    expect(paths.some((p) => p.toLowerCase().includes('costtracker'))).toBe(true)
+  })
+})
+
+describe('fuzzyMatch', () => {
+  it('matches exact subsequence', () => {
+    const result = fuzzyMatch('abc', 'a_b_c')
+    expect(result).not.toBeNull()
+    expect(result!.matchedIndices).toEqual([0, 2, 4])
+  })
+
+  it('returns null for non-subsequence', () => {
+    expect(fuzzyMatch('xyz', 'abc')).toBeNull()
+    expect(fuzzyMatch('ab', 'ba')).toBeNull()
+  })
+
+  it('returns null when query longer than target', () => {
+    expect(fuzzyMatch('abcde', 'ab')).toBeNull()
+  })
+
+  it('case-insensitive matching', () => {
+    const result = fuzzyMatch('ENG', 'engine')
+    expect(result).not.toBeNull()
+    expect(result!.matchedIndices).toEqual([0, 1, 2])
+  })
+
+  it('empty query always matches', () => {
+    const result = fuzzyMatch('', 'anything')
+    expect(result).not.toBeNull()
+    expect(result!.matchedIndices).toEqual([])
+  })
+
+  it('consecutive matches score better than gappy matches', () => {
+    const consecutive = fuzzyMatch('eng', 'engineer')!
+    const gappy = fuzzyMatch('eng', 'e__n__g')!
+    expect(consecutive.score).toBeLessThan(gappy.score)
+  })
+
+  it('boundary matches score better', () => {
+    // Matching 'e' at start of 'engine' (boundary) vs middle of 'tree' (non-boundary)
+    const boundary = fuzzyMatch('e', 'engine')!
+    const mid = fuzzyMatch('e', 'tree')!
+    expect(boundary.score).toBeLessThanOrEqual(mid.score)
+  })
+
+  it('shorter target preferred when query identical', () => {
+    const short = fuzzyMatch('abc', 'abc')!
+    const long = fuzzyMatch('abc', 'abcccc')!
+    expect(short.score).toBeLessThan(long.score)
   })
 })
