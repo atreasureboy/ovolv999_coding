@@ -15,7 +15,7 @@
  */
 
 import { Text, Box, useApp, useInput, useStdout } from 'ink'
-import { useState, useCallback, useRef } from 'react'
+import { useState, useCallback, useRef, useEffect } from 'react'
 import { type UIStore, useUIStore, type UIState } from './store.js'
 import { Banner } from './Banner.js'
 import { Spinner } from './Spinner.js'
@@ -31,6 +31,7 @@ import { HelpOverlay } from './components/HelpOverlay.js'
 import { expandAtMentions } from './expandAtMentions.js'
 import { copyToClipboard } from '../../utils/clipboard.js'
 import { loadInputHistory, saveInputHistory } from '../../utils/inputHistory.js'
+import { initTerminalTitle, updateTerminalTitle, restoreTerminalTitle } from '../../utils/terminalTitle.js'
 import type { OpenAIMessage } from '../../core/types.js'
 
 // ── Context calculation (lightweight — avoids importing full compact module) ──
@@ -87,6 +88,14 @@ export function App({
   const [history, setHistory] = useState<OpenAIMessage[]>(initialHistory)
   const [showHelp, setShowHelp] = useState(false)
   const inputHistory = useRef<string[]>(loadInputHistory())
+  const turnStartTime = useRef(0)
+
+  // ── Terminal title lifecycle ──────────────────────────────────────────────
+
+  useEffect(() => {
+    initTerminalTitle(`ovolv999 · ${model}`)
+    return () => restoreTerminalTitle()
+  }, [model])
 
   // ── Turn execution ────────────────────────────────────────────────────────
 
@@ -117,6 +126,8 @@ export function App({
       }
       store.setRunning(true)
       store.setSpinner(true, 'Thinking')
+      turnStartTime.current = Date.now()
+      updateTerminalTitle(model, true)
 
       try {
         const result = await runTurn(expandedText, history, images.length > 0 ? images : undefined)
@@ -130,9 +141,15 @@ export function App({
       } finally {
         store.setRunning(false)
         store.setSpinner(false)
+        updateTerminalTitle(model, false)
+        // Bell notification for long-running turns (>5s)
+        const elapsed = Date.now() - turnStartTime.current
+        if (elapsed > 5000) {
+          process.stdout.write('\x07')
+        }
       }
     },
-    [history, runTurn, dispatchSlash, store],
+    [history, runTurn, dispatchSlash, store, model],
   )
 
   // ── Interrupt ─────────────────────────────────────────────────────────────

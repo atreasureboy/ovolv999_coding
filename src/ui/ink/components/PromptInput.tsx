@@ -14,13 +14,14 @@
  * input — no other component should call useInput while the REPL is active.
  */
 
-import { Text, Box, useInput } from 'ink'
+import { Text, Box, useInput, useStdin } from 'ink'
 import { useState, useCallback, useEffect, useMemo } from 'react'
 import { SlashMenu, type SlashEntry } from './SlashMenu.js'
 import { FileSuggestMenu } from './FileSuggestMenu.js'
 import { HistorySearchOverlay } from './HistorySearchOverlay.js'
 import { suggestFiles } from '../fileSuggest.js'
 import { pasteStore } from '../pasteStore.js'
+import { openInEditor } from '../../../utils/editor.js'
 import { listCommands } from '../../../commands/index.js'
 
 export interface PromptInputProps {
@@ -49,6 +50,7 @@ export function PromptInput({
   cwd,
   onCopy,
 }: PromptInputProps): React.ReactElement {
+  const { setRawMode } = useStdin()
   const [text, setText] = useState('')
   const [cursor, setCursor] = useState(0)
   const [histIdx, setHistIdx] = useState(-1)
@@ -176,6 +178,19 @@ export function PromptInput({
     // ── Ctrl+Y: copy last assistant reply ────────────────────────────────
     if (input === '\x19') {
       onCopy?.()
+      return
+    }
+
+    // ── Ctrl+G: open external editor ─────────────────────────────────────
+    if (input === '\x07') {
+      // Suspend raw mode so the editor can take over the terminal
+      if (setRawMode) setRawMode(false)
+      const edited = openInEditor(text)
+      if (setRawMode) setRawMode(true)
+      if (edited !== null) {
+        setText(edited)
+        setCursor(edited.length)
+      }
       return
     }
 

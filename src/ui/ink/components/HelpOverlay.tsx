@@ -20,6 +20,7 @@ const GROUPS: ShortcutGroup[] = [
       { key: 'Enter', desc: 'Submit prompt / autocomplete slash command' },
       { key: 'Tab', desc: 'Autocomplete selected slash command' },
       { key: 'Ctrl+J', desc: 'Insert newline (multi-line input)' },
+      { key: 'Ctrl+G', desc: 'Open external editor ($EDITOR)' },
       { key: 'Ctrl+A / E', desc: 'Move cursor to start / end' },
       { key: 'Ctrl+U', desc: 'Clear input line' },
       { key: '↑ / ↓', desc: 'Navigate input history / slash menu' },
