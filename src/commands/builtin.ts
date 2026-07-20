@@ -1378,6 +1378,17 @@ registerCommand({
   },
 })
 
+registerCommand({
+  name: 'audit',
+  description: 'Validate all .ovolv999/ configuration files (keybindings, styles, workflows, skills)',
+  handler: (_args, ctx) => {
+    const { runDoctorChecks, formatDoctorReport } =
+      require('../utils/doctor.js') as typeof import('../utils/doctor.js')
+    const report = runDoctorChecks(ctx.cwd)
+    return text(formatDoctorReport(report))
+  },
+})
+
 // ── Export for REPL ─────────────────────────────────────────────────────────
 
 export { registerCommand } from './index.js'
