@@ -1295,6 +1295,46 @@ registerCommand({
   },
 })
 
+registerCommand({
+  name: 'style',
+  aliases: ['output-style'],
+  description: 'Set or show output style. Usage: /style [concise|verbose|structured|socratic|code-focused|teaching|default]',
+  handler: (args, ctx) => {
+    const { loadOutputStyles, setActiveStyle } =
+      require('../core/outputStyles.js') as typeof import('../core/outputStyles.js')
+
+    const trimmed = args.trim().toLowerCase()
+
+    if (trimmed) {
+      const result = setActiveStyle(ctx.cwd, trimmed)
+      if (!result.success) {
+        return text(`⚠ ${result.error}`)
+      }
+      const active = loadOutputStyles(ctx.cwd).active
+      return text(`✓ Output style: ${active.name}\n${active.description}`)
+    }
+
+    // Show all styles
+    const result = loadOutputStyles(ctx.cwd)
+    const lines: string[] = ['Output Styles:', '']
+
+    if (result.errors.length > 0) {
+      lines.push('⚠ Config errors:')
+      for (const e of result.errors) lines.push(`  ${e}`)
+      lines.push('')
+    }
+
+    for (const s of result.styles) {
+      const marker = s.id === result.active.id ? '▶' : ' '
+      lines.push(`${marker} ${s.id.padEnd(15)} ${s.name.padEnd(15)} ${s.description}`)
+    }
+
+    lines.push('', `Active: ${result.active.name} (${result.active.id})`)
+    lines.push('Usage: /style <id> to switch')
+    return text(lines.join('\n'))
+  },
+})
+
 // ── Export for REPL ─────────────────────────────────────────────────────────
 
 export { registerCommand } from './index.js'
