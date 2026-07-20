@@ -210,7 +210,15 @@ export function App({
   return (
     <Box flexDirection="column">
       {/* Banner */}
-      {state.banner ? <Banner version={state.banner.version} model={state.banner.model} /> : null}
+      {state.banner ? (
+        <Banner
+          version={state.banner.version}
+          model={state.banner.model}
+          cwd={cwd}
+          gitBranch={getGitBranch(cwd)}
+          contextWindow={maxContextTokens}
+        />
+      ) : null}
 
       {/* Interrupt overlay */}
       {state.interrupt?.active ? (
