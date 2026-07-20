@@ -1694,6 +1694,36 @@ registerCommand({
   },
 })
 
+registerCommand({
+  name: 'stats',
+  description: 'Show comprehensive session statistics (messages, tokens, tools, files)',
+  handler: (_args, ctx) => {
+    const { analyzeSession, formatSessionStats } =
+      require('../core/sessionStats.js') as typeof import('../core/sessionStats.js')
+    const stats = analyzeSession(ctx.history)
+    return text(formatSessionStats(stats))
+  },
+})
+
+registerCommand({
+  name: 'diff-browser',
+  aliases: ['difftree'],
+  description: 'Browse changes as a structured file list. Usage: /diff-browser [n]',
+  handler: (args, ctx) => {
+    const { getGitDiff, parseGitDiff, formatFileList, formatFileDetail } =
+      require('../ui/diffBrowser.js') as typeof import('../ui/diffBrowser.js')
+
+    const n = parseInt(args.trim(), 10)
+    const diffOutput = getGitDiff(ctx.cwd)
+    const diff = parseGitDiff(diffOutput)
+
+    if (isNaN(n)) {
+      return text(formatFileList(diff))
+    }
+    return text(formatFileDetail(diff, n - 1))
+  },
+})
+
 // ── Export for REPL ─────────────────────────────────────────────────────────
 
 export { registerCommand } from './index.js'

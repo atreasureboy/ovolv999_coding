@@ -13,6 +13,7 @@ import {
   formatThinking,
   ThinkingDisplayManager,
   ULTRATHINK_TRIGGERS,
+  type ThinkingBlock,
 } from '../src/ui/thinkingDisplay.js'
 
 describe('thinkingDisplay', () => {
@@ -150,7 +151,7 @@ describe('thinkingDisplay', () => {
 
   describe('getThinkingDuration', () => {
     it('calculates duration from start to end', () => {
-      const block: typeof import('../src/ui/thinkingDisplay.js').ThinkingBlock = {
+      const block: ThinkingBlock = {
         content: 'x',
         startTime: 1000,
         endTime: 2500,
