@@ -2342,6 +2342,49 @@ registerCommand({
   },
 })
 
+registerCommand({
+  name: 'metrics',
+  aliases: ['complexity', 'health'],
+  description: 'Analyze code metrics and health. Usage: /metrics [file <path> | project <paths...> | health <path>]',
+  handler: (args, ctx) => {
+    const {
+      analyzeFile, analyzeProjectFiles,
+      formatFileMetrics, formatProjectMetrics,
+      assessHealth, formatHealthAssessment,
+    } = require('../core/codeMetrics.js') as typeof import('../core/codeMetrics.js')
+
+    const parts = args.trim().split(/\s+/)
+    const sub = parts[0] ?? 'help'
+
+    if (sub === 'file') {
+      const filePath = parts[1]
+      if (!filePath) return text('Usage: /metrics file <path>')
+      const resolved = require('path').resolve(ctx.cwd, filePath)
+      const m = analyzeFile(resolved)
+      if (!m) return text('File not found')
+      return text(formatFileMetrics(m))
+    }
+
+    if (sub === 'health') {
+      const filePath = parts[1]
+      if (!filePath) return text('Usage: /metrics health <path>')
+      const resolved = require('path').resolve(ctx.cwd, filePath)
+      const m = analyzeFile(resolved)
+      if (!m) return text('File not found')
+      return text(formatHealthAssessment(assessHealth(m)))
+    }
+
+    if (sub === 'project') {
+      const paths = parts.slice(1).map((p: string) => require('path').resolve(ctx.cwd, p))
+      if (paths.length === 0) return text('Usage: /metrics project <file1> [file2...]')
+      const metrics = analyzeProjectFiles(paths)
+      return text(formatProjectMetrics(metrics))
+    }
+
+    return text(`Usage: /metrics [file <path> | health <path> | project <paths...>]`)
+  },
+})
+
 function loadProfilesRaw(cwd: string) {
   return require('../core/profiles.js').loadProfiles(cwd)
 }
