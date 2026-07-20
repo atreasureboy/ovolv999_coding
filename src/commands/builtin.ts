@@ -1335,6 +1335,49 @@ registerCommand({
   },
 })
 
+registerCommand({
+  name: 'export',
+  description: 'Export conversation. Usage: /export [md|json|text|transcript] [filename]',
+  handler: (args, ctx) => {
+    if (ctx.history.length === 0) {
+      return text('No conversation to export.')
+    }
+
+    const parts = args.trim().split(/\s+/)
+    const formatArg = parts[0]?.toLowerCase()
+    const { exportSession, exportSessionToFile, defaultFilename } =
+      require('../utils/sessionExport.js') as typeof import('../utils/sessionExport.js')
+
+    const validFormats = ['md', 'markdown', 'json', 'text', 'transcript']
+    let format: 'markdown' | 'json' | 'text' | 'transcript'
+    let filename: string | undefined
+
+    if (formatArg && validFormats.includes(formatArg)) {
+      format = formatArg === 'md' ? 'markdown' : (formatArg as 'markdown' | 'json' | 'text' | 'transcript')
+      filename = parts[1]
+    } else if (formatArg) {
+      // Treat as filename, default to markdown
+      filename = parts[0]
+      format = 'markdown'
+    } else {
+      format = 'markdown'
+    }
+
+    filename = filename ?? defaultFilename(format)
+
+    try {
+      const path = exportSessionToFile(ctx.history, ctx.cwd, filename, { format })
+      const result = exportSession(ctx.history, { format })
+      return text(
+        `✓ Exported ${result.messageCount} messages to: ${path}\n` +
+        `Format: ${format} (${result.charCount} chars)`
+      )
+    } catch (err) {
+      return text(`Failed to export: ${(err as Error).message}`)
+    }
+  },
+})
+
 // ── Export for REPL ─────────────────────────────────────────────────────────
 
 export { registerCommand } from './index.js'
