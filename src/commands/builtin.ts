@@ -1623,6 +1623,77 @@ function truncate(s: string, max: number): string {
   return s.slice(0, max) + `... (${s.length - max} more chars)`
 }
 
+registerCommand({
+  name: 'schedule',
+  aliases: ['cron'],
+  description: 'Manage scheduled tasks. Usage: /schedule [list|create <cron> <prompt>|remove <id>|enable <id>|disable <id>]',
+  handler: (args, ctx) => {
+    const parts = args.trim().split(/\s+/)
+    const subcommand = parts[0] ?? 'list'
+
+    const {
+      loadSchedules, addTask, removeTask, enableTask, disableTask,
+      createTask, formatTaskList, parseCron, parseEveryDuration,
+    } = require('../core/cron.js') as typeof import('../core/cron.js')
+
+    if (subcommand === 'list' || !subcommand) {
+      const store = loadSchedules(ctx.cwd)
+      return text(formatTaskList(store.tasks))
+    }
+
+    if (subcommand === 'create' || subcommand === 'add') {
+      // Format: /schedule create <cron> "prompt text"
+      const remaining = args.trim().slice(parts[0].length).trim()
+      // Try to extract cron + prompt
+      const cronMatch = remaining.match(/^(@\w+|"[^"]+"|\S+)\s+(.*)$/)
+      if (!cronMatch) {
+        return text('Usage: /schedule create <cron> <prompt>\nExample: /schedule create "0 9 * * 1-5" "run tests"')
+      }
+      let cronExpr = cronMatch[1].replace(/^"(.*)"$/, '$1')
+      const prompt = cronMatch[2].replace(/^["'](.*)["']$/, '$1')
+
+      // Validate cron
+      try {
+        if (cronExpr.startsWith('@every')) {
+          parseEveryDuration(cronExpr)
+        } else {
+          parseCron(cronExpr)
+        }
+      } catch (err) {
+        return text(`Invalid cron expression: ${(err as Error).message}`)
+      }
+
+      const name = `task_${Date.now().toString(36)}`
+      const task = createTask(name, cronExpr, prompt)
+      addTask(ctx.cwd, task)
+      return text(`✓ Scheduled task created: ${name}\n  Cron: ${cronExpr}\n  Prompt: "${prompt}"\n  Next: ${task.nextRun ?? 'N/A'}`)
+    }
+
+    if (subcommand === 'remove' || subcommand === 'delete' || subcommand === 'rm') {
+      const id = parts[1]
+      if (!id) return text('Usage: /schedule remove <id or name>')
+      const success = removeTask(ctx.cwd, id)
+      return text(success ? `✓ Removed task: ${id}` : `⚠ Task not found: ${id}`)
+    }
+
+    if (subcommand === 'enable') {
+      const id = parts[1]
+      if (!id) return text('Usage: /schedule enable <id or name>')
+      const success = enableTask(ctx.cwd, id)
+      return text(success ? `✓ Enabled task: ${id}` : `⚠ Task not found: ${id}`)
+    }
+
+    if (subcommand === 'disable') {
+      const id = parts[1]
+      if (!id) return text('Usage: /schedule disable <id or name>')
+      const success = disableTask(ctx.cwd, id)
+      return text(success ? `✓ Disabled task: ${id}` : `⚠ Task not found: ${id}`)
+    }
+
+    return text(`Unknown subcommand: ${subcommand}\nUsage: /schedule [list|create|remove|enable|disable]`)
+  },
+})
+
 // ── Export for REPL ─────────────────────────────────────────────────────────
 
 export { registerCommand } from './index.js'
