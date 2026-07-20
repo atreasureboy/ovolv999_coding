@@ -65,10 +65,21 @@ describe('Integration: InkRenderer → UIStore', () => {
 
   it('toolResult with isError=true marks the tool message', () => {
     const { store, renderer } = setup()
-    renderer.toolStart('Bash', { command: 'fail' })
-    renderer.toolResult('Bash', 'command not found', true)
+    renderer.toolStart('Bash', { command: 'echo test' })
+    renderer.toolResult('Bash', 'error output', true)
     const toolMsg = store.getState().messages.find((m) => m.type === 'tool')
+    expect(toolMsg).toBeDefined()
     expect(toolMsg!.type === 'tool' && toolMsg!.isError).toBe(true)
+  })
+
+  it('toolResult records elapsed time', () => {
+    const { store, renderer } = setup()
+    renderer.toolStart('Bash', { command: 'sleep 0.01' })
+    renderer.toolResult('Bash', 'done', false)
+    const toolMsg = store.getState().messages.find((m) => m.type === 'tool')
+    expect(toolMsg).toBeDefined()
+    expect(toolMsg!.type === 'tool' && toolMsg!.startTime).toBeGreaterThan(0)
+    expect(toolMsg!.type === 'tool' && toolMsg!.elapsedMs).toBeGreaterThanOrEqual(0)
   })
 
   it('multiple tool calls are tracked independently', () => {

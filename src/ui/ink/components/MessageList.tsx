@@ -46,6 +46,7 @@ function MessageRow({ msg }: { msg: UIMessage }): React.ReactElement {
             input={msg.input}
             result={msg.result}
             isError={msg.isError}
+            elapsedMs={msg.elapsedMs}
           />
         </Box>
       )

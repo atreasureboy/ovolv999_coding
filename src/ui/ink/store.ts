@@ -23,6 +23,8 @@ export type UIMessage =
       input: Record<string, unknown>
       result?: string
       isError?: boolean
+      startTime?: number
+      elapsedMs?: number
     }
   | { id: number; type: 'info'; text: string }
   | { id: number; type: 'success'; text: string }
@@ -183,11 +185,15 @@ export class UIStore {
   }
 
   addToolStart(name: string, input: Record<string, unknown>): number {
-    return this.add({ type: 'tool', name, input })
+    return this.add({ type: 'tool', name, input, startTime: Date.now() })
   }
 
   setToolResult(id: number, result: string, isError: boolean): void {
-    this.update(id, { result, isError })
+    const msg = this.state.messages.find((m) => m.id === id)
+    const elapsedMs = msg && msg.type === 'tool' && msg.startTime
+      ? Date.now() - msg.startTime
+      : undefined
+    this.update(id, { result, isError, elapsedMs })
   }
 
   addInfo(text: string): void { this.add({ type: 'info', text }) }

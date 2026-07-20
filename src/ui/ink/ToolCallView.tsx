@@ -77,9 +77,18 @@ export interface ToolCallProps {
   input: Record<string, unknown>
   result?: string
   isError?: boolean
+  elapsedMs?: number
 }
 
-export function ToolCallView({ name, input, result, isError }: ToolCallProps): React.ReactElement {
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
+  const min = Math.floor(ms / 60_000)
+  const sec = Math.round((ms % 60_000) / 1000)
+  return `${min}m${sec}s`
+}
+
+export function ToolCallView({ name, input, result, isError, elapsedMs }: ToolCallProps): React.ReactElement {
   const v = viz(name)
   const preview = previewTool(name, input)
 
@@ -94,6 +103,7 @@ export function ToolCallView({ name, input, result, isError }: ToolCallProps): R
         <Text color={v.color}>{v.icon}</Text>
         <Text bold color={v.color}> {name}</Text>
         {preview ? <Text dimColor> {preview}</Text> : null}
+        {elapsedMs !== undefined ? <Text dimColor> · {formatDuration(elapsedMs)}</Text> : null}
       </Box>
       {showDiff ? (
         <Box marginLeft={4} flexDirection="column">
