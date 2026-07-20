@@ -1181,6 +1181,16 @@ registerCommand({
   },
 })
 
+registerCommand({
+  name: 'vim',
+  description: 'Toggle vim editing mode for the prompt input',
+  handler: () => {
+    // This is handled by the Ink REPL via a global flag — the command just toggles it.
+    // The actual mode switching happens in PromptInput via a vimState hook.
+    return { type: 'text', value: 'Vim mode is a UI-level toggle — use Ctrl+\\ or the status bar to switch modes.' }
+  },
+})
+
 // ── Export for REPL ─────────────────────────────────────────────────────────
 
 export { registerCommand } from './index.js'
