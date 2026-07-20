@@ -562,11 +562,12 @@ describe('CLI #9: /doctor MiniMax + /rewind honesty', () => {
       // We just verify the source-of-truth claim: it must never say
       // "restoreVersion" (the old misleading usage).
       expect(rewind.value).not.toMatch(/restoreVersion/)
-      // And it must mention restore is unsupported OR the no-edits case
-      // (which is also a truthful non-restore answer).
+      // And it must mention restore is unsupported OR point to /undo
+      // (which actually supports restoration).
       const isNoEdits = /No file edits tracked/.test(rewind.value)
       const isUnsupported = /not supported/i.test(rewind.value)
-      expect(isNoEdits || isUnsupported).toBe(true)
+      const pointsToUndo = /\/undo/.test(rewind.value)
+      expect(isNoEdits || isUnsupported || pointsToUndo).toBe(true)
     }
   })
 })

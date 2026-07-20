@@ -354,7 +354,7 @@ registerCommand({
     if (files.length === 0) {
       return text('No file edits tracked in this session.')
     }
-    return text(fh.getSummary() + '\n\nRestore is not supported by this command. To roll back, use git or your editor\'s undo.')
+    return text(fh.getSummary() + '\n\nUse /undo to restore a file to its pre-edit state.')
   },
 })
 
