@@ -2256,6 +2256,96 @@ registerCommand({
   },
 })
 
+registerCommand({
+  name: 'profile',
+  aliases: ['profiles', 'prof'],
+  description: 'Manage config profiles. Usage: /profile [create|list|switch|show|remove|clone|export|import|config]',
+  handler: (args, ctx) => {
+    const {
+      createProfile, removeProfile, getProfile, getActiveProfile,
+      setActiveProfile, listProfiles, cloneProfile,
+      exportProfile, importProfile, getEffectiveConfig,
+      initializeBuiltinProfiles,
+      formatProfile, formatProfileList, formatEffectiveConfig,
+    } = require('../core/profiles.js') as typeof import('../core/profiles.js')
+
+    const parts = args.trim().split(/\s+/)
+    const sub = parts[0] ?? 'list'
+
+    if (sub === 'create' || sub === 'add') {
+      const name = parts[1]
+      if (!name) return text('Usage: /profile create <name>')
+      const p = createProfile(ctx.cwd, name, {
+        description: parts.slice(2).join(' ') || undefined,
+      })
+      return text(`✓ Profile created: ${p.name}`)
+    }
+
+    if (sub === 'switch' || sub === 'use') {
+      const name = parts[1]
+      if (!name) return text('Usage: /profile switch <name>')
+      if (!setActiveProfile(ctx.cwd, name)) return text('Profile not found')
+      return text(`✓ Switched to profile: ${name}`)
+    }
+
+    if (sub === 'remove' || sub === 'rm') {
+      const name = parts[1]
+      if (!name) return text('Usage: /profile remove <name>')
+      return text(removeProfile(ctx.cwd, name) ? `✓ Removed profile "${name}"` : 'Profile not found')
+    }
+
+    if (sub === 'show') {
+      const name = parts[1]
+      const profile = name ? getProfile(ctx.cwd, name) : getActiveProfile(ctx.cwd)
+      if (!profile) return text('Profile not found')
+      return text(formatProfile(profile))
+    }
+
+    if (sub === 'clone') {
+      const src = parts[1]
+      const dst = parts[2]
+      if (!src || !dst) return text('Usage: /profile clone <source> <new-name>')
+      const cloned = cloneProfile(ctx.cwd, src, dst)
+      return cloned ? text(`✓ Cloned "${src}" → "${dst}"`) : text('Source profile not found')
+    }
+
+    if (sub === 'export') {
+      const name = parts[1]
+      if (!name) return text('Usage: /profile export <name>')
+      const json = exportProfile(ctx.cwd, name)
+      return json ? text(json) : text('Profile not found')
+    }
+
+    if (sub === 'import') {
+      const json = parts.slice(1).join(' ')
+      if (!json) return text('Usage: /profile import <json>')
+      const p = importProfile(ctx.cwd, json)
+      return p ? text(`✓ Imported profile: ${p.name}`) : text('Invalid JSON')
+    }
+
+    if (sub === 'config') {
+      const config = getEffectiveConfig(ctx.cwd)
+      return text(formatEffectiveConfig(config))
+    }
+
+    if (sub === 'init') {
+      const profiles = initializeBuiltinProfiles(ctx.cwd)
+      return text(`✓ Initialized ${profiles.length} builtin profiles`)
+    }
+
+    if (sub === 'list' || !sub) {
+      const store = loadProfilesRaw(ctx.cwd)
+      return text(formatProfileList(listProfiles(ctx.cwd), store.activeProfile))
+    }
+
+    return text(`Usage: /profile [create|list|switch|show|remove|clone|export|import|config|init]`)
+  },
+})
+
+function loadProfilesRaw(cwd: string) {
+  return require('../core/profiles.js').loadProfiles(cwd)
+}
+
 // ── Export for REPL ─────────────────────────────────────────────────────────
 
 export { registerCommand } from './index.js'
