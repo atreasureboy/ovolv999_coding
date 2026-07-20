@@ -814,8 +814,17 @@ registerCommand({
       ? join(ctx.sessionDir, 'transcript.' + ext)
       : join(ctx.cwd, 'transcript.' + ext)
     try {
-      writeFileSync(exportPath, content, 'utf8')
-      return text('Exported ' + ctx.history.length + ' messages to: ' + exportPath)
+      // Scan for secrets before writing
+      const { maskSecrets, formatScanSummary } =
+        require('../utils/secretScanner.js') as typeof import('../utils/secretScanner.js')
+      const scan = maskSecrets(content)
+      const finalContent = scan.masked
+      writeFileSync(exportPath, finalContent, 'utf8')
+      let msg = 'Exported ' + ctx.history.length + ' messages to: ' + exportPath
+      if (scan.found) {
+        msg += '\n⚠ ' + formatScanSummary(scan)
+      }
+      return text(msg)
     } catch (err) {
       return text('Export failed: ' + (err as Error).message)
     }
@@ -1464,6 +1473,80 @@ registerCommand({
       return null
     }).filter(Boolean).join('\n')
     return text(`${list}\n\n${hints}`)
+  },
+})
+
+registerCommand({
+  name: 'scan',
+  description: 'Scan conversation history for secrets/API keys',
+  handler: (_args, ctx) => {
+    if (ctx.history.length === 0) {
+      return text('No conversation to scan.')
+    }
+    const { maskSecrets, formatScanSummary } =
+      require('../utils/secretScanner.js') as typeof import('../utils/secretScanner.js')
+    const allText = ctx.history.map(m => {
+      if (typeof m.content === 'string') return m.content
+      return JSON.stringify(m.tool_calls ?? '')
+    }).join('\n')
+    const result = maskSecrets(allText)
+    if (!result.found) {
+      return text('✓ No secrets detected in conversation history.')
+    }
+    return text('⚠ ' + formatScanSummary(result))
+  },
+})
+
+registerCommand({
+  name: 'share',
+  description: 'Export conversation (masked) and show the path for sharing',
+  handler: (args, ctx) => {
+    if (ctx.history.length === 0) {
+      return text('No conversation to share.')
+    }
+    const { maskSecrets } =
+      require('../utils/secretScanner.js') as typeof import('../utils/secretScanner.js')
+    const { exportSessionToFile, defaultFilename } =
+      require('../utils/sessionExport.js') as typeof import('../utils/sessionExport.js')
+
+    const format = args.trim() || 'markdown'
+    const maskedHistory = ctx.history.map(msg => {
+      if (typeof msg.content === 'string') {
+        return { ...msg, content: maskSecrets(msg.content).masked }
+      }
+      return msg
+    })
+
+    const filename = defaultFilename(format as 'markdown' | 'json' | 'text')
+    const exportPath = ctx.sessionDir
+      ? join(ctx.sessionDir, filename)
+      : join(ctx.cwd, filename)
+
+    try {
+      exportSessionToFile(maskedHistory, ctx.cwd, filename, {
+        format: format as 'markdown' | 'json' | 'text',
+        includeReasoning: false,
+      })
+      return text(`✓ Shared (secrets masked): ${exportPath}\nReview the file before sharing externally.`)
+    } catch (err) {
+      return text('Share failed: ' + (err as Error).message)
+    }
+  },
+})
+
+registerCommand({
+  name: 'notify',
+  description: 'Test desktop notification. Usage: /notify [title] [body]',
+  handler: (args) => {
+    const { notify } = require('../utils/notifier.js') as typeof import('../utils/notifier.js')
+    const parts = args.trim().split(/\s+/)
+    const title = parts[0] ?? 'ovolv999'
+    const body = parts.slice(1).join(' ') || 'Notification test'
+    const result = notify({ title, body, sound: true })
+    if (result.success) {
+      return text(`✓ Notification sent via ${result.channel}`)
+    }
+    return text(`⚠ Notification failed: ${result.error ?? 'unknown error'}`)
   },
 })
 
