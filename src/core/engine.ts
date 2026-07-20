@@ -31,6 +31,7 @@ import { randomUUID } from 'crypto'
 import type {
   EngineConfig,
   OpenAIMessage,
+  ContentPart,
   Tool,
   ToolContext,
   ToolResult,
@@ -1224,6 +1225,7 @@ export class ExecutionEngine {
   async runTurn(
     userMessage: string,
     history: OpenAIMessage[],
+    images?: Array<{ path: string; dataUrl: string }>,
   ): Promise<{ result: TurnResult; newHistory: OpenAIMessage[] }> {
     // ── Reentrancy guard ──────────────────────────────────────────────────
     // The engine is single-turn per instance: every mutable field
@@ -1305,8 +1307,17 @@ export class ExecutionEngine {
       const turnAbortController = new AbortController()
       this.currentTurnAbortController = turnAbortController
 
-      // Initialize messages
-      const messages: OpenAIMessage[] = [...history, { role: 'user', content: normalizeCJKInput(userMessage) }]
+      // Initialize messages — construct multimodal content if images are provided
+      let userContent: string | ContentPart[]
+      if (images && images.length > 0) {
+        userContent = [
+          { type: 'text', text: normalizeCJKInput(userMessage) },
+          ...images.map((img) => ({ type: 'image_url' as const, image_url: { url: img.dataUrl } })),
+        ]
+      } else {
+        userContent = normalizeCJKInput(userMessage)
+      }
+      const messages: OpenAIMessage[] = [...history, { role: 'user', content: userContent }]
 
       // Apply a queued `/snip [N]` first, if any. See `queueSnip`. The
       // boundary marker is inserted into `messages` here so the very

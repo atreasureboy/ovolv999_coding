@@ -80,11 +80,12 @@ export async function runInkRepl(opts: InkReplOptions): Promise<void> {
 
   async function runOneTurn(
     prompt: string,
+    images?: Array<{ path: string; dataUrl: string }>,
   ): Promise<{ newHistory: OpenAIMessage[]; reason: string }> {
     store.setRunning(true)
     store.setSpinner(true, 'Thinking')
     try {
-      const result = await engine.runTurn(prompt, history)
+      const result = await engine.runTurn(prompt, history, images)
       history = result.newHistory
       // Update cost tracking after each turn
       const ct = engine.getCostTracker()
@@ -112,9 +113,13 @@ export async function runInkRepl(opts: InkReplOptions): Promise<void> {
       _version: opts.version,
       model: opts.model,
       skills: opts.skills,
-      runTurn: async (prompt: string, currentHistory: OpenAIMessage[]) => {
+      runTurn: async (
+        prompt: string,
+        currentHistory: OpenAIMessage[],
+        images?: Array<{ path: string; dataUrl: string }>,
+      ) => {
         history = currentHistory
-        return runOneTurn(prompt)
+        return runOneTurn(prompt, images)
       },
       dispatchSlash: async (input: string): Promise<boolean> => {
         // ── Interactive /resume (no args) → SelectPicker ─────────────────────

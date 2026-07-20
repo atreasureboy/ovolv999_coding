@@ -18,28 +18,49 @@
  */
 
 import { readFileSync, existsSync, statSync } from 'fs'
-import { resolve, isAbsolute } from 'path'
+import { resolve, isAbsolute, extname } from 'path'
 
 const MAX_FILE_CHARS = 8000
 const AT_MENTION_RE = /(?:^|\s)@((?:\.\/)?(?:[A-Za-z0-9_.\-/]+))/g
+
+const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'])
+
+const MIME_MAP: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.bmp': 'image/bmp',
+}
+
+export interface ImageMention {
+  path: string
+  dataUrl: string
+}
 
 export interface ExpandedMention {
   path: string
   found: boolean
   truncated: boolean
   chars: number
+  isImage: boolean
 }
 
 export interface ExpansionResult {
   text: string
   mentions: ExpandedMention[]
+  images: ImageMention[]
 }
 
 /**
  * Expand @file.path references in text, appending file contents.
+ * Image files (.png/.jpg/.jpeg/.gif/.webp/.bmp) are collected separately
+ * as base64 data URLs for multimodal message construction.
  */
 export function expandAtMentions(text: string, cwd: string): ExpansionResult {
   const mentions: ExpandedMention[] = []
+  const images: ImageMention[] = []
   const seen = new Set<string>()
   const orderedPaths: string[] = []
 
@@ -57,7 +78,7 @@ export function expandAtMentions(text: string, cwd: string): ExpansionResult {
   }
 
   if (orderedPaths.length === 0) {
-    return { text, mentions }
+    return { text, mentions, images }
   }
 
   let appendix = '\n'
@@ -65,7 +86,7 @@ export function expandAtMentions(text: string, cwd: string): ExpansionResult {
     const absPath = isAbsolute(relPath) ? relPath : resolve(cwd, relPath)
 
     if (!existsSync(absPath)) {
-      mentions.push({ path: relPath, found: false, truncated: false, chars: 0 })
+      mentions.push({ path: relPath, found: false, truncated: false, chars: 0, isImage: false })
       continue
     }
 
@@ -73,21 +94,37 @@ export function expandAtMentions(text: string, cwd: string): ExpansionResult {
     try {
       stat = statSync(absPath)
     } catch {
-      mentions.push({ path: relPath, found: false, truncated: false, chars: 0 })
+      mentions.push({ path: relPath, found: false, truncated: false, chars: 0, isImage: false })
       continue
     }
 
     // Skip directories
     if (stat.isDirectory()) {
-      mentions.push({ path: relPath, found: false, truncated: false, chars: 0 })
+      mentions.push({ path: relPath, found: false, truncated: false, chars: 0, isImage: false })
       continue
     }
 
+    // Image files — read as base64 data URL
+    const ext = extname(relPath).toLowerCase()
+    if (IMAGE_EXTENSIONS.has(ext)) {
+      try {
+        const buf = readFileSync(absPath)
+        const mime = MIME_MAP[ext] ?? 'image/png'
+        const dataUrl = `data:${mime};base64,${buf.toString('base64')}`
+        images.push({ path: relPath, dataUrl })
+        mentions.push({ path: relPath, found: true, truncated: false, chars: buf.length, isImage: true })
+      } catch {
+        mentions.push({ path: relPath, found: false, truncated: false, chars: 0, isImage: true })
+      }
+      continue
+    }
+
+    // Text files — read as UTF-8
     let content: string
     try {
       content = readFileSync(absPath, 'utf-8')
     } catch {
-      mentions.push({ path: relPath, found: false, truncated: false, chars: 0 })
+      mentions.push({ path: relPath, found: false, truncated: false, chars: 0, isImage: false })
       continue
     }
 
@@ -98,11 +135,12 @@ export function expandAtMentions(text: string, cwd: string): ExpansionResult {
     }
 
     appendix += `\n<file_content path="${relPath}">\n${content}\n</file_content>\n`
-    mentions.push({ path: relPath, found: true, truncated, chars })
+    mentions.push({ path: relPath, found: true, truncated, chars, isImage: false })
   }
 
   return {
     text: mentions.some((m) => m.found) ? text + appendix : text,
     mentions,
+    images,
   }
 }

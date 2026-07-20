@@ -52,7 +52,11 @@ export interface AppProps {
   model: string
   skills: Array<{ name: string; description: string }>
   /** Execute a turn. Returns the new history. */
-  runTurn: (prompt: string, history: OpenAIMessage[]) => Promise<{ newHistory: OpenAIMessage[]; reason: string }>
+  runTurn: (
+    prompt: string,
+    history: OpenAIMessage[],
+    images?: Array<{ path: string; dataUrl: string }>,
+  ) => Promise<{ newHistory: OpenAIMessage[]; reason: string }>
   /** Slash command dispatcher. Returns null if not a slash command. */
   dispatchSlash: (input: string) => Promise<boolean>
   /** Initial history (for resume). */
@@ -98,16 +102,21 @@ export function App({
 
       // Normal turn — expand @file mentions before sending to engine
       store.addUserMessage(text)
-      const { text: expandedText, mentions } = expandAtMentions(text, cwd)
+      const { text: expandedText, mentions, images } = expandAtMentions(text, cwd)
       if (mentions.some((m) => m.found)) {
         const found = mentions.filter((m) => m.found)
-        store.addInfo(`📎 Loaded ${found.length} file${found.length > 1 ? 's' : ''}: ${found.map((m) => m.path).join(', ')}`)
+        const fileCount = found.filter((m) => !m.isImage).length
+        const imgCount = found.filter((m) => m.isImage).length
+        const parts: string[] = []
+        if (fileCount > 0) parts.push(`📎 ${fileCount} file${fileCount > 1 ? 's' : ''}`)
+        if (imgCount > 0) parts.push(`🖼️ ${imgCount} image${imgCount > 1 ? 's' : ''}`)
+        store.addInfo(`${parts.join(' · ')}: ${found.map((m) => m.path).join(', ')}`)
       }
       store.setRunning(true)
       store.setSpinner(true, 'Thinking')
 
       try {
-        const result = await runTurn(expandedText, history)
+        const result = await runTurn(expandedText, history, images.length > 0 ? images : undefined)
         setHistory(result.newHistory)
         store.addInfo(`Done · ${result.reason}`)
       } catch (err: unknown) {
@@ -134,7 +143,7 @@ export function App({
   const handleCopy = useCallback(() => {
     for (let i = history.length - 1; i >= 0; i--) {
       const m = history[i]
-      if (m.role === 'assistant' && m.content) {
+      if (m.role === 'assistant' && typeof m.content === 'string' && m.content) {
         const ok = copyToClipboard(m.content)
         store.addInfo(ok ? '✓ Copied to clipboard' : '⚠ No clipboard tool found')
         return

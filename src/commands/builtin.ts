@@ -839,7 +839,7 @@ registerCommand({
     // Walk history backward to find the last assistant message
     for (let i = ctx.history.length - 1; i >= 0; i--) {
       const m = ctx.history[i]
-      if (m.role === 'assistant' && m.content) {
+      if (m.role === 'assistant' && typeof m.content === 'string' && m.content) {
         const ok = copyToClipboard(m.content)
         return ok
           ? text('✓ Copied to clipboard')

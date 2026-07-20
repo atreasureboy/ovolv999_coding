@@ -52,9 +52,16 @@ export type AgentChildEngineFactory = (
   renderer: unknown,
 ) => ChildEngineLike
 
+/** Content part for multimodal messages (vision/image support). */
+export interface ContentPart {
+  type: 'text' | 'image_url'
+  text?: string
+  image_url?: { url: string }
+}
+
 export interface OpenAIMessage {
   role: 'system' | 'user' | 'assistant' | 'tool'
-  content: string | null
+  content: string | null | ContentPart[]
   tool_calls?: ToolCall[]
   tool_call_id?: string
   name?: string

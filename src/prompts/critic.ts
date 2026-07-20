@@ -64,7 +64,7 @@ export function formatMessagesForCritic(messages: OpenAIMessage[]): string {
           const text = typeof m.content === 'string' && m.content ? `  ${m.content}\n` : ''
           return `[ASSISTANT]\n${text}${calls}`
         }
-        return `[ASSISTANT] ${m.content ?? ''}`
+        return typeof m.content === 'string' ? `[ASSISTANT] ${m.content}` : '[ASSISTANT]'
       }
       if (m.role === 'tool') {
         const content = typeof m.content === 'string' ? m.content.slice(0, 800) : ''

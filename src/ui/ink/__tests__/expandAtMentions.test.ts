@@ -99,4 +99,40 @@ describe('expandAtMentions', () => {
     const openTags = result.text.match(/<file_content/g)
     expect(openTags === null || openTags.length === 1).toBe(true)
   })
+
+  it('detects image files and returns them as data URLs', () => {
+    // Minimal 1x1 PNG
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=',
+      'base64',
+    )
+    writeFileSync(join(tmpDir, 'screenshot.png'), png)
+    const result = expandAtMentions('What is @screenshot.png', tmpDir)
+    expect(result.mentions).toHaveLength(1)
+    expect(result.mentions[0].found).toBe(true)
+    expect(result.mentions[0].isImage).toBe(true)
+    expect(result.images).toHaveLength(1)
+    expect(result.images[0].path).toBe('screenshot.png')
+    expect(result.images[0].dataUrl).toMatch(/^data:image\/png;base64,/)
+  })
+
+  it('does not include image content in text appendix', () => {
+    const png = Buffer.from('iVBORw0KGgo=', 'base64')
+    writeFileSync(join(tmpDir, 'img.png'), png)
+    const result = expandAtMentions('Check @img.png', tmpDir)
+    expect(result.text).not.toContain('<file_content')
+    expect(result.text).not.toContain('base64')
+  })
+
+  it('handles both text and image files in same prompt', () => {
+    writeFileSync(join(tmpDir, 'code.ts'), 'const x = 1')
+    const png = Buffer.from('iVBORw0KGgo=', 'base64')
+    writeFileSync(join(tmpDir, 'shot.png'), png)
+    const result = expandAtMentions('Look at @code.ts and @shot.png', tmpDir)
+    expect(result.mentions).toHaveLength(2)
+    expect(result.mentions.find((m) => m.path === 'code.ts')!.isImage).toBe(false)
+    expect(result.mentions.find((m) => m.path === 'shot.png')!.isImage).toBe(true)
+    expect(result.images).toHaveLength(1)
+    expect(result.text).toContain('const x = 1')
+  })
 })
