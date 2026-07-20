@@ -849,6 +849,18 @@ registerCommand({
   },
 })
 
+// ── /files — show file edit history ─────────────────────────────────────────
+
+registerCommand({
+  name: 'files',
+  description: 'Show files edited in this session',
+  handler: (_args, ctx) => {
+    const fh = ctx.engine.getFileHistory()
+    if (!fh) return text('File history tracking not available.')
+    return text(fh.getSummary())
+  },
+})
+
 // ── /config — show current configuration ────────────────────────────────────
 
 registerCommand({
