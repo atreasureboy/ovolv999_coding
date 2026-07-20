@@ -29,8 +29,9 @@ const GROUPS: ShortcutGroup[] = [
     title: 'Navigation',
     items: [
       { key: 'ESC', desc: 'Interrupt running turn' },
-      { key: 'Ctrl+R', desc: 'Retry last turn' },
+      { key: 'Ctrl+R', desc: 'Reverse history search (bash-style)' },
       { key: 'Ctrl+Y', desc: 'Copy last assistant reply' },
+      { key: 'Ctrl+L', desc: 'Clear screen and redraw' },
       { key: 'Ctrl+C ×2', desc: 'Exit ovolv999' },
       { key: '?', desc: 'Toggle this help overlay' },
     ],

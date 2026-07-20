@@ -850,6 +850,23 @@ registerCommand({
   },
 })
 
+registerCommand({
+  name: 'retry',
+  description: 'Retry the last turn (re-submit last prompt)',
+  handler: (_args, ctx) => {
+    if (ctx.history.length === 0) return text('No previous turn to retry')
+    // Find last user message
+    for (let i = ctx.history.length - 1; i >= 0; i--) {
+      const m = ctx.history[i]
+      if (m.role === 'user' && typeof m.content === 'string') {
+        ctx.runPrompt(m.content)
+        return { type: 'noop' }
+      }
+    }
+    return text('No previous prompt found')
+  },
+})
+
 // ── Export for REPL ─────────────────────────────────────────────────────────
 
 export { registerCommand } from './index.js'

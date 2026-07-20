@@ -14,7 +14,7 @@
  * to UIStore for display state, and drives the engine via async turn execution.
  */
 
-import { Text, Box, useApp, useInput } from 'ink'
+import { Text, Box, useApp, useInput, useStdout } from 'ink'
 import { useState, useCallback, useRef } from 'react'
 import { type UIStore, useUIStore, type UIState } from './store.js'
 import { Banner } from './Banner.js'
@@ -25,11 +25,12 @@ import { StatusBar } from './components/StatusBar.js'
 import { PlanView } from './components/PlanView.js'
 import { PermissionDialog } from './components/PermissionDialog.js'
 import { SelectPicker } from './components/SelectPicker.js'
-import { Markdown } from './components/Markdown.js'
+import { StreamingMarkdown } from './components/Markdown.js'
 import { getGitBranch } from './gitInfo.js'
 import { HelpOverlay } from './components/HelpOverlay.js'
 import { expandAtMentions } from './expandAtMentions.js'
 import { copyToClipboard } from '../../utils/clipboard.js'
+import { loadInputHistory, saveInputHistory } from '../../utils/inputHistory.js'
 import type { OpenAIMessage } from '../../core/types.js'
 
 // ── Context calculation (lightweight — avoids importing full compact module) ──
@@ -82,9 +83,10 @@ export function App({
 }: AppProps): React.ReactElement {
   const state: UIState = useUIStore(store)
   const { exit } = useApp()
+  const { stdout } = useStdout()
   const [history, setHistory] = useState<OpenAIMessage[]>(initialHistory)
   const [showHelp, setShowHelp] = useState(false)
-  const inputHistory = useRef<string[]>([])
+  const inputHistory = useRef<string[]>(loadInputHistory())
 
   // ── Turn execution ────────────────────────────────────────────────────────
 
@@ -92,6 +94,7 @@ export function App({
     async (text: string) => {
       // Track input history
       inputHistory.current.push(text)
+      saveInputHistory(text)
 
       // Slash command?
       if (text.startsWith('/')) {
@@ -168,6 +171,11 @@ export function App({
       }
       setTimeout(() => { sigintCount.current = 0 }, 1500)
     }
+
+    // Ctrl+L: clear screen and redraw
+    if (input === '\x0c') {
+      stdout.write('\x1b[2J\x1b[3J\x1b[H')
+    }
   })
 
   // ── Context state for StatusBar ───────────────────────────────────────────
@@ -210,7 +218,7 @@ export function App({
       {/* Live streaming text */}
       {state.streamingText ? (
         <Box marginLeft={2} flexDirection="column">
-          <Markdown>{state.streamingText}</Markdown>
+          <StreamingMarkdown>{state.streamingText}</StreamingMarkdown>
         </Box>
       ) : null}
 
@@ -260,10 +268,6 @@ export function App({
             skills={skills}
             history={inputHistory.current}
             cwd={cwd}
-            onRetry={() => {
-              const last = inputHistory.current[inputHistory.current.length - 1]
-              if (last) void handleSubmit(last)
-            }}
             onCopy={handleCopy}
           />
         </Box>

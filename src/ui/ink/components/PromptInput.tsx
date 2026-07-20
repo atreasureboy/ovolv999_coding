@@ -18,7 +18,9 @@ import { Text, Box, useInput } from 'ink'
 import { useState, useCallback, useEffect, useMemo } from 'react'
 import { SlashMenu, type SlashEntry } from './SlashMenu.js'
 import { FileSuggestMenu } from './FileSuggestMenu.js'
+import { HistorySearchOverlay } from './HistorySearchOverlay.js'
 import { suggestFiles } from '../fileSuggest.js'
+import { pasteStore } from '../pasteStore.js'
 import { listCommands } from '../../../commands/index.js'
 
 export interface PromptInputProps {
@@ -34,8 +36,6 @@ export interface PromptInputProps {
   history: string[]
   /** Working directory for @-mention file autocomplete. */
   cwd: string
-  /** Called when user presses Ctrl+R (retry last turn). */
-  onRetry?: () => void
   /** Called when user presses Ctrl+Y (copy last reply). */
   onCopy?: () => void
 }
@@ -47,7 +47,6 @@ export function PromptInput({
   skills,
   history,
   cwd,
-  onRetry,
   onCopy,
 }: PromptInputProps): React.ReactElement {
   const [text, setText] = useState('')
@@ -55,6 +54,7 @@ export function PromptInput({
   const [histIdx, setHistIdx] = useState(-1)
   const [menuSelected, setMenuSelected] = useState(0)
   const [fileSelected, setFileSelected] = useState(0)
+  const [searchMode, setSearchMode] = useState(false)
 
   // ── Compute slash menu entries ────────────────────────────────────────────
 
@@ -138,7 +138,7 @@ export function PromptInput({
     }
     const trimmed = text.trim()
     if (trimmed) {
-      onSubmit(trimmed)
+      onSubmit(pasteStore.expand(trimmed))
       setText('')
       setCursor(0)
       setHistIdx(-1)
@@ -167,9 +167,9 @@ export function PromptInput({
       return
     }
 
-    // ── Ctrl+R: retry last turn ──────────────────────────────────────────
+    // ── Ctrl+R: reverse history search ───────────────────────────────────
     if (input === '\x12') {
-      onRetry?.()
+      if (history.length > 0) setSearchMode(true)
       return
     }
 
@@ -263,9 +263,12 @@ export function PromptInput({
     // ── Printable characters (including multi-line paste) ───────────────
     if (input && !key.ctrl && !key.meta && input !== '\r' && input !== '\n') {
       // Handle paste (multi-char input possibly containing newlines)
-      const newText = text.slice(0, cursor) + input + text.slice(cursor)
+      const insertText = pasteStore.isLargePaste(input)
+        ? pasteStore.store(input)
+        : input
+      const newText = text.slice(0, cursor) + insertText + text.slice(cursor)
       setText(newText)
-      setCursor(cursor + input.length)
+      setCursor(cursor + insertText.length)
     }
   })
 
@@ -325,6 +328,17 @@ export function PromptInput({
       ) : null}
       {fileContext.active && fileSuggestions.length > 0 ? (
         <FileSuggestMenu suggestions={fileSuggestions} selected={fileSelected} query={fileContext.query} />
+      ) : null}
+      {searchMode ? (
+        <HistorySearchOverlay
+          history={history}
+          onSelect={(selected) => {
+            setText(selected)
+            setCursor(selected.length)
+            setSearchMode(false)
+          }}
+          onCancel={() => setSearchMode(false)}
+        />
       ) : null}
     </Box>
   )

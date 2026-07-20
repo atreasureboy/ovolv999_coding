@@ -278,3 +278,83 @@ export function Markdown({ children }: { children: string }): ReactNode {
     </Box>
   )
 }
+
+// ── Streaming markdown with block-boundary memoization ──────────────────────
+
+import { useMemo, useRef } from 'react'
+
+/**
+ * Find the index where the last "complete" block ends.
+ * A block is complete if it's followed by a blank line or another block
+ * delimiter. The content after this boundary is the "growing" block that
+ * may receive more tokens.
+ *
+ * Returns { stableBlocks, growingText } — the stable prefix can be memoized,
+ * only the growing suffix needs re-parsing on each token.
+ */
+function splitStableBlocks(text: string): { stableText: string; growingText: string } {
+  const lines = text.split('\n')
+  // Walk backward to find a safe split point — a blank line or before a
+  // block-level delimiter (```, #, >, ---, list marker)
+  let splitLine = 0
+  for (let i = lines.length - 1; i > 0; i--) {
+    const line = lines[i]
+    const prevLine = lines[i - 1]
+    // Split before a blank line that's followed by content
+    if (prevLine.trim() === '' && line.trim() !== '') {
+      splitLine = i
+      break
+    }
+    // Split before a code block start
+    if (line.trim().startsWith('```')) {
+      splitLine = i
+      break
+    }
+    // Split before a header
+    if (/^#{1,4}\s/.test(line)) {
+      splitLine = i
+      break
+    }
+  }
+
+  if (splitLine === 0) {
+    return { stableText: '', growingText: text }
+  }
+  return {
+    stableText: lines.slice(0, splitLine).join('\n'),
+    growingText: lines.slice(splitLine).join('\n'),
+  }
+}
+
+/**
+ * StreamingMarkdown — optimized for token-by-token streaming.
+ *
+ * Splits text at the last block boundary. The stable prefix is parsed once
+ * and memoized; only the growing suffix is re-parsed on each token.
+ */
+export function StreamingMarkdown({ children }: { children: string }): ReactNode {
+  const cachedBlocks = useRef<{ key: string; blocks: Block[] }>({ key: '', blocks: [] })
+
+  const { stableText, growingText } = useMemo(() => splitStableBlocks(children), [children])
+
+  // Re-use cached blocks for the stable prefix
+  const stableBlocks = useMemo(() => {
+    if (cachedBlocks.current.key === stableText) {
+      return cachedBlocks.current.blocks
+    }
+    const blocks = stableText ? parseBlocks(stableText) : []
+    cachedBlocks.current = { key: stableText, blocks }
+    return blocks
+  }, [stableText])
+
+  // Always re-parse the growing portion
+  const growingBlocks = useMemo(() => parseBlocks(growingText), [growingText])
+
+  const allBlocks = [...stableBlocks, ...growingBlocks]
+
+  return (
+    <Box flexDirection="column">
+      {allBlocks.map((block, i) => renderBlock(block, i))}
+    </Box>
+  )
+}
