@@ -19,6 +19,7 @@ import { execSync, execFileSync } from 'child_process'
 import { homedir } from 'os'
 import { ClaudeCodeWorkerManager } from '../core/claudeCodeWorkerManager.js'
 import { copyToClipboard } from '../utils/clipboard.js'
+import type { EditedFileInfo } from '../core/fileHistory.js'
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -354,6 +355,53 @@ registerCommand({
       return text('No file edits tracked in this session.')
     }
     return text(fh.getSummary() + '\n\nRestore is not supported by this command. To roll back, use git or your editor\'s undo.')
+  },
+})
+
+// ── /undo — restore the most recently edited file ───────────────────────────
+
+registerCommand({
+  name: 'undo',
+  description: 'Undo the last file edit (restore previous version)',
+  usage: '/undo [file path]',
+  handler: (args, ctx) => {
+    const fh = ctx.engine.getFileHistory()
+    if (!fh) {
+      return text('File history not available (no session directory configured).')
+    }
+    const files = fh.getEditedFiles()
+    if (files.length === 0) {
+      return text('No file edits to undo.')
+    }
+
+    // If a specific file is given, undo that one
+    const target = args.trim()
+    let file: EditedFileInfo | undefined
+
+    if (target) {
+      // Resolve to absolute path for matching
+      file = files.find(f => f.path === target || f.path.endsWith('/' + target))
+      if (!file) {
+        return text(`No edits tracked for: ${target}\nEdited files:\n${files.map(f => '  ' + f.path).join('\n')}`)
+      }
+    } else {
+      // Find the most recently modified file
+      file = files
+        .slice()
+        .sort((a, b) => (b.lastModified ?? 0) - (a.lastModified ?? 0))[0]
+    }
+
+    const versions = fh.getVersions(file.path)
+    if (versions.length === 0) {
+      return text(`No versions available for ${file.path}`)
+    }
+
+    // Restore to version 0 (original pre-edit state)
+    const ok = fh.restoreOriginal(file.path)
+    if (ok) {
+      return text(`✓ Restored ${file.path} to original (pre-edit) state.\n  ${versions.length} version(s) were tracked.`)
+    }
+    return text(`✗ Failed to restore ${file.path}. The backup may be missing.`)
   },
 })
 
