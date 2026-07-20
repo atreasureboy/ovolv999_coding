@@ -1841,6 +1841,89 @@ registerCommand({
   },
 })
 
+registerCommand({
+  name: 'bookmark',
+  aliases: ['bm', 'mark'],
+  description: 'Manage file/line bookmarks. Usage: /bookmark [add|list|search|remove|visit|stats|recent|file <path>]',
+  handler: (args, ctx) => {
+    const {
+      addBookmark, removeBookmark, getBookmark, visitBookmark,
+      getBookmarksByFile, searchBookmarks, getRecentBookmarks,
+      formatBookmarkList, formatBookmarkDetail, formatBookmarkStats,
+      loadBookmarks,
+    } = require('../core/bookmarks.js') as typeof import('../core/bookmarks.js')
+
+    const parts = args.trim().split(/\s+/)
+    const sub = parts[0] ?? 'list'
+
+    // /bookmark add <path:line> <note...>
+    if (sub === 'add') {
+      const loc = parts[1]
+      const note = parts.slice(2).join(' ') || '(no note)'
+      if (!loc) return text('Usage: /bookmark add <path:line> [note]')
+      const match = loc.match(/^(.+?)(?::(\d+)(?:-(\d+))?)?$/)
+      if (!match) return text('Invalid path format. Use file.ts:line')
+      const filePath = match[1]
+      const line = parseInt(match[2] ?? '1', 10)
+      const endLine = match[3] ? parseInt(match[3], 10) : undefined
+      const bm = addBookmark(ctx.cwd, filePath, line, note, { endLine })
+      return text(`✓ Bookmark added: ${filePath}:${line}\n  "${note}"\n  id: ${bm.id}`)
+    }
+
+    // /bookmark remove <id|note>
+    if (sub === 'remove' || sub === 'rm') {
+      const target = parts.slice(1).join(' ')
+      if (!target) return text('Usage: /bookmark remove <id|note>')
+      const ok = removeBookmark(ctx.cwd, target)
+      return text(ok ? '✓ Bookmark removed' : 'No matching bookmark found')
+    }
+
+    // /bookmark visit <id>
+    if (sub === 'visit' || sub === 'go') {
+      const id = parts[1]
+      if (!id) return text('Usage: /bookmark visit <id>')
+      const bm = visitBookmark(ctx.cwd, id)
+      if (!bm) return text('Bookmark not found')
+      return text(formatBookmarkDetail(bm, ctx.cwd))
+    }
+
+    // /bookmark search <query>
+    if (sub === 'search') {
+      const query = parts.slice(1).join(' ')
+      const results = searchBookmarks(ctx.cwd, query)
+      return text(formatBookmarkList(results, ctx.cwd))
+    }
+
+    // /bookmark file <path>
+    if (sub === 'file') {
+      const filePath = parts[1]
+      if (!filePath) return text('Usage: /bookmark file <path>')
+      const results = getBookmarksByFile(ctx.cwd, filePath)
+      return text(formatBookmarkList(results, ctx.cwd))
+    }
+
+    // /bookmark recent
+    if (sub === 'recent') {
+      const results = getRecentBookmarks(ctx.cwd, 10)
+      return text(formatBookmarkList(results, ctx.cwd))
+    }
+
+    // /bookmark stats
+    if (sub === 'stats') {
+      const store = loadBookmarks(ctx.cwd)
+      return text(formatBookmarkStats(store))
+    }
+
+    // /bookmark list (default)
+    if (sub === 'list' || !sub) {
+      const store = loadBookmarks(ctx.cwd)
+      return text(formatBookmarkList(store.bookmarks, ctx.cwd))
+    }
+
+    return text(`Usage: /bookmark [add|list|search|remove|visit|stats|recent|file]`)
+  },
+})
+
 // ── Export for REPL ─────────────────────────────────────────────────────────
 
 export { registerCommand } from './index.js'
