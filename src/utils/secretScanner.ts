@@ -257,3 +257,76 @@ export function isValidSecret(s: string): boolean {
   if (unique < 4) return false
   return true
 }
+
+// ── Extended scan API (v2) ──────────────────────────────────────────────────
+
+export interface ExtendedScanResult {
+  hasSecrets: boolean
+  matches: SecretMatch[]
+  cleanedContent: string
+}
+
+/**
+ * Extended scan that returns cleaned content with secrets redacted.
+ */
+export function scanText(content: string): ExtendedScanResult {
+  const matches = scanForSecrets(content)
+  let cleaned = content
+  for (const m of matches) {
+    cleaned = cleaned.replace(m.fullMatch, `[REDACTED:${m.type}]`)
+  }
+  return {
+    hasSecrets: matches.length > 0,
+    matches,
+    cleanedContent: cleaned,
+  }
+}
+
+export function formatScanResult(result: ExtendedScanResult): string {
+  if (!result.hasSecrets) return 'No secrets detected.'
+  const lines = [`Found ${result.matches.length} secret(s):`]
+  for (const m of result.matches) {
+    lines.push(`  - ${m.type}: ${maskKey(m.fullMatch)}`)
+  }
+  return lines.join('\n')
+}
+
+export interface BulkScanResult {
+  totalFiles: number
+  filesWithSecrets: number
+  totalSecrets: number
+  results: Array<{ filePath: string; result: ExtendedScanResult }>
+}
+
+export function scanFiles(files: Array<{ path: string; content: string }>): BulkScanResult {
+  const results: BulkScanResult['results'] = []
+  let filesWithSecrets = 0
+  let totalSecrets = 0
+
+  for (const file of files) {
+    const result = scanText(file.content)
+    results.push({ filePath: file.path, result })
+    if (result.hasSecrets) {
+      filesWithSecrets++
+      totalSecrets += result.matches.length
+    }
+  }
+
+  return { totalFiles: files.length, filesWithSecrets, totalSecrets, results }
+}
+
+export function formatBulkScanResult(result: BulkScanResult): string {
+  const lines = [
+    `Scanned ${result.totalFiles} file(s):`,
+    `  ${result.filesWithSecrets} file(s) with secrets`,
+    `  ${result.totalSecrets} total secrets found`,
+  ]
+  for (const { filePath, result: scanResult } of result.results) {
+    if (!scanResult.hasSecrets) continue
+    lines.push(`${filePath}:`)
+    for (const m of scanResult.matches) {
+      lines.push(`  - ${m.type}: ${maskKey(m.fullMatch)}`)
+    }
+  }
+  return lines.join('\n')
+}

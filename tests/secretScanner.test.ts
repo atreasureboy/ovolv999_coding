@@ -7,6 +7,10 @@ import {
   formatScanSummary,
   isValidSecret,
   maskKey,
+  scanText,
+  formatScanResult,
+  scanFiles,
+  formatBulkScanResult,
 } from '../src/utils/secretScanner.js'
 
 describe('secretScanner', () => {
@@ -238,6 +242,64 @@ MIIEpAIBAAKCAQEA1234567890
 
     it('returns true for realistic secrets', () => {
       expect(isValidSecret('sk-abc123def456ghi789')).toBe(true)
+    })
+  })
+
+  describe('scanText (extended API)', () => {
+    it('returns cleaned content with secrets redacted', () => {
+      const result = scanText('key = AKIAIOSFODNN7EXAMPLE')
+      expect(result.hasSecrets).toBe(true)
+      expect(result.cleanedContent).toContain('[REDACTED:')
+      expect(result.cleanedContent).not.toContain('AKIAIOSFODNN7EXAMPLE')
+    })
+
+    it('preserves non-secret content', () => {
+      const result = scanText('Hello world\nAKIAIOSFODNN7EXAMPLE\nMore text')
+      expect(result.cleanedContent).toContain('Hello world')
+      expect(result.cleanedContent).toContain('More text')
+    })
+
+    it('handles clean text', () => {
+      const result = scanText('no secrets here')
+      expect(result.hasSecrets).toBe(false)
+      expect(result.cleanedContent).toBe('no secrets here')
+    })
+  })
+
+  describe('formatScanResult', () => {
+    it('shows clean message', () => {
+      expect(formatScanResult(scanText('clean'))).toContain('No secrets')
+    })
+
+    it('shows found secrets', () => {
+      const out = formatScanResult(scanText('AKIAIOSFODNN7EXAMPLE'))
+      expect(out).toContain('secret')
+    })
+  })
+
+  describe('scanFiles', () => {
+    it('scans multiple files', () => {
+      const result = scanFiles([
+        { path: 'a.txt', content: 'clean' },
+        { path: 'b.txt', content: 'AKIAIOSFODNN7EXAMPLE' },
+      ])
+      expect(result.totalFiles).toBe(2)
+      expect(result.filesWithSecrets).toBe(1)
+      expect(result.totalSecrets).toBeGreaterThanOrEqual(1)
+    })
+
+    it('handles all clean files', () => {
+      const result = scanFiles([{ path: 'a.txt', content: 'clean' }])
+      expect(result.filesWithSecrets).toBe(0)
+    })
+  })
+
+  describe('formatBulkScanResult', () => {
+    it('shows summary', () => {
+      const result = scanFiles([{ path: 'a.txt', content: 'AKIAIOSFODNN7EXAMPLE' }])
+      const out = formatBulkScanResult(result)
+      expect(out).toContain('1 file(s)')
+      expect(out).toContain('a.txt')
     })
   })
 })
