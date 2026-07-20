@@ -2632,7 +2632,7 @@ registerCommand({
     const parts = args.trim().split(/\s+/)
     const level = parts[0]
 
-    if (!level || level === 'list') {
+    if (level === 'list' || level === 'ls') {
       return text(formatEffortList())
     }
 
@@ -2648,6 +2648,280 @@ registerCommand({
     }
 
     return text(`Unknown level: ${level}\n${formatEffortList()}`)
+  },
+})
+
+// ── /team-memory ────────────────────────────────────────────────────────────
+
+registerCommand({
+  name: 'team-memory',
+  aliases: ['teammem'],
+  description: 'Manage team memory sync. Usage: /team-memory [init <url> | status | sync | files | add <file> | enable-auto | disable-auto]',
+  handler: (args, ctx) => {
+    const teamMemModule = require('../core/teamMemory.js') as typeof import('../core/teamMemory.js')
+    const {
+      loadTeamConfig, saveTeamConfig, syncTeamMemory,
+      findMemoryFiles, formatSyncResult, formatTeamMemoryStatus,
+    } = teamMemModule
+
+    const parts = args.trim().split(/\s+/)
+    const sub = parts[0] ?? 'status'
+
+    if (sub === 'init') {
+      const url = parts[1]
+      if (!url) return text('Usage: /team-memory init <git-remote-url>')
+      const files = findMemoryFiles(ctx.cwd)
+      saveTeamConfig({ remoteUrl: url, files, autoSync: false })
+      return text(`Team memory initialized:\n  Remote: ${url}\n  Files: ${files.length > 0 ? files.join(', ') : '(none found)'}`)
+    }
+
+    if (sub === 'status') {
+      return text(formatTeamMemoryStatus())
+    }
+
+    if (sub === 'sync') {
+      const result = syncTeamMemory()
+      return text(formatSyncResult(result))
+    }
+
+    if (sub === 'files') {
+      const config = loadTeamConfig()
+      if (!config) return text('Not configured. Use /team-memory init <url>')
+      return text(config.files.length > 0 ? config.files.join('\n') : 'No files configured')
+    }
+
+    if (sub === 'add') {
+      const file = parts[1]
+      if (!file) return text('Usage: /team-memory add <file-path>')
+      const config = loadTeamConfig() ?? { remoteUrl: '', files: [] }
+      const resolved = require('path').resolve(ctx.cwd, file)
+      if (!config.files.includes(resolved)) {
+        config.files.push(resolved)
+        saveTeamConfig(config)
+      }
+      return text(`Added: ${resolved}`)
+    }
+
+    return text(formatTeamMemoryStatus())
+  },
+})
+
+// ── /vault ──────────────────────────────────────────────────────────────────
+
+registerCommand({
+  name: 'vault',
+  aliases: ['secrets', 'keychain'],
+  description: 'Manage local vault. Usage: /vault [status | set <key> | get <key> | delete <key> | list]',
+  handler: (args) => {
+    const keychainModule = require('../utils/keychain.js') as typeof import('../utils/keychain.js')
+    const { setSecret, getSecret, deleteSecret, listSecrets, getVaultMetadata, formatVaultStatus, getPassphraseFromEnv } = keychainModule
+
+    const parts = args.trim().split(/\s+/)
+    const sub = parts[0] ?? 'status'
+
+    if (sub === 'status') {
+      const pass = getPassphraseFromEnv()
+      return text(formatVaultStatus(getVaultMetadata(pass)))
+    }
+
+    if (sub === 'set') {
+      const key = parts[1]
+      if (!key) return text('Usage: /vault set <key>')
+      const pass = getPassphraseFromEnv()
+      process.stdout.write(`Enter value for ${key}: `)
+      try {
+        const value = require('readline-sync').question('', { hideEchoBack: true }) as string
+        setSecret(key, value, pass ?? undefined)
+        return text(`Stored: ${key}`)
+      } catch {
+        return text('Failed to read value (readline-sync not available)')
+      }
+    }
+
+    if (sub === 'get') {
+      const key = parts[1]
+      if (!key) return text('Usage: /vault get <key>')
+      const pass = getPassphraseFromEnv()
+      const value = getSecret(key, pass ?? undefined)
+      return text(value ? value : `Not found: ${key}`)
+    }
+
+    if (sub === 'delete') {
+      const key = parts[1]
+      if (!key) return text('Usage: /vault delete <key>')
+      const pass = getPassphraseFromEnv()
+      const deleted = deleteSecret(key, pass ?? undefined)
+      return text(deleted ? `Deleted: ${key}` : `Not found: ${key}`)
+    }
+
+    if (sub === 'list') {
+      const pass = getPassphraseFromEnv()
+      const keys = listSecrets(pass ?? undefined)
+      return text(keys.length > 0 ? keys.join('\n') : 'No secrets stored')
+    }
+
+    return text('Usage: /vault [status | set <key> | get <key> | delete <key> | list]')
+  },
+})
+
+// ── /daemon ─────────────────────────────────────────────────────────────────
+
+registerCommand({
+  name: 'daemon',
+  description: 'Manage daemon mode. Usage: /daemon [status | start | stop | workers]',
+  handler: () => {
+    const daemonModule = require('../core/daemon.js') as typeof import('../core/daemon.js')
+    const { isDaemonRunning, DaemonClient, getDaemonSocketPath, formatDaemonInfo } = daemonModule
+
+    return text('Daemon control requires running ovolv999 --daemon. Socket: ' + getDaemonSocketPath() + '\nRunning: ' + isDaemonRunning())
+  },
+})
+
+// ── /plugins ────────────────────────────────────────────────────────────────
+
+registerCommand({
+  name: 'plugins',
+  aliases: ['plugin'],
+  description: 'Manage plugins. Usage: /plugins [list | enable <name> | disable <name> | info <name> | install <source> | uninstall <name> | rescan]',
+  handler: (args) => {
+    const pluginMod = require('../core/pluginManager.js') as typeof import('../core/pluginManager.js')
+    const {
+      loadPlugins, enablePlugin, disablePlugin, getPlugin,
+      listPlugins, installPlugin, uninstallPlugin,
+      formatPluginList, formatPlugin,
+    } = pluginMod
+
+    const parts = args.trim().split(/\s+/)
+    const sub = parts[0] ?? 'list'
+
+    if (sub === 'list' || sub === 'ls') {
+      return text(formatPluginList(listPlugins()))
+    }
+
+    if (sub === 'enable') {
+      const name = parts[1]
+      if (!name) return text('Usage: /plugins enable <name>')
+      const p = enablePlugin(name)
+      return text(p ? `Enabled: ${name}` : `Not found: ${name}`)
+    }
+
+    if (sub === 'disable') {
+      const name = parts[1]
+      if (!name) return text('Usage: /plugins disable <name>')
+      const p = disablePlugin(name)
+      return text(p ? `Disabled: ${name}` : `Not found: ${name}`)
+    }
+
+    if (sub === 'info') {
+      const name = parts[1]
+      if (!name) return text('Usage: /plugins info <name>')
+      const p = getPlugin(name)
+      return text(p ? formatPlugin(p) : `Not found: ${name}`)
+    }
+
+    if (sub === 'install') {
+      const source = parts[1]
+      if (!source) return text('Usage: /plugins install <local-path>')
+      const result = installPlugin({ from: 'local', source })
+      return text(result.message)
+    }
+
+    if (sub === 'uninstall') {
+      const name = parts[1]
+      if (!name) return text('Usage: /plugins uninstall <name>')
+      const result = uninstallPlugin(name)
+      return text(result.message)
+    }
+
+    if (sub === 'rescan') {
+      const plugins = loadPlugins()
+      return text(`Found ${plugins.length} plugin(s)`)
+    }
+
+    return text(formatPluginList(listPlugins()))
+  },
+})
+
+// ── /dream ──────────────────────────────────────────────────────────────────
+
+registerCommand({
+  name: 'dream',
+  aliases: ['learn', 'patterns'],
+  description: 'Auto-dream and skill learning. Usage: /dream [stats | patterns | log | knowledge | skills | insight <text>]',
+  handler: (args) => {
+    const dreamMod = require('../core/autoDream.js') as typeof import('../core/autoDream.js')
+    const {
+      getPatterns, getTopPatterns, getDreamLog, getKnowledge, getExtractedSkills,
+      dream, formatPatterns, formatDreamLog, formatDreamStats,
+    } = dreamMod
+
+    const parts = args.trim().split(/\s+/)
+    const sub = parts[0] ?? 'stats'
+
+    if (sub === 'stats') {
+      return text(formatDreamStats())
+    }
+
+    if (sub === 'patterns') {
+      return text(formatPatterns(getTopPatterns(10)))
+    }
+
+    if (sub === 'log') {
+      const limit = parseInt(parts[1] ?? '10', 10)
+      return text(formatDreamLog(getDreamLog(limit)))
+    }
+
+    if (sub === 'knowledge') {
+      const kb = getKnowledge()
+      if (kb.length === 0) return text('No knowledge entries yet.')
+      const lines = kb.map(k => `Q: ${k.question}\nA: ${k.answer}`)
+      return text(lines.join('\n---\n'))
+    }
+
+    if (sub === 'skills') {
+      const skills = getExtractedSkills()
+      if (skills.length === 0) return text('No skills extracted yet.')
+      return text(skills.map(s => `${s.skillName}: ${s.description}`).join('\n'))
+    }
+
+    if (sub === 'insight') {
+      const desc = parts.slice(1).join(' ')
+      if (!desc) return text('Usage: /dream insight <description>')
+      const entry = dream('insight', 'manual', desc)
+      return text(`Recorded insight: ${entry.description}`)
+    }
+
+    return text('Usage: /dream [stats | patterns | log | knowledge | skills | insight <text>]')
+  },
+})
+
+// ── /messages ───────────────────────────────────────────────────────────────
+
+registerCommand({
+  name: 'messages',
+  aliases: ['msg'],
+  description: 'Inter-agent messaging. Usage: /messages [agents | send <to> <msg> | list | stats]',
+  handler: (args) => {
+    const msgMod = require('../core/messageBus.js') as typeof import('../core/messageBus.js')
+    const { getMessageBus, formatAgentList, formatMessageList, formatBusStats } = msgMod
+
+    const parts = args.trim().split(/\s+/)
+    const sub = parts[0] ?? 'stats'
+    const bus = getMessageBus()
+
+    if (sub === 'agents') {
+      return text(formatAgentList(bus.listAgents()))
+    }
+
+    if (sub === 'list') {
+      return text(formatMessageList(bus.getMessages()))
+    }
+
+    if (sub === 'stats') {
+      return text(formatBusStats(bus.getStats()))
+    }
+
+    return text('Usage: /messages [agents | list | stats]')
   },
 })
 
