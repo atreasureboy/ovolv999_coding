@@ -91,6 +91,48 @@ describe('tokenize', () => {
     const ws = tokens.find((t) => t.text === '   ')
     expect(ws).toBeDefined()
   })
+
+  it('identifies Go keywords', () => {
+    const tokens = tokenize('func main() {}', 'go')
+    const kw = tokens.find((t) => t.text === 'func')
+    expect(kw).toBeDefined()
+    expect(kw?.color).toBe('magenta')
+  })
+
+  it('identifies Rust keywords', () => {
+    const tokens = tokenize('fn main() {}', 'rust')
+    const kw = tokens.find((t) => t.text === 'fn')
+    expect(kw).toBeDefined()
+    expect(kw?.color).toBe('magenta')
+  })
+
+  it('identifies Java keywords', () => {
+    const tokens = tokenize('public class Main {}', 'java')
+    const kw = tokens.find((t) => t.text === 'class')
+    expect(kw).toBeDefined()
+    expect(kw?.color).toBe('magenta')
+  })
+
+  it('identifies C keywords', () => {
+    const tokens = tokenize('int main() { return 0; }', 'c')
+    const kw = tokens.find((t) => t.text === 'int')
+    expect(kw).toBeDefined()
+    expect(kw?.color).toBe('magenta')
+  })
+
+  it('identifies SQL keywords', () => {
+    const tokens = tokenize('SELECT * FROM users', 'sql')
+    const kw = tokens.find((t) => t.text === 'SELECT')
+    expect(kw).toBeDefined()
+    expect(kw?.color).toBe('magenta')
+  })
+
+  it('identifies CSS properties', () => {
+    const tokens = tokenize('color: red;', 'css')
+    const kw = tokens.find((t) => t.text === 'color')
+    expect(kw).toBeDefined()
+    expect(kw?.color).toBe('magenta')
+  })
 })
 
 describe('highlight', () => {

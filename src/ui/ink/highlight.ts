@@ -1,7 +1,8 @@
 /**
  * highlight — lightweight syntax highlighter for Ink code rendering.
  *
- * Supports: TypeScript/JavaScript, Python, Bash, JSON, and generic.
+ * Supports: TypeScript/JavaScript, Python, Bash, JSON, Go, Rust, Java,
+ * C/C++, SQL, YAML, CSS, and generic.
  * Not a full parser — uses regex tokenization for common patterns.
  *
  * Token colors:
@@ -52,6 +53,69 @@ const BASH_KEYWORDS = new Set([
 
 const JSON_KEYWORDS = new Set(['true', 'false', 'null'])
 
+const GO_KEYWORDS = new Set([
+  'package', 'import', 'func', 'var', 'const', 'type', 'struct', 'interface',
+  'map', 'chan', 'go', 'defer', 'return', 'if', 'else', 'for', 'range',
+  'switch', 'case', 'default', 'break', 'continue', 'fallthrough', 'select',
+  'nil', 'true', 'false', 'iota', 'make', 'new', 'len', 'cap', 'append',
+  'panic', 'recover', 'print', 'println',
+])
+
+const RUST_KEYWORDS = new Set([
+  'fn', 'let', 'mut', 'const', 'static', 'struct', 'enum', 'trait', 'impl',
+  'pub', 'use', 'mod', 'crate', 'self', 'super', 'as', 'in', 'ref', 'match',
+  'if', 'else', 'for', 'while', 'loop', 'return', 'break', 'continue',
+  'unsafe', 'async', 'await', 'move', 'dyn', 'where', 'type', 'true',
+  'false', 'Some', 'None', 'Ok', 'Err', 'Result', 'Option', 'Vec', 'String',
+  'box', 'extern', 'abstract', 'become', 'do', 'final', 'macro', 'try',
+  'typeof', 'unsized', 'virtual', 'yield',
+])
+
+const JAVA_KEYWORDS = new Set([
+  'public', 'private', 'protected', 'class', 'interface', 'extends',
+  'implements', 'package', 'import', 'static', 'final', 'abstract', 'void',
+  'int', 'long', 'double', 'float', 'boolean', 'char', 'byte', 'short',
+  'String', 'var', 'new', 'this', 'super', 'if', 'else', 'for', 'while',
+  'do', 'switch', 'case', 'break', 'continue', 'return', 'throw', 'throws',
+  'try', 'catch', 'finally', 'null', 'true', 'false', 'instanceof',
+  'synchronized', 'volatile', 'transient', 'native', 'enum', 'assert',
+  'default', 'instanceof',
+])
+
+const C_KEYWORDS = new Set([
+  'int', 'long', 'short', 'char', 'float', 'double', 'void', 'unsigned',
+  'signed', 'const', 'static', 'extern', 'volatile', 'register', 'auto',
+  'struct', 'union', 'enum', 'typedef', 'sizeof', 'return', 'if', 'else',
+  'for', 'while', 'do', 'switch', 'case', 'break', 'continue', 'default',
+  'goto', 'inline', 'restrict', '_Bool', '_Complex', '_Imaginary',
+  'NULL', 'true', 'false', 'include', 'define', 'undef', 'ifdef', 'ifndef',
+])
+
+const SQL_KEYWORDS = new Set([
+  'SELECT', 'FROM', 'WHERE', 'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'DROP',
+  'ALTER', 'TABLE', 'INDEX', 'VIEW', 'DATABASE', 'INTO', 'VALUES', 'SET',
+  'JOIN', 'INNER', 'LEFT', 'RIGHT', 'OUTER', 'FULL', 'ON', 'AS', 'AND',
+  'OR', 'NOT', 'NULL', 'IS', 'IN', 'EXISTS', 'BETWEEN', 'LIKE', 'ORDER',
+  'BY', 'GROUP', 'HAVING', 'LIMIT', 'OFFSET', 'DISTINCT', 'UNION', 'ALL',
+  'CASE', 'WHEN', 'THEN', 'ELSE', 'END', 'COUNT', 'SUM', 'AVG', 'MIN',
+  'MAX', 'PRIMARY', 'KEY', 'FOREIGN', 'REFERENCES', 'UNIQUE', 'DEFAULT',
+  'CHECK', 'CONSTRAINT', 'TRIGGER', 'PROCEDURE', 'FUNCTION', 'RETURNS',
+  'BEGIN', 'COMMIT', 'ROLLBACK', 'TRANSACTION', 'GRANT', 'REVOKE',
+  'INT', 'INTEGER', 'VARCHAR', 'TEXT', 'BOOLEAN', 'DATE', 'TIMESTAMP',
+  'SERIAL', 'BIGINT', 'SMALLINT', 'DECIMAL', 'NUMERIC', 'REAL',
+])
+
+const CSS_KEYWORDS = new Set([
+  'color', 'background', 'background-color', 'background-image', 'margin',
+  'padding', 'border', 'border-radius', 'width', 'height', 'display',
+  'position', 'top', 'left', 'right', 'bottom', 'flex', 'flex-direction',
+  'flex-wrap', 'justify-content', 'align-items', 'grid', 'grid-template',
+  'font-size', 'font-weight', 'font-family', 'line-height', 'text-align',
+  'text-decoration', 'opacity', 'z-index', 'overflow', 'cursor', 'transition',
+  'transform', 'animation', 'box-shadow', 'visible', 'hidden', 'block',
+  'inline', 'none', 'auto', 'absolute', 'relative', 'fixed', 'sticky',
+])
+
 function getKeywords(lang: string): Set<string> {
   switch (lang) {
     case 'ts':
@@ -71,6 +135,30 @@ function getKeywords(lang: string): Set<string> {
       return BASH_KEYWORDS
     case 'json':
       return JSON_KEYWORDS
+    case 'go':
+    case 'golang':
+      return GO_KEYWORDS
+    case 'rs':
+    case 'rust':
+      return RUST_KEYWORDS
+    case 'java':
+    case 'jsp':
+      return JAVA_KEYWORDS
+    case 'c':
+    case 'cpp':
+    case 'c++':
+    case 'h':
+    case 'hpp':
+      return C_KEYWORDS
+    case 'sql':
+      return SQL_KEYWORDS
+    case 'css':
+    case 'scss':
+    case 'less':
+      return CSS_KEYWORDS
+    case 'yaml':
+    case 'yml':
+      return TS_KEYWORDS // yaml has no keywords per se; use generic highlighting
     default:
       return TS_KEYWORDS // fallback — TS keywords are a superset
   }
