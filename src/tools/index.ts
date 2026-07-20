@@ -31,6 +31,9 @@ import { SnipTool } from './snip.js'
 import { NotebookEditTool } from './notebookEdit.js'
 import { ClaudeCodeTool } from './claudeCode.js'
 import { EnterWorktreeTool, ExitWorktreeTool, ListWorktreesTool } from './worktree.js'
+import { DiagnosticsTool } from './diagnostics.js'
+import { ListMcpResourcesTool, ReadMcpResourceTool } from './mcpResources.js'
+import { GoalTool } from './goal.js'
 
 /**
  * Wiring for the per-engine AgentTool instance. All fields are REQUIRED
@@ -86,6 +89,10 @@ export function createTools(
     new EnterWorktreeTool(),
     new ExitWorktreeTool(),
     new ListWorktreesTool(),
+    new DiagnosticsTool(),
+    new ListMcpResourcesTool(),
+    new ReadMcpResourceTool(),
+    new GoalTool(),
     ...extraTools,
   ]
 }
@@ -127,4 +134,8 @@ export {
   EnterWorktreeTool,
   ExitWorktreeTool,
   ListWorktreesTool,
+  DiagnosticsTool,
+  ListMcpResourcesTool,
+  ReadMcpResourceTool,
+  GoalTool,
 }

@@ -5,8 +5,8 @@
  * list its tools, and invoke them. Transport is newline-delimited
  * JSON-RPC 2.0 over the server process's stdin/stdout.
  *
- * Scope (v1): stdio transport + tools protocol only.
- *   NOT implemented: resources, prompts, sampling, SSE/HTTP transport.
+ * Scope (v1): stdio transport + tools + resources + prompts protocol.
+ *   NOT implemented: sampling, SSE/HTTP transport.
  * The interface is intentionally narrow so a future iteration can swap in
  * the official @modelcontextprotocol/sdk without touching call sites.
  */
@@ -31,6 +31,26 @@ export interface McpToolInfo {
   description?: string
   /** JSON Schema describing the tool's arguments. */
   inputSchema: unknown
+}
+
+export interface McpResourceInfo {
+  uri: string
+  name?: string
+  description?: string
+  mimeType?: string
+}
+
+export interface McpResourceContent {
+  uri: string
+  mimeType?: string
+  text?: string
+  blob?: string
+}
+
+export interface McpPromptInfo {
+  name: string
+  description?: string
+  arguments?: Array<{ name: string; description?: string; required?: boolean }>
 }
 
 interface PendingRequest {
@@ -140,6 +160,69 @@ export class McpStdioClient {
       .join('\n')
 
     return { content: text, isError: result?.isError === true }
+  }
+
+  /** List resources exposed by the server. */
+  async listResources(): Promise<McpResourceInfo[]> {
+    try {
+      const result = (await this.request({
+        jsonrpc: '2.0',
+        method: 'resources/list',
+      })) as { resources?: unknown } | null
+      const resources = (result?.resources ?? []) as unknown[]
+      return resources
+        .filter((r): r is Record<string, unknown> => typeof r === 'object' && r !== null)
+        .map((r) => ({
+          uri: typeof r.uri === 'string' ? r.uri : '',
+          name: typeof r.name === 'string' ? r.name : undefined,
+          description: typeof r.description === 'string' ? r.description : undefined,
+          mimeType: typeof r.mimeType === 'string' ? r.mimeType : undefined,
+        }))
+        .filter((r) => r.uri.length > 0)
+    } catch {
+      return []
+    }
+  }
+
+  /** Read a resource by URI. */
+  async readResource(uri: string): Promise<McpResourceContent[]> {
+    const result = (await this.request({
+      jsonrpc: '2.0',
+      method: 'resources/read',
+      params: { uri },
+    })) as { contents?: unknown } | null
+
+    const rawContents = result?.contents
+    const arr: unknown[] = Array.isArray(rawContents) ? rawContents : []
+    return arr
+      .filter((c): c is Record<string, unknown> => typeof c === 'object' && c !== null)
+      .map((c) => ({
+        uri: typeof c.uri === 'string' ? c.uri : uri,
+        mimeType: typeof c.mimeType === 'string' ? c.mimeType : undefined,
+        text: typeof c.text === 'string' ? c.text : undefined,
+        blob: typeof c.blob === 'string' ? c.blob : undefined,
+      }))
+  }
+
+  /** List prompts exposed by the server. */
+  async listPrompts(): Promise<McpPromptInfo[]> {
+    try {
+      const result = (await this.request({
+        jsonrpc: '2.0',
+        method: 'prompts/list',
+      })) as { prompts?: unknown } | null
+      const prompts = (result?.prompts ?? []) as unknown[]
+      return prompts
+        .filter((p): p is Record<string, unknown> => typeof p === 'object' && p !== null)
+        .map((p) => ({
+          name: typeof p.name === 'string' ? p.name : '',
+          description: typeof p.description === 'string' ? p.description : undefined,
+          arguments: Array.isArray(p.arguments) ? (p.arguments as Array<{ name: string; description?: string; required?: boolean }>) : undefined,
+        }))
+        .filter((p) => p.name.length > 0)
+    } catch {
+      return []
+    }
   }
 
   /** Tear down the connection. Idempotent. Returns a resolved promise for ergonomic chaining. */
