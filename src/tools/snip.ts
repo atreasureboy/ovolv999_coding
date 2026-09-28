@@ -62,10 +62,10 @@ export class SnipTool implements Tool {
     input: Record<string, unknown>,
     ctx: ToolContext,
   ): Promise<ToolResult> {
-    const keepRecent =
-      typeof input.keep_recent === 'number' && input.keep_recent > 0
-        ? Math.floor(input.keep_recent)
-        : 10
+    const keepRecent = input.keep_recent ?? 10
+    if (typeof keepRecent !== 'number' || !Number.isSafeInteger(keepRecent) || keepRecent < 0) {
+      return Promise.resolve({ content: 'keep_recent must be a finite non-negative integer.', isError: true })
+    }
     const reason = typeof input.reason === 'string' ? input.reason : undefined
 
     if (!ctx.snipMessages) {

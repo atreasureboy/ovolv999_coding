@@ -87,8 +87,12 @@ Higher-priority sources override lower ones on conflict.`,
         timestamp: new Date().toISOString(),
       })
 
+      if (entry.persistence !== 'persisted') {
+        return Promise.resolve({ content: `Memory persistence failed: ${entry.persistenceError ?? 'write was not committed'}`, isError: true })
+      }
+
       return Promise.resolve({
-        content: `Stored in memory (id: ${entry.id}, source: ${source}, confidence: ${confidence})`,
+        content: `Stored in memory (id: ${entry.id}, claimed source: ${source}, provenance: unverified, confidence: ${confidence})`,
         isError: false,
       })
     },
@@ -149,7 +153,7 @@ Use this to recall past learnings, user preferences, or project conventions that
 
       const lines = results.map((e, i) => {
         const tagStr = e.tags.length > 0 ? ` [${e.tags.join(', ')}]` : ''
-        return `${i + 1}. (${e.source}) ${e.content}${tagStr} (conf: ${e.confidence})`
+        return `${i + 1}. (claimed ${e.source}; ${e.provenance?.status ?? 'unverified'}) ${e.content}${tagStr} (conf: ${e.confidence})`
       })
 
       return Promise.resolve({
@@ -293,7 +297,7 @@ export class MemoryModule implements AgentModule {
         const lines = scored.map(({ entry: e, score }) => {
           const s = score.toFixed(2)
           const tags = e.tags.length > 0 ? ` [${e.tags.join(', ')}]` : ''
-          return `- (${s}) ${e.content}${tags}`
+          return `- (${s}; claimed ${e.source}; ${e.provenance?.status ?? 'unverified'}) ${e.content}${tags}`
         })
         section = `## Memory — Relevant Knowledge (relevance-scored)\n\nKeywords: ${keywords.slice(0, 10).join(', ')}\n\n${lines.join('\n')}`
       }
@@ -330,7 +334,7 @@ export class MemoryModule implements AgentModule {
     if (toolName.startsWith('memory_')) return
 
     // Record both successes and failures (AgentOS pattern — learn from mistakes)
-    this.episodic.write({
+    const persisted = this.episodic.write({
       turn: turnNumber,
       toolName,
       inputSummary: JSON.stringify(input).slice(0, 200),
@@ -338,5 +342,6 @@ export class MemoryModule implements AgentModule {
       outcome: result.isError ? 'failure' as const : 'success' as const,
       timestamp: new Date().toISOString(),
     })
+    if (persisted.persistence === 'failed') process.stderr.write('[memory] Episode persistence failed; this action was not confirmed on disk\n')
   }
 }

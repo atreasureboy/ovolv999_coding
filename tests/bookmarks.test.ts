@@ -259,7 +259,7 @@ describe('Bookmark System', () => {
       })
       const out = formatBookmarkDetail(bm, cwd)
       expect(out).toContain('main entry')
-      expect(out).toContain('src/app.ts')
+      expect(out).toContain(join('src', 'app.ts'))
       expect(out).toContain('Line: 42')
       expect(out).toContain('Column: 3')
       expect(out).toContain('critical, entry')

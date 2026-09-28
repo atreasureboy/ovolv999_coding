@@ -22,6 +22,7 @@ import { listSessions, loadSession as loadSessionFile, resolveSessionPath } from
 import { registerCleanup } from '../../utils/cleanup.js'
 import { formatApiError } from '../../utils/apiError.js'
 import { saveSession } from '../../core/sessionManager.js'
+import { normalizeOutcome, type OutcomeStatus } from '../../core/outcome.js'
 
 export interface InkReplOptions {
   store: UIStore
@@ -84,7 +85,7 @@ export async function runInkRepl(opts: InkReplOptions): Promise<void> {
   async function runOneTurn(
     prompt: string,
     images?: Array<{ path: string; dataUrl: string }>,
-  ): Promise<{ newHistory: OpenAIMessage[]; reason: string }> {
+  ): Promise<{ newHistory: OpenAIMessage[]; reason: string; status?: OutcomeStatus }> {
     store.setRunning(true)
     store.setSpinner(true, 'Thinking')
     try {
@@ -97,7 +98,9 @@ export async function runInkRepl(opts: InkReplOptions): Promise<void> {
       if (opts.sessionDir && history.length > 0) {
         try { saveSession(opts.sessionDir, history) } catch { /* best-effort */ }
       }
-      return { newHistory: result.newHistory, reason: result.result.reason }
+      const status = normalizeOutcome(result.result)
+      if (status !== 'completed') store.addError(`Task ${status}${result.result.verification?.output ? `: ${result.result.verification.output}` : ''}`)
+      return { newHistory: result.newHistory, reason: result.result.reason, status }
     } catch (err: unknown) {
       const error = err as Error
       if (error.name !== 'AbortError') {
@@ -212,18 +215,19 @@ export async function runInkRepl(opts: InkReplOptions): Promise<void> {
 
   // Register cleanup handlers for signals/crashes
   const cleanup = registerCleanup({
-    onCleanup: () => {
+    onCleanup: async () => {
       // Final session save on exit (best-effort)
       if (opts.sessionDir && history.length > 0) {
         try { saveSession(opts.sessionDir, history) } catch { /* best-effort */ }
       }
-      instance.unmount()
+      engine.abort()
+      try { await engine.dispose() } finally { instance.unmount() }
     },
   })
 
   try {
     await instance.waitUntilExit()
   } finally {
-    cleanup()
+    await cleanup()
   }
 }

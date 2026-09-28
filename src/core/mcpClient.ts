@@ -57,6 +57,7 @@ interface PendingRequest {
   resolve: (value: unknown) => void
   reject: (err: Error) => void
   timer: ReturnType<typeof setTimeout>
+  cleanup: () => void
 }
 
 const PROTOCOL_VERSION = '2024-11-05'
@@ -70,12 +71,25 @@ export class McpStdioClient {
   private stdoutBuf = ''
   private stderrBuf = ''
   private closed = false
+  private connecting?: Promise<void>
+  private closing?: Promise<void>
 
   constructor(private readonly server: McpServerConfig) {}
 
+  get isClosed(): boolean {
+    return this.closed
+  }
+
   /** Spawn the server and run the MCP initialize handshake. */
-  async connect(): Promise<void> {
-    if (this.proc) return
+  connect(signal?: AbortSignal): Promise<void> {
+    if (this.closed) return Promise.reject(new Error('MCP client closed'))
+    if (!this.connecting) this.connecting = this.initialize(signal)
+    return this.connecting
+  }
+
+  private async initialize(signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted()
+    if (this.server.type !== 'stdio') throw new Error('Only stdio MCP transport is configured by this client')
     if (this.server.command.length === 0) {
       throw new Error(`MCP server "${this.server.name}": empty command`)
     }
@@ -85,10 +99,13 @@ export class McpStdioClient {
       stdio: ['pipe', 'pipe', 'pipe'],
       env,
       cwd: this.server.cwd,
+      detached: process.platform !== 'win32',
+      windowsHide: true,
     })
 
     this.proc.stdout?.setEncoding('utf8')
     this.proc.stderr?.setEncoding('utf8')
+    this.proc.stdin?.on('error', error => this.failAll(error))
 
     this.proc.stdout?.on('data', (chunk: string) => this.onStdout(chunk))
     this.proc.stderr?.on('data', (chunk: string) => {
@@ -97,13 +114,13 @@ export class McpStdioClient {
     })
 
     this.proc.on('exit', (code, signal) => {
+      this.closed = true
       const err = new Error(
-        `MCP server "${this.server.name}" exited (code=${code} signal=${signal})` +
-          (this.stderrBuf.trim() ? `\n${this.stderrBuf.trim().slice(-1024)}` : ''),
+        `MCP server "${this.server.name}" exited (code=${code} signal=${signal})`,
       )
       this.failAll(err)
     })
-    this.proc.on('error', (err) => this.failAll(err))
+    this.proc.on('error', (err) => { this.closed = true; this.failAll(err) })
 
     // Initialize handshake
     await this.request(
@@ -117,18 +134,19 @@ export class McpStdioClient {
         },
       },
       INITIALIZE_TIMEOUT_MS,
-    )
+      signal,
+    ).catch(async error => { await this.close(); throw error })
 
     // Notify initialized (no id, no response expected)
     this.notify({ jsonrpc: '2.0', method: 'notifications/initialized' })
   }
 
   /** List tools exposed by the server. */
-  async listTools(): Promise<McpToolInfo[]> {
+  async listTools(signal?: AbortSignal): Promise<McpToolInfo[]> {
     const result = (await this.request({
       jsonrpc: '2.0',
       method: 'tools/list',
-    })) as { tools?: unknown } | null
+    }, DEFAULT_TIMEOUT_MS, signal)) as { tools?: unknown } | null
     const tools = (result?.tools ?? []) as unknown[]
     return tools
       .filter((t): t is Record<string, unknown> => typeof t === 'object' && t !== null)
@@ -144,12 +162,13 @@ export class McpStdioClient {
   async callTool(
     name: string,
     args: Record<string, unknown>,
+    signal?: AbortSignal,
   ): Promise<{ content: string; isError: boolean }> {
     const result = (await this.request({
       jsonrpc: '2.0',
       method: 'tools/call',
       params: { name, arguments: args },
-    })) as { content?: unknown; isError?: boolean } | null
+    }, DEFAULT_TIMEOUT_MS, signal).catch(async error => { await this.close(); throw error })) as { content?: unknown; isError?: boolean } | null
 
     const rawContent = result?.content
     const contentArr: unknown[] = Array.isArray(rawContent) ? rawContent : []
@@ -227,28 +246,46 @@ export class McpStdioClient {
 
   /** Tear down the connection. Idempotent. Returns a resolved promise for ergonomic chaining. */
   close(): Promise<void> {
-    if (!this.closed) {
-      this.closed = true
-      this.failAll(new Error('MCP client closed'))
-
-      const proc = this.proc
-      this.proc = null
-      if (proc) {
-        try {
-          proc.stdin?.end()
-        } catch {
-          // ignore
-        }
-        if (proc.exitCode === null && proc.pid !== undefined) {
+    if (this.closing) return this.closing
+    this.closed = true
+    this.failAll(new Error('MCP client closed'))
+    const proc = this.proc
+    this.proc = null
+    this.closing = !proc || proc.pid === undefined || proc.exitCode !== null || proc.signalCode !== null
+      ? Promise.resolve()
+      : new Promise<void>((resolve, reject) => {
+        let settled = false
+        const terminate = (force: boolean) => {
+          if (!proc.pid) return
           try {
-            proc.kill('SIGTERM')
-          } catch {
-            // ignore
-          }
+            if (process.platform === 'win32') {
+              const killer = spawn('taskkill', ['/pid', String(proc.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
+              killer.on('error', () => { try { proc.kill('SIGKILL') } catch (error) { void error } })
+            } else {
+              process.kill(-proc.pid, force ? 'SIGKILL' : 'SIGTERM')
+            }
+          } catch { try { proc.kill(force ? 'SIGKILL' : 'SIGTERM') } catch (error) { void error } }
         }
-      }
-    }
-    return Promise.resolve()
+        const finish = (error?: Error) => {
+          if (settled) return
+          settled = true
+          clearTimeout(forceTimer)
+          clearTimeout(deadline)
+          proc.removeListener('exit', exited)
+          proc.removeListener('error', errored)
+          if (error) reject(error)
+          else resolve()
+        }
+        const exited = () => finish()
+        const errored = () => finish()
+        const forceTimer = setTimeout(() => terminate(true), 500)
+        const deadline = setTimeout(() => finish(new Error('MCP server shutdown was not confirmed')), 2_000)
+        proc.once('exit', exited)
+        proc.once('error', errored)
+        try { proc.stdin?.end() } catch (error) { void error }
+        terminate(false)
+      })
+    return this.closing
   }
 
   // ── internals ───────────────────────────────────────────────────────────
@@ -278,6 +315,7 @@ export class McpStdioClient {
       const pending = this.pending.get(msg.id)
       if (!pending) return
       clearTimeout(pending.timer)
+      pending.cleanup()
       this.pending.delete(msg.id)
       if (msg.error !== undefined) {
         const e = msg.error as Record<string, unknown>
@@ -301,24 +339,37 @@ export class McpStdioClient {
     this.send(message)
   }
 
-  private request(message: object, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<unknown> {
+  private request(message: object, timeoutMs = DEFAULT_TIMEOUT_MS, signal?: AbortSignal): Promise<unknown> {
     return new Promise((resolve, reject) => {
       if (!this.proc || this.closed) {
         reject(new Error(`MCP server "${this.server.name}": not connected`))
         return
       }
+      if (signal?.aborted) { reject(new Error('MCP request cancelled')); return }
       const id = this.nextId++
+      const abort = () => {
+        const pending = this.pending.get(id)
+        if (!pending) return
+        clearTimeout(pending.timer)
+        pending.cleanup()
+        this.pending.delete(id)
+        reject(new Error('MCP request cancelled'))
+      }
+      const cleanup = () => signal?.removeEventListener('abort', abort)
       const timer = setTimeout(() => {
         if (this.pending.has(id)) {
           this.pending.delete(id)
+          cleanup()
           reject(new Error(`MCP request id=${id} timed out after ${timeoutMs}ms (${this.server.name})`))
         }
       }, timeoutMs)
-      this.pending.set(id, { resolve, reject, timer })
+      this.pending.set(id, { resolve, reject, timer, cleanup })
+      signal?.addEventListener('abort', abort, { once: true })
       try {
         this.send({ jsonrpc: '2.0', id, ...message })
       } catch (err) {
         clearTimeout(timer)
+        cleanup()
         this.pending.delete(id)
         reject(err instanceof Error ? err : new Error('MCP send failed'))
       }
@@ -329,6 +380,7 @@ export class McpStdioClient {
     if (this.closed && this.pending.size === 0) return
     for (const [, p] of this.pending) {
       clearTimeout(p.timer)
+      p.cleanup()
       p.reject(err)
     }
     this.pending.clear()

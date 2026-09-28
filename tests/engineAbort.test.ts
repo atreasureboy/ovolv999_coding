@@ -14,9 +14,10 @@
  * propagation through the fake's recorded AbortSignals.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it , vi  } from 'vitest'
 import { ExecutionEngine } from '../src/core/engine.js'
 import type { EngineConfig, Tool } from '../src/core/types.js'
+import type * as VerificationModule from '../src/core/verification.js'
 
 interface CreateCall {
   params: Record<string, unknown>
@@ -468,4 +469,8 @@ describe('ExecutionEngine — abort() lifecycle', () => {
     engine.abort()
     await t2
   })
+})
+vi.mock('../src/core/verification.js', async importOriginal => {
+  const actual = await importOriginal<typeof VerificationModule>()
+  return { ...actual, captureArtifactVersion: () => Promise.resolve('unchanged-abort-fixture') }
 })

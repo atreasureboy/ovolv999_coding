@@ -13,7 +13,7 @@
  * 5. Multi-iteration turns (tool → text) work end-to-end
  */
 
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { ExecutionEngine } from '../../../core/engine.js'
 import type { EngineConfig, Tool } from '../../../core/types.js'
 import { UIStore } from '../store.js'
@@ -129,8 +129,7 @@ describe('E2E: Engine → InkRenderer → UIStore', () => {
     client.push(textStream('Hello world'))
     const turn = engine.runTurn('hi', [])
 
-    await tick()
-    expect(client.createCalls).toHaveLength(1)
+    await vi.waitFor(() => expect(client.createCalls).toHaveLength(1))
 
     const result = await turn
 

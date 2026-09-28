@@ -86,12 +86,14 @@ export function transitionQueryState(state: QueryState, event: QueryEvent): Quer
       return state
 
     case 'llm_call': {
+      if (event.type === 'continue')
+        return { kind: 'check_abort', iteration: state.iteration + 1 }
       if (event.type === 'hard_abort')
         return { kind: 'complete', reason: 'error', output: event.output }
       if (event.type === 'error')
         return { kind: 'complete', reason: 'error', output: event.output }
       if (event.type === 'llm_done') {
-        const stopped = event.finishReason === 'stop' || !event.hasToolCalls
+        const stopped = !event.hasToolCalls
         if (stopped)
           return { kind: 'continuation_check', iteration: state.iteration, output: event.output }
         return { kind: 'parse_response', iteration: state.iteration }
@@ -101,7 +103,7 @@ export function transitionQueryState(state: QueryState, event: QueryEvent): Quer
 
     case 'continuation_check':
       if (event.type === 'continue')
-        return { kind: 'llm_call', iteration: state.iteration }
+        return { kind: 'check_abort', iteration: state.iteration + 1 }
       if (event.type === 'hard_abort')
         return { kind: 'complete', reason: 'error', output: event.output }
       // 'stop' or any other event → complete

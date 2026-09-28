@@ -37,6 +37,7 @@ import {
   createSessionDir,
 } from '../src/core/sessionManager.js'
 import { computeSafeSplitPoint, serializeMessages } from '../src/core/compact.js'
+import { settleHistory } from '../src/core/messageGroups.js'
 import { SemanticMemory } from '../src/core/semanticMemory.js'
 import { EpisodicMemory, isValidEpisode, MAX_EPISODES } from '../src/core/episodicMemory.js'
 import { EventLog, DEFAULT_EVENTLOG_ROTATE_BYTES } from '../src/core/eventLog.js'
@@ -210,7 +211,7 @@ describe('computeSafeSplitPoint: orphan tool/tool_call prevention (defect #3)', 
     expect(split).toBeLessThanOrEqual(msgs.length)
   })
 
-  it('never returns an index whose message is assistant-with-tool_calls without its results', () => {
+  it('preserves unfinished tool calls and explicitly settles them for recovery', () => {
     const msgs: OpenAIMessage[] = []
     // Pad with non-tool messages
     for (let i = 0; i < 5; i++) msgs.push({ role: 'user', content: `filler ${i} ` + 'x'.repeat(40) })
@@ -227,12 +228,14 @@ describe('computeSafeSplitPoint: orphan tool/tool_call prevention (defect #3)', 
     const split = computeSafeSplitPoint(msgs)
     // Whatever messages[split] is, it must NOT be an assistant whose
     // tool_calls are unmatched inside the recent window.
-    const m = msgs[split]
+    const recovered = settleHistory(msgs.slice(split))
+    const m = recovered[0]
     expect(m).toBeDefined()
+    expect(m.tool_calls?.[0].id).toBe('orphan1')
     if (m && m.role === 'assistant' && m.tool_calls && m.tool_calls.length > 0) {
       const ids = new Set(m.tool_calls.map((tc) => tc.id))
-      for (let j = split + 1; j < msgs.length; j++) {
-        const n = msgs[j]
+      for (let j = 1; j < recovered.length; j++) {
+        const n = recovered[j]
         if (n.role === 'tool' && n.tool_call_id && ids.has(n.tool_call_id)) ids.delete(n.tool_call_id)
         else if (n.role !== 'tool') break
       }
@@ -800,7 +803,7 @@ describe('FileHistory: version cap + SHA-256 path (defect #7)', () => {
     expect(versions).toHaveLength(MAX_VERSIONS_PER_FILE)
   })
 
-  it('the OLDEST backup is unlinked from disk once the cap is exceeded', () => {
+  it('the original baseline survives when the recent version cap is exceeded', () => {
     const dir = freshDir('fh-evict')
     const history = new FileHistory(dir)
     const fp = join(dir, 'src', 'a.ts')
@@ -817,12 +820,10 @@ describe('FileHistory: version cap + SHA-256 path (defect #7)', () => {
       writeFileSync(fp, `v${i}`, 'utf8')
     }
 
-    // The original backup we recorded is no longer on disk — it was
-    // evicted (oldest-first) when the cap was exceeded.
-    expect(existsSync(firstBackupPath)).toBe(false)
+    expect(existsSync(firstBackupPath)).toBe(true)
   })
 
-  it('restoreOriginal points to the OLDEST still-tracked backup (post-eviction)', () => {
+  it('restoreOriginal still points to the original baseline after retention', () => {
     const dir = freshDir('fh-restore-post-evict')
     const history = new FileHistory(dir)
     const fp = join(dir, 'src', 'a.ts')
@@ -832,18 +833,15 @@ describe('FileHistory: version cap + SHA-256 path (defect #7)', () => {
     history.trackEdit(fp)            // v0 captured: "ORIGINAL"
     writeFileSync(fp, 'middle', 'utf8')
 
-    // Generate enough edits that "ORIGINAL" is evicted.
+
     for (let i = 0; i < MAX_VERSIONS_PER_FILE + 2; i++) {
       history.trackEdit(fp)
       writeFileSync(fp, `m_${i}`, 'utf8')
     }
 
-    // Now restoreOriginal must return the OLDEST backup STILL on disk,
-    // which is no longer "ORIGINAL" — it's one of the 'm_X' values.
     expect(history.restoreOriginal(fp)).toBe(true)
     const restored = readFileSync(fp, 'utf8')
-    expect(restored).not.toBe('ORIGINAL')
-    expect(restored.startsWith('m_')).toBe(true)
+    expect(restored).toBe('ORIGINAL')
   })
 
   it('the on-disk backup directory holds at most MAX_VERSIONS_PER_FILE files per file path', () => {

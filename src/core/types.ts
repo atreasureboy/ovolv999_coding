@@ -8,6 +8,8 @@ import type { BackgroundTaskManager } from './backgroundTaskManager.js'
 import type { FileHistory } from './fileHistory.js'
 import type { PermissionManager } from './permissionSystem.js'
 import type { McpServerConfig } from './mcpClient.js'
+import type { FileReadState } from './fileState.js'
+import type { OutcomeStatus, VerificationEvidence } from './outcome.js'
 
 // OpenAI-compatible tool call format
 export interface ToolCall {
@@ -30,7 +32,7 @@ export interface ToolCall {
  * in tests that don't model background work.
  */
 export interface ChildEngineLike {
-  runTurn: (msg: string, history: never[]) => Promise<{ result: { output: string; reason: string } }>
+  runTurn: (msg: string, history: never[]) => Promise<{ result: { output: string; reason: string; status?: OutcomeStatus; verification?: VerificationEvidence } }>
   abort: () => void
   /**
    * Tear down engine-owned side effects (background tasks, transient
@@ -38,7 +40,7 @@ export interface ChildEngineLike {
    * AgentTool invokes this exactly once per child after the child's
    * runTurn resolves/rejects, regardless of outcome.
    */
-  dispose?: () => void
+  dispose?: () => void | Promise<void>
 }
 
 /**
@@ -65,6 +67,7 @@ export interface OpenAIMessage {
   tool_calls?: ToolCall[]
   tool_call_id?: string
   name?: string
+  source?: 'runtime' | 'module' | 'summary'
 }
 
 export interface ToolDefinition {
@@ -83,6 +86,19 @@ export interface ToolDefinition {
 export interface ToolResult {
   content: string
   isError: boolean
+  status?: OutcomeStatus
+  verification?: VerificationEvidence
+  workspace?: WorkspaceBinding
+}
+
+export interface WorkspaceBinding {
+  cwd: string
+  repositoryPath?: string
+  worktreeName?: string
+  baseCommit?: string
+  targetBranch?: string
+  targetCommit?: string
+  branch?: string
 }
 
 export interface ToolMetadata {
@@ -113,7 +129,16 @@ export interface Tool {
 }
 
 export interface ToolContext {
+  verificationExcludedPaths?: readonly string[]
+  workspaceBound?: boolean
   cwd: string
+  workspace?: WorkspaceBinding
+  runId?: string
+  parentRunId?: string
+  runFamilyId?: string
+  fileState?: FileReadState
+  permissionApproved?: boolean
+  requestPermission?: EngineConfig['requestPermission']
   permissionMode: 'auto' | 'ask' | 'deny'
   /** Unified permission manager used by the engine before tool execution. */
   permissionManager?: PermissionManager
@@ -243,11 +268,19 @@ export interface IHookRunner {
 }
 
 export interface EngineConfig {
+  verificationExcludedPaths?: readonly string[]
   model: string
   baseURL?: string
   apiKey: string
   maxIterations: number
   cwd: string
+  workspace?: WorkspaceBinding
+  parentRunId?: string
+  runFamilyId?: string
+  parentSignal?: AbortSignal
+  maxToolConcurrency?: number
+  cancellationGraceMs?: number
+  toolTimeoutMs?: number
   permissionMode: 'auto' | 'ask' | 'deny'
   /** Unified permission manager; if omitted the engine creates one from permissionMode. */
   permissionManager?: PermissionManager
@@ -355,6 +388,10 @@ export interface EngineConfig {
 
 export interface TurnResult {
   stopped: boolean
+  status?: OutcomeStatus
+  verification?: VerificationEvidence
+  runId?: string
+  unfinishedResources?: string[]
   /**
    * stop_sequence  — LLM returned finish_reason=stop with no tool calls
    * max_iterations — hit maxIterations ceiling

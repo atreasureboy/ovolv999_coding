@@ -125,9 +125,9 @@ describe('transitionQueryState — llm_call', () => {
 describe('transitionQueryState — continuation_check', () => {
   const state: QueryState = { kind: 'continuation_check', iteration: 2, output: 'result' }
 
-  it('continue → llm_call (same iteration, for nudge re-entry)', () => {
+  it('continue rechecks abort and budget with a bounded iteration', () => {
     const next = transitionQueryState(state, { type: 'continue' })
-    expect(next).toEqual({ kind: 'llm_call', iteration: 2 })
+    expect(next).toEqual({ kind: 'check_abort', iteration: 3 })
   })
 
   it('stop → complete(stop_sequence) with preserved output', () => {

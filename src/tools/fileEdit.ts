@@ -1,3 +1,4 @@
+import { resolve } from 'path'
 /**
  * FileEditTool — exact string replacement in files
  * Reference: src/tools/FileEditTool/
@@ -9,11 +10,15 @@
 import { readFile } from 'fs/promises'
 import { existsSync } from 'fs'
 import { dirname } from 'path'
-import { execFileSync } from 'child_process'
+import { createRequire } from 'module'
+import { runFileVerificationCommand } from '../core/verification.js'
+import { readFileSync } from 'fs'
+import { join } from 'path'
 import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/types.js'
 import { EDIT_FILE_DESCRIPTION } from '../prompts/tools.js'
-import { hasFileBeenRead, hasFileChanged, markFileRead } from '../core/fileState.js'
+import { getFileState } from '../core/fileState.js'
 import { atomicWrite, statSafely } from '../core/atomicWrite.js'
+import { resolveWorkspacePath } from '../core/workspacePath.js'
 
 export interface EditFileInput {
   file_path: string
@@ -68,11 +73,15 @@ export class FileEditTool implements Tool {
   }
 
   async execute(input: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
-    const { file_path, old_string, new_string, replace_all } = input as unknown as EditFileInput
+    const { file_path: rawPath, old_string, new_string, replace_all } = input as unknown as EditFileInput
 
-    if (!file_path || typeof file_path !== 'string') {
+    const fileState = getFileState(context)
+    if (!rawPath || typeof rawPath !== 'string') {
       return { content: 'Error: file_path is required', isError: true }
     }
+    let file_path: string
+    try { file_path = resolveWorkspacePath(context, rawPath) }
+    catch (error) { return { content: `Error: ${(error as Error).message}`, isError: true } }
     if (typeof old_string !== 'string') {
       return { content: 'Error: old_string must be a string', isError: true }
     }
@@ -102,7 +111,7 @@ export class FileEditTool implements Tool {
     }
 
     // Enforce read-before-edit (like Claude Code — prevents blind edits)
-    if (existsSync(file_path) && !hasFileBeenRead(file_path)) {
+    if (existsSync(file_path) && !fileState.hasFileBeenRead(file_path)) {
       return {
         content: `Error: You must Read ${file_path} before editing it. Use the Read tool first to see the current contents.`,
         isError: true,
@@ -117,7 +126,7 @@ export class FileEditTool implements Tool {
       // which guard (if any) catches the change, and what the cost of
       // closing it would be.
       //
-      //   A. before our read          → hasFileChanged(file_path, content)
+      //   A. before our read          → fileState.hasFileChanged(file_path, content)
       //                                  (uses cache hash; catches same-
       //                                   mtime/same-size swaps that the
       //                                   pre-read mtime+size check misses)
@@ -143,13 +152,13 @@ export class FileEditTool implements Tool {
 
       // Stale-content guard (window A) — placed AFTER readFile so we can
       // pass the just-read content to hasFileChanged and exercise the
-      // SHA-256 hash layer. A pre-read hasFileChanged() (mtime+size only)
+      // SHA-256 hash layer. A pre-read fileState.hasFileChanged() (mtime+size only)
       // cannot detect a same-mtime / same-size replacement, so the guard
       // used to miss that case for swaps that happened between the prior
       // user-Read and Edit. The cost of moving the guard past the read is
       // one read for stale files, which is acceptable — Edit was about
       // to read anyway.
-      if (hasFileChanged(file_path, content)) {
+      if (fileState.hasFileChanged(file_path, content)) {
         return {
           content:
             `Error: ${file_path} has been modified since you last read it ` +
@@ -219,7 +228,9 @@ export class FileEditTool implements Tool {
       // then atomically replace. trackEdit is intentionally placed AFTER
       // the guards so a refused edit doesn't create a phantom history
       // version of content we never actually changed.
-      context.fileHistory?.trackEdit(file_path)
+      const backup = context.fileHistory?.trackEdit(file_path)
+      if (backup?.status === 'failed') return { content: `Backup failed; file was not changed: ${backup.error}`, isError: true }
+      context.signal?.throwIfAborted()
 
       // Atomic write — see src/core/atomicWrite.ts.
       await atomicWrite(file_path, newContent)
@@ -228,7 +239,7 @@ export class FileEditTool implements Tool {
       // new content as the cached baseline. Pass `newContent` so the hash
       // layer can detect same-mtime/same-size replacements on the next
       // Write/Edit without re-reading.
-      markFileRead(file_path, newContent)
+      fileState.markFileRead(file_path, newContent)
 
       // Auto-format: detect prettier/eslint config in project and run after edit
       // Walk up from file's directory to find project root (where config files live)
@@ -245,32 +256,20 @@ export class FileEditTool implements Tool {
       }
       let formatNote = ''
       try {
-        // SECURITY: never use execSync with a string command — the file_path
-        // (which is untrusted input from the LLM) would otherwise be
-        // interpreted by the shell, allowing arbitrary command injection
-        // (e.g. file_path = 'x; rm -rf ~'). execFileSync with an args
-        // array bypasses the shell entirely: every argument is passed
-        // verbatim as a single argv element to the target executable.
-        // Capture stdout/stderr so a formatter warning doesn't pollute
-        // the tool's stdout — we only care whether it succeeded.
-        if (existsSync(`${projectRoot}/.prettierrc`) || existsSync(`${projectRoot}/.prettierrc.js`) || existsSync(`${projectRoot}/prettier.config.js`)) {
-          execFileSync('npx', ['prettier', '--write', file_path], {
-            cwd: projectRoot,
-            encoding: 'utf8',
-            timeout: 10_000,
-            stdio: ['ignore', 'pipe', 'pipe'],
-          })
-          formatNote = ' (formatted with prettier)'
-        } else if (existsSync(`${projectRoot}/.eslintrc`) || existsSync(`${projectRoot}/.eslintrc.js`) || existsSync(`${projectRoot}/eslint.config.js`)) {
-          execFileSync('npx', ['eslint', '--fix', file_path], {
-            cwd: projectRoot,
-            encoding: 'utf8',
-            timeout: 10_000,
-            stdio: ['ignore', 'pipe', 'pipe'],
-          })
-          formatNote = ' (fixed with eslint)'
+        const formatter = existsSync(join(projectRoot, '.prettierrc')) || existsSync(join(projectRoot, '.prettierrc.js')) || existsSync(join(projectRoot, 'prettier.config.js')) ? 'prettier'
+          : existsSync(join(projectRoot, '.eslintrc')) || existsSync(join(projectRoot, '.eslintrc.js')) || existsSync(join(projectRoot, 'eslint.config.js')) ? 'eslint' : undefined
+        if (formatter) {
+          const require = createRequire(join(projectRoot, 'package.json'))
+          const manifestPath = require.resolve(formatter + '/package.json')
+          const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { bin: string | Record<string, string> }
+          const bin = typeof manifest.bin === 'string' ? manifest.bin : manifest.bin[formatter]
+          if (bin) {
+            const formatted = await runFileVerificationCommand(process.execPath, [resolve(dirname(manifestPath), bin), formatter === 'prettier' ? '--write' : '--fix', file_path], projectRoot, context.signal, 10_000)
+            if (formatted.passed) formatNote = ' (formatted with ' + formatter + ')'
+          }
         }
-      } catch { /* best-effort format — don't fail the edit */ }
+      } catch (error) { void error }
+      context.signal?.throwIfAborted()
 
       // If a formatter ran in-place above, the file content may now differ
       // from `newContent`. Re-mark with the post-format content so the cache
@@ -280,7 +279,7 @@ export class FileEditTool implements Tool {
       if (formatNote !== '') {
         try {
           const postFormatContent = await readFile(file_path, 'utf8')
-          markFileRead(file_path, postFormatContent)
+          fileState.markFileRead(file_path, postFormatContent)
         } catch { /* leave the prior hash in place */ }
       }
 

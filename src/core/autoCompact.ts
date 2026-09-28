@@ -1,3 +1,4 @@
+import { safeHistoryStart } from './messageGroups.js'
 /**
  * Auto-Compact Guard
  *
@@ -186,9 +187,9 @@ export function planCompaction(
   messages: OpenAIMessage[],
   config: CompactConfig = DEFAULT_COMPACT_CONFIG,
 ): CompactPlan {
-  const keepCount = Math.min(config.keepRecent, messages.length)
-  const toKeep = messages.slice(-keepCount)
-  const toSummarize = messages.length > keepCount ? messages.slice(0, -keepCount) : []
+  const start = safeHistoryStart(messages, config.keepRecent)
+  const toKeep = messages.slice(start)
+  const toSummarize = messages.slice(0, start)
 
   const compactedTokens = estimateTokens(toSummarize)
   const keptTokens = estimateTokens(toKeep)
@@ -214,14 +215,6 @@ const STAGE_ICONS: Record<CompactStage, string> = {
   warning: '⚠',
   critical: '⚠!',
   compact: '✗',
-}
-
-const STAGE_COLORS: Record<CompactStage, string> = {
-  safe: 'green',
-  caution: 'yellow',
-  warning: 'yellow',
-  critical: 'red',
-  compact: 'red',
 }
 
 export function formatContextBar(

@@ -14,7 +14,7 @@ import type { AgentModule, ModuleBootResult, ModuleRunContext } from '../core/mo
 import type { SemanticMemory } from '../core/semanticMemory.js'
 import type { EpisodicMemory } from '../core/episodicMemory.js'
 
-const REFLECTION_SYSTEM_PROMPT = `You are a reflection engine. Analyze the completed agent run and extract reusable knowledge.
+const REFLECTION_SYSTEM_PROMPT = `You are a reflection engine. Analyze the agent run with its recorded outcome and verification status and extract reusable knowledge.
 
 Output JSON with this structure:
 {
@@ -30,6 +30,7 @@ Output JSON with this structure:
 
 Rules:
 - Extract only genuinely reusable insights (not run-specific details)
+- Preserve failures, incomplete outcomes and verification limits; never infer success from an assistant claim
 - Max 3 knowledge entries per run
 - Confidence 0.5-0.9 (be honest about uncertainty)
 - If nothing worth remembering, return {"knowledge": []}
@@ -52,47 +53,59 @@ export class ReflectionModule implements AgentModule {
     return {}
   }
 
+  onModelChange(model: string): void {
+    this.model = model
+  }
+
   async onComplete(ctx: ModuleRunContext): Promise<void> {
     if (this.config.poor?.enabled) return
     // Skip if the run was too short to yield useful insights
     const toolCallCount = ctx.messages.filter(m => m.role === 'tool').length
     if (toolCallCount < 3) return
 
-    // Skip if the run ended in error
-    if (ctx.turnResult.reason === 'error') return
+    if (ctx.abortSignal?.aborted) return
+    const outcome = ctx.turnResult.status ?? (ctx.turnResult.reason === 'error' ? 'failed' : 'unknown')
+    const verification = ctx.turnResult.verification?.status ?? 'not_run'
 
     try {
       const conversationSummary = this.serializeForReflection(ctx.messages)
 
       const response = await this.client.chat.completions.create({
-        model: this.model,
+        model: ctx.model ?? this.model,
         messages: [
           { role: 'system', content: REFLECTION_SYSTEM_PROMPT },
           {
             role: 'user',
-            content: `Analyze this agent run (outcome: ${ctx.turnResult.reason}):\n\n${conversationSummary}`,
+            content: `Analyze this agent run (outcome: ${outcome}; verification: ${verification}):\n\n${conversationSummary}`,
           },
         ],
         temperature: 0,
         max_tokens: REFLECTION_MAX_TOKENS,
-      }, { timeout: 30_000 })
+      }, { timeout: 30_000, signal: ctx.abortSignal, maxRetries: 0 })
 
       const output = response.choices[0]?.message?.content ?? ''
       const parsed = parseReflection(output)
 
+      ctx.abortSignal?.throwIfAborted()
+      let persisted = 0
       for (const entry of parsed) {
-        this.semantic.write({
-          content: entry.content,
+        const result = this.semantic.write({
+          content: `[run ${outcome}; verification ${verification}] ${entry.content}`,
+          provenance: { status: 'unverified', claimedSource: 'agent_inferred', outcome, verification },
           tags: entry.tags,
           source: 'agent_inferred',
           confidence: entry.confidence,
           timestamp: new Date().toISOString(),
         })
+        if (result.persistence === 'persisted') persisted++
       }
 
       if (parsed.length > 0) {
         ctx.eventLog?.append('memory_write', 'reflection', {
-          entries: parsed.length,
+          entries: persisted,
+          failedEntries: parsed.length - persisted,
+          outcome,
+          verification,
           module: 'reflection',
         })
       }
@@ -136,11 +149,12 @@ function parseReflection(output: string): Array<{
       }>
     }
     return (parsed.knowledge ?? [])
-      .filter(e => e.content && e.content.length > 10)
+      .filter(e => typeof e.content === 'string' && e.content.length > 10)
+      .slice(0, 3)
       .map(e => ({
         content: e.content.slice(0, 500),
-        tags: e.tags ?? [],
-        confidence: typeof e.confidence === 'number' ? e.confidence : 0.5,
+        tags: Array.isArray(e.tags) ? e.tags.filter(tag => typeof tag === 'string') : [],
+        confidence: typeof e.confidence === 'number' && Number.isFinite(e.confidence) ? Math.min(0.9, Math.max(0.5, e.confidence)) : 0.5,
       }))
   } catch {
     return []
@@ -162,8 +176,9 @@ export async function consolidateSession(
   episodic: EpisodicMemory,
   semantic: SemanticMemory,
   poor?: { enabled: boolean },
+  signal?: AbortSignal,
 ): Promise<{ episodes: number; knowledgeExtracted: number }> {
-  if (poor?.enabled) {
+  if (poor?.enabled || signal?.aborted) {
     return { episodes: 0, knowledgeExtracted: 0 }
   }
   const episodes = episodic.recent(100)
@@ -188,22 +203,27 @@ export async function consolidateSession(
       ],
       temperature: 0,
       max_tokens: REFLECTION_MAX_TOKENS,
-    }, { timeout: 30_000 })
+    }, { timeout: 30_000, signal, maxRetries: 0 })
 
-      const output = response.choices[0]?.message?.content ?? ''
-      const parsed = parseReflection(output)
+    const output = response.choices[0]?.message?.content ?? ''
+    const parsed = parseReflection(output)
 
-      for (const entry of parsed) {
-      semantic.write({
-        content: `[session] ${entry.content}`,
+    signal?.throwIfAborted()
+    let persisted = 0
+    const outcome = episodes.some(episode => episode.outcome !== 'success') ? 'contains_failures_or_incomplete_actions' : 'tool_successes_only'
+    for (const entry of parsed) {
+      const result = semantic.write({
+        content: `[session ${outcome}; verification not_run] ${entry.content}`,
+        provenance: { status: 'unverified', claimedSource: 'consolidation', outcome, verification: 'not_run' },
         tags: entry.tags,
         source: 'consolidation',
         confidence: entry.confidence,
         timestamp: new Date().toISOString(),
       })
+      if (result.persistence === 'persisted') persisted++
     }
 
-    return { episodes: episodes.length, knowledgeExtracted: parsed.length }
+    return { episodes: episodes.length, knowledgeExtracted: persisted }
   } catch {
     return { episodes: episodes.length, knowledgeExtracted: 0 }
   }

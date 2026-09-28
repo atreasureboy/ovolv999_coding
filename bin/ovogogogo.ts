@@ -64,6 +64,10 @@ import type { InkRenderer } from '../src/ui/ink/inkRenderer.js'
 import { InputHandler, readStdin, type SharedPrompt } from '../src/ui/input.js'
 import { SlashSuggester } from '../src/ui/slashSuggest.js'
 import { runWithDeadline } from '../src/ui/turnDeadline.js'
+import { normalizeOutcome, outcomeExitCode, settleWithin } from '../src/core/outcome.js'
+import type { OutcomeStatus, VerificationEvidence } from '../src/core/outcome.js'
+import { resolveContextWindow } from '../src/core/compact.js'
+import { recordBackgroundOutcome } from '../src/core/backgroundSession.js'
 import { trimHistoryForNextTurn } from '../src/ui/historyTrimmer.js'
 import type { EngineConfig, OpenAIMessage } from '../src/core/types.js'
 import { getProjectSettingsPath, loadSettings, saveProjectSettings } from '../src/config/settings.js'
@@ -90,7 +94,7 @@ import { createTerminalAskUserHandler } from '../src/tools/askUser.js'
 import { dispatchSlashCommand, listCommands, type SlashCommandContext } from '../src/commands/index.js'
 import '../src/commands/builtin.js' // register all built-in commands
 import { tmuxLayout } from '../src/ui/tmuxLayout.js'
-import { PermissionManager } from '../src/core/permissionSystem.js'
+import { PermissionManager, type PermissionMode, type PermissionRule } from '../src/core/permissionSystem.js'
 import {
   AmbiguousSessionError,
   SessionNotFoundError,
@@ -134,6 +138,13 @@ let saveOnExit: (() => void) | null = null
  * Prevents the CLI from hanging indefinitely on a stuck turn.
  */
 const HARD_TURN_DEADLINE_MS = 10 * 60 * 1000  // 10 minutes
+
+export function createCliPermissionManager(permissions: { mode?: PermissionMode; rules?: PermissionRule[] } | undefined, permissionMode?: EngineConfig['permissionMode']): PermissionManager {
+  const manager = new PermissionManager()
+  manager.setMode(permissions?.mode ?? (permissionMode === 'auto' ? 'bypassPermissions' : 'default'))
+  for (const rule of permissions?.rules ?? []) manager.addRule(rule)
+  return manager
+}
 
 // ─────────────────────────────────────────────────────────────
 // Arg parsing
@@ -411,12 +422,14 @@ function parseArgs(argv: string[]): Args {
         case '--ink': ink = true; break
         case '--pipe': pipe = true; break
         case '--bg': bg = true; break
-        case '--format':
-          pipeFormat = requireValue(arg, args[++i]) as 'text' | 'json'
-          if (pipeFormat !== 'text' && pipeFormat !== 'json') {
-            throw new ArgError(`Error: --format must be "text" or "json" (got "${pipeFormat}")`)
+        case '--format': {
+          const format = requireValue(arg, args[++i])
+          if (format !== 'text' && format !== 'json') {
+            throw new ArgError(`Error: --format must be "text" or "json" (got "${format}")`)
           }
+          pipeFormat = format
           break
+        }
         default:
           if (!arg.startsWith('-')) task = task ? task + ' ' + arg : arg
       }
@@ -649,6 +662,7 @@ async function runRepl(
   consolidate?: { config: EngineConfig; semanticMemory: SemanticMemory; episodicMemory: EpisodicMemory },
   sessionDir?: string,
   resumedHistory?: OpenAIMessage[],
+  signal?: AbortSignal,
 ): Promise<void> {
   const history: OpenAIMessage[] = resumedHistory ? [...resumedHistory] : []
 
@@ -849,7 +863,15 @@ async function runRepl(
             // observer of the underlying task — it surfaces the
             // original task's value via `dl.taskSettled.value`
             // (e.g. partial `newHistory`) for any cleanup work.
-            const settled = await dl.taskSettled
+            const settled = await settleWithin(dl.taskSettled, 3000).catch((error: unknown) => {
+              renderer.error((error as Error).message)
+              return undefined
+            })
+            if (!settled) {
+              await settleWithin(Promise.resolve(engine.dispose()), 3000).catch(() => {})
+              process.exitCode = 2
+              break
+            }
             if (settled.status === 'fulfilled' && settled.value) {
               history.length = 0
               history.push(...trimHistoryForNextTurn(settled.value.newHistory))
@@ -1111,12 +1133,11 @@ async function runRepl(
   if (consolidate) {
     try {
       renderer.info('Consolidating memory...')
-      const OpenAI = (await import('openai')).default
-      const client = new OpenAI({ apiKey: consolidate.config.apiKey, baseURL: consolidate.config.baseURL })
       const result = await consolidateSession(
-        client, consolidate.config.model,
+        engine.getModelClient(), engine.getModel(),
         consolidate.episodicMemory, consolidate.semanticMemory,
         consolidate.config.poor,
+        signal,
       )
       if (result.knowledgeExtracted > 0) {
         renderer.info(`Memory consolidated: ${result.knowledgeExtracted} entries from ${result.episodes} episodes`)
@@ -1135,7 +1156,7 @@ async function runRepl(
   activePrompt = null
   saveOnExit = null
   try { input.close() } catch { /* best-effort */ }
-  process.exit(0)
+  return
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1148,7 +1169,7 @@ async function runRepl(
 // history.json and `--continue` / `--resume` couldn't see it.
 // ─────────────────────────────────────────────────────────────
 
-async function runSingleTask(
+export async function runSingleTask(
   engine: ExecutionEngine,
   renderer: Renderer,
   task: string,
@@ -1156,79 +1177,53 @@ async function runSingleTask(
   historyRef: OpenAIMessage[],
   sessionDir: string | undefined,
   resumedHistory?: OpenAIMessage[],
-): Promise<void> {
+  options: { deadlineMs?: number; finalizationMs?: number } = {},
+): Promise<OutcomeStatus> {
   renderer.humanPrompt(task)
   updateProgressLog(cwd, 'running', task.slice(0, 100))
-
   const startMs = Date.now()
-  let result: { reason: string; output: string }
+  let status: OutcomeStatus
+  let verification: VerificationEvidence | undefined
   let deadlineExceeded = false
-  const dl = runWithDeadline(
-    () => engine.runTurn(task, resumedHistory ?? historyRef),
-    {
-      deadlineMs: HARD_TURN_DEADLINE_MS,
-      onDeadline: () => {
-        deadlineExceeded = true
-        engine.abort()
-      },
-    },
-  )
+  const finalizationMs = options.finalizationMs ?? 3000
+  const saveHistory = (messages: OpenAIMessage[] | undefined): void => {
+    if (Array.isArray(messages)) {
+      const trimmed = trimHistoryForNextTurn(messages)
+      historyRef.length = 0
+      historyRef.push(...trimmed)
+    }
+    if (sessionDir && historyRef.length) {
+      try { saveSession(sessionDir, historyRef) } catch (error) { renderer.warn('Could not persist session: ' + (error as Error).message) }
+    }
+  }
+  const dl = runWithDeadline(() => engine.runTurn(task, resumedHistory ?? historyRef), {
+    deadlineMs: options.deadlineMs ?? HARD_TURN_DEADLINE_MS,
+    onDeadline: () => { deadlineExceeded = true; engine.abort() },
+  })
   try {
     const out = await dl.promise
-    result = out.result
-    // CRITICAL: take the engine's `newHistory`, trim it for next-turn
-    // budget, and write it back into the caller's `historyRef` so the
-    // /continue and /resume flows see THIS turn. The previous
-    // implementation discarded `out.newHistory` and saved the
-    // pre-turn snapshot, meaning `echo "x" | ovogogogo` and
-    // `ovogogogo "..."` never persisted the response and the user
-    // could not resume.
-    if (Array.isArray(out.newHistory)) {
-      const trimmed = trimHistoryForNextTurn(out.newHistory)
-      historyRef.length = 0
-      historyRef.push(...trimmed)
+    status = normalizeOutcome(out.result)
+    verification = out.result.verification
+    saveHistory(out.newHistory)
+  } catch (error) {
+    status = deadlineExceeded ? 'limit_reached' : (error as Error).name === 'AbortError' ? 'cancelled' : 'failed'
+    renderer.error((error as Error).message)
+    try {
+      const settled = await settleWithin(dl.taskSettled, finalizationMs)
+      saveHistory(settled.status === 'fulfilled' ? settled.value.newHistory : undefined)
+    } catch (finalizationError) {
+      status = 'blocked'
+      renderer.error((finalizationError as Error).message)
+      await settleWithin(Promise.resolve().then(() => engine.dispose()), finalizationMs).catch((cleanupError: unknown) => renderer.error((cleanupError as Error).message))
     }
-  } catch (err: unknown) {
-    const error = err as Error
-    if (deadlineExceeded) {
-      renderer.warn(`Turn hit the ${HARD_TURN_DEADLINE_MS / 1000}s hard deadline.`)
-    } else if (error.name !== 'AbortError') {
-      renderer.error(`Error: ${error.message}`)
-    }
-    // Even on error/deadline, the engine may have appended messages
-    // before bailing. Trim whatever is in `out.newHistory` (if
-    // available via the underlying task's settled state — see
-    // dl.taskSettled) and update historyRef so the partial turn
-    // survives a --continue.
-    const partialNewHistory = await dl.taskSettled
-      .then((v) => (v.status === 'fulfilled' ? v.value?.newHistory : undefined))
-      .catch(() => undefined)
-    if (Array.isArray(partialNewHistory)) {
-      const trimmed = trimHistoryForNextTurn(partialNewHistory)
-      historyRef.length = 0
-      historyRef.push(...trimmed)
-    }
-    if (sessionDir && historyRef.length > 0) {
-      try { saveSession(sessionDir, historyRef) } catch { /* best-effort */ }
-    }
-    updateProgressLog(cwd, 'complete', 'done')
-    return
   } finally {
     dl.clear()
   }
-
-  const elapsed = ((Date.now() - startMs) / 1000).toFixed(1)
-  renderer.info(`Done in ${elapsed}s · ${result.reason}`)
-
-  // Persist the final history so --continue / --resume can pick it up.
-  // saveOnExit (set by main() for single-shot mode) covers most cases,
-  // but we save here too — the engine may have appended messages after
-  // the last runTask check, and a deterministic save on success is
-  // easier to reason about than relying on the exit handler.
-  if (sessionDir && historyRef.length > 0) {
-    try { saveSession(sessionDir, historyRef) } catch { /* best-effort */ }
-  }
-  updateProgressLog(cwd, 'complete', 'done')
+  process.exitCode = outcomeExitCode(status)
+  recordBackgroundOutcome(status, verification)
+  updateProgressLog(cwd, status, status === 'completed' ? 'accepted' : 'Review the retained task history and artifacts')
+  renderer.info(status + ' in ' + ((Date.now() - startMs) / 1000).toFixed(1) + 's')
+  return status
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1524,14 +1519,8 @@ async function main(): Promise<void> {
     }
   }
 
-  const permissionManager = new PermissionManager()
-  permissionManager.setMode(settings.permissions?.mode ?? (ink ? 'default' : 'bypassPermissions'))
-  for (const rule of settings.permissions?.rules ?? []) {
-    permissionManager.addRule(rule)
-  }
-  if (settings.permissions?.mode || (settings.permissions?.rules?.length ?? 0) > 0) {
-    renderer.info(`Permissions: ${permissionManager.formatMode()}`)
-  }
+  const permissionManager = createCliPermissionManager(settings.permissions, projectConfig?.permissionMode)
+  renderer.info(`Permissions: ${permissionManager.formatMode()}`)
 
   // Create per-session output directory (or reuse existing for --continue/--resume)
   let sessionDir: string
@@ -1620,7 +1609,7 @@ async function main(): Promise<void> {
 
   const maxCtxTokens = process.env.OVOGO_MAX_CONTEXT_TOKENS
     ? parseInt(process.env.OVOGO_MAX_CONTEXT_TOKENS, 10)
-    : 200_000 // default: claude-sonnet-4-x 200k; DeepSeek: set to 64000 or 128000
+    : undefined
 
   // Create load_skill tool bound to the loaded skills map
   const loadSkillTool = createLoadSkillTool(skills)
@@ -1696,18 +1685,13 @@ async function main(): Promise<void> {
       },
       writeOut: (s) => process.stdout.write(s),
     }),
-    exitPlanMode: async (plan: string): Promise<boolean> => {
+    exitPlanMode: uiStore || (process.stdin.isTTY && process.stdout.isTTY) ? async (plan: string): Promise<boolean> => {
       // Ink UI mode: show plan approval overlay
       if (uiStore) {
         return uiStore.showPlanApproval(plan)
       }
-      // Non-TTY (pipe mode, sub-agent, before REPL has wired its readline):
-      // auto-approve. This is the explicit, documented contract — we do NOT
-      // wait for stdin to produce a "y" because nobody is typing.
       if (!activePrompt || !activePrompt.isTTY) {
-        process.stdout.write('\n\x1b[95m❯❯ Plan (auto-approved in non-interactive mode):\x1b[0m\n')
-        process.stdout.write(plan + '\n')
-        return true
+        throw new Error('Plan approval is unavailable; an interactive approval channel is required.')
       }
       // Interactive: use the REPL's readline, not a second readline.
       process.stdout.write('\n\x1b[95m❯❯ Plan:\x1b[0m\n')
@@ -1720,7 +1704,7 @@ async function main(): Promise<void> {
         return false
       }
       return answer.trim().toLowerCase().startsWith('y')
-    },
+    } : undefined,
     requestPermission: uiStore
       ? async (toolName, input, riskLevel) => {
           const preview = toolName === 'Bash' && typeof input.command === 'string'
@@ -1768,25 +1752,44 @@ async function main(): Promise<void> {
   // outlives a turn (or the whole CLI) does not leak. We now call
   // `engine.dispose()` directly. It is documented as idempotent and
   // never-throws.
-  let cleanedUp = false
-  const cleanup = (): void => {
-    if (cleanedUp) return
-    cleanedUp = true
-    try { saveOnExit?.() } catch { /* best-effort */ }
-    try { engine.dispose() } catch { /* best-effort — never let cleanup throw */ }
-    try { tmuxLayout.destroy() } catch { /* best-effort */ }
-    // Display cost summary if any API calls were made
-    try {
-      const costTracker = engine.getCostTracker()
-      if (costTracker.getTotalAPICalls() > 0) {
-        process.stdout.write('\n' + costTracker.formatSummary() + '\n')
+  let cleanupPromise: Promise<void> | undefined
+  const lifecycleController = new AbortController()
+  const cleanup = (): Promise<void> => {
+    if (cleanupPromise) return cleanupPromise
+    cleanupPromise = (async () => {
+      try { saveOnExit?.() } catch (error) { renderer.warn('Session cleanup: ' + (error as Error).message) }
+      try {
+        await settleWithin(Promise.resolve().then(() => engine.dispose()), 3000)
+      } catch (error) {
+        process.exitCode = 2
+        updateProgressLog(cwd, 'blocked', 'Cleanup did not finish; resources need attention')
+        recordBackgroundOutcome('blocked')
+        renderer.error('Unfinished resources during cleanup: ' + (error as Error).message)
+      } finally {
+        try { tmuxLayout.destroy() } catch (error) { renderer.warn(`Terminal cleanup: ${(error as Error).message}`) }
       }
-    } catch { /* best-effort */ }
+      const costTracker = engine.getCostTracker()
+      if (costTracker.getTotalAPICalls() > 0) process.stdout.write('\n' + costTracker.formatSummary() + '\n')
+    })()
+    return cleanupPromise
   }
-  process.on('exit', cleanup)
-  process.on('SIGTERM', () => { cleanup(); process.exit(0) })
-  process.on('SIGHUP',  () => { cleanup(); process.exit(0) })
+  const saveAtExit = (): void => {
+    try { saveOnExit?.() } catch (error) { process.stderr.write(`Session persistence failed: ${(error as Error).message}\n`) }
+  }
+  const terminate = (): void => {
+    lifecycleController.abort()
+    engine.abort()
+    process.exitCode = 130
+    updateProgressLog(cwd, 'cancelled', 'Termination requested; waiting for cleanup')
+    recordBackgroundOutcome('cancelled')
+    void cleanup().finally(() => process.exit(Number(process.exitCode) || 130))
+  }
+  process.on('exit', saveAtExit)
+  process.on('SIGTERM', terminate)
+  process.on('SIGHUP', terminate)
+  if (loop || task || !process.stdin.isTTY) process.on('SIGINT', terminate)
 
+  try {
   // Wire saveOnExit for non-REPL modes so cleanup() persists the
   // session on every exit path. The REPL wires its own (history-mutating)
   // version; for pipe/loop/single-shot we save the static history we
@@ -1815,11 +1818,16 @@ async function main(): Promise<void> {
   if (loop) {
     const { runLoop } = await import('../src/core/loopEngine.js')
     renderer.info('Loop mode activated — reading .loop/ configuration')
-    await runLoop(engine, renderer, {
+    const outcome = await runLoop(engine, renderer, {
       cwd,
       loopDir: join(cwd, '.loop'),
       maxIters: loopMaxIters,
+      signal: lifecycleController.signal,
+      sessionDir,
     })
+    process.exitCode = outcomeExitCode(outcome.status)
+    recordBackgroundOutcome(outcome.status, outcome.verification)
+    updateProgressLog(cwd, outcome.status, outcome.verification.output.slice(0, 100))
     return
   }
 
@@ -1844,14 +1852,21 @@ async function main(): Promise<void> {
       cwd,
       sessionDir,
       resumedHistory,
-      maxContextTokens: maxCtxTokens,
+      maxContextTokens: resolveContextWindow(config.model, config.maxContextTokens),
     })
     return
   }
 
   await runRepl(engine, planConfig, renderer, cwd, skills, hookRunner, {
     config, semanticMemory, episodicMemory,
-  }, sessionDir, resumedHistory)
+  }, sessionDir, resumedHistory, lifecycleController.signal)
+  } finally {
+    await cleanup()
+    process.off('exit', saveAtExit)
+    process.off('SIGTERM', terminate)
+    process.off('SIGHUP', terminate)
+    process.off('SIGINT', terminate)
+  }
 }
 
 /**

@@ -1,15 +1,21 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from 'vitest'
 import { join } from 'path'
-import { mkdtempSync } from 'fs'
+import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 
 // Set HOME to a temp dir before importing the module under test,
 // so history is written to a sandboxed location.
 const tmpDir = mkdtempSync(join(tmpdir(), 'ovolv999-hist-'))
-process.env.HOME = tmpDir
+vi.stubEnv('HOME', tmpDir)
+vi.stubEnv('USERPROFILE', tmpDir)
 
 const { loadInputHistory, saveInputHistory, clearInputHistory, getHistoryFilePath } =
   await import('../../../utils/inputHistory.js')
+
+afterAll(() => {
+  vi.unstubAllEnvs()
+  rmSync(tmpDir, { recursive: true, force: true })
+})
 
 describe('inputHistory', () => {
   beforeEach(() => {

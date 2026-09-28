@@ -57,7 +57,7 @@ The user can approve the plan as-is, or ask you to revise. Once approved, you'll
   }
 
   isConcurrencySafe(): boolean {
-    return true
+    return false
   }
 
   async execute(input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
@@ -69,8 +69,9 @@ The user can approve the plan as-is, or ask you to revise. Once approved, you'll
     // No callback — sub-agent or piped mode: auto-approve
     if (!ctx.exitPlanMode) {
       return {
-        content: 'Plan mode exited (auto-approved in non-interactive mode). You can now proceed with implementation.\n\n## Plan:\n' + plan,
-        isError: false,
+        content: 'Plan approval requires an interactive approval channel. Plan mode remains active.',
+        isError: true,
+        status: 'needs_input',
       }
     }
 

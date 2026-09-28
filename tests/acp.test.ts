@@ -1,5 +1,8 @@
 import { describe, it, expect, vi } from 'vitest'
 import { Writable, Readable } from 'stream'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
 import {
   ACPServer,
   parseMessage,
@@ -303,16 +306,22 @@ describe('ACPServer: interrupt', () => {
 
 describe('ACPServer: file/read', () => {
   it('reads from filesystem by default', async () => {
-    const { server, output } = createServer({}, '/tmp')
-    await server.handleMessage({ jsonrpc: '2.0', id: 0, method: 'initialize' })
-    output.length = 0
-
-    await server.handleMessage({
-      jsonrpc: '2.0', id: 1, method: 'file/read', params: { path: '/etc/hostname' },
-    })
-    const responses = getResponses(output)
-    const r = responses[0] as { result: { content: string } }
-    expect(typeof r.result.content).toBe('string')
+    const directory = mkdtempSync(join(tmpdir(), 'acp-read-'))
+    const file = join(directory, 'input.txt')
+    try {
+      writeFileSync(file, 'filesystem fixture')
+      const { server, output } = createServer({}, directory)
+      await server.handleMessage({ jsonrpc: '2.0', id: 0, method: 'initialize' })
+      output.length = 0
+      await server.handleMessage({
+        jsonrpc: '2.0', id: 1, method: 'file/read', params: { path: file },
+      })
+      const responses = getResponses(output)
+      const r = responses[0] as { result: { content: string } }
+      expect(r.result.content).toBe('filesystem fixture')
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
   })
 
   it('uses custom handler when provided', async () => {
@@ -344,17 +353,23 @@ describe('ACPServer: file/read', () => {
 
 describe('ACPServer: file/write', () => {
   it('writes to filesystem', async () => {
-    const { server, output } = createServer({}, '/tmp')
-    await server.handleMessage({ jsonrpc: '2.0', id: 0, method: 'initialize' })
-    output.length = 0
-
-    await server.handleMessage({
-      jsonrpc: '2.0', id: 1, method: 'file/write',
-      params: { path: '/tmp/acp-test-write.txt', content: 'hello acp' },
-    })
-    const responses = getResponses(output)
-    const r = responses[0] as { result: { written: boolean } }
-    expect(r.result.written).toBe(true)
+    const directory = mkdtempSync(join(tmpdir(), 'acp-write-'))
+    const file = join(directory, 'output.txt')
+    try {
+      const { server, output } = createServer({}, directory)
+      await server.handleMessage({ jsonrpc: '2.0', id: 0, method: 'initialize' })
+      output.length = 0
+      await server.handleMessage({
+        jsonrpc: '2.0', id: 1, method: 'file/write',
+        params: { path: file, content: 'hello acp' },
+      })
+      const responses = getResponses(output)
+      const r = responses[0] as { result: { written: boolean } }
+      expect(r.result.written).toBe(true)
+      expect(readFileSync(file, 'utf8')).toBe('hello acp')
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
   })
 
   it('uses custom handler', async () => {

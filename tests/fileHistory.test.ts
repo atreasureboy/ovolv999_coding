@@ -32,12 +32,13 @@ describe('FileHistory', () => {
       expect(files[0].versions).toBe(1)
     })
 
-    it('skips non-existent files (new files)', () => {
+    it('records absent baselines for new files', () => {
       const newPath = join(TEST_DIR, 'new.ts')
-      history.trackEdit(newPath) // file doesn't exist yet
+      history.trackEdit(newPath)
 
       const files = history.getEditedFiles()
-      expect(files).toHaveLength(0)
+      expect(files).toHaveLength(1)
+      expect(history.getVersions(newPath)[0].state).toBe('absent')
     })
 
     it('tracks multiple versions of the same file', () => {
@@ -181,7 +182,7 @@ describe('FileHistory', () => {
       expect(parsed.originalPath).toBe(testFile)
     })
 
-    it('unlinks the sidecar when its backup is evicted (cap)', () => {
+    it('preserves the baseline sidecar while evicting older recent versions', () => {
       const dir = join(TEST_DIR, 'src', 'cap.ts')
       writeFileSync(dir, 'v0', 'utf8')
       history.trackEdit(dir)
@@ -189,14 +190,14 @@ describe('FileHistory', () => {
       const firstSidecar = `${firstBackup}.meta.json`
       expect(existsSync(firstSidecar)).toBe(true)
 
-      // Push past the cap so the oldest is evicted.
+
       for (let i = 1; i <= MAX_VERSIONS_PER_FILE + 5; i++) {
         history.trackEdit(dir)
         writeFileSync(dir, `v${i}`, 'utf8')
       }
-      // Both the backup AND its sidecar must be gone.
-      expect(existsSync(firstBackup)).toBe(false)
-      expect(existsSync(firstSidecar)).toBe(false)
+      expect(existsSync(firstBackup)).toBe(true)
+      expect(existsSync(firstSidecar)).toBe(true)
+      expect(history.getVersions(dir)).toHaveLength(MAX_VERSIONS_PER_FILE)
     })
 
     it('rebuildIndex recovers the original path from per-backup sidecars when the index is gone', () => {

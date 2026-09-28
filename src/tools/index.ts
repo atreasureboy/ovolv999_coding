@@ -65,7 +65,7 @@ export function createTools(
       })
     : new AgentTool()
 
-  return [
+  const tools: Tool[] = [
     new BashTool(),
     new FileReadTool(),
     new FileWriteTool(),
@@ -100,9 +100,21 @@ export function createTools(
     new GoalTool(),
     ...extraTools,
   ]
+  validateTools(tools)
+  return tools
+}
+
+export function validateTools(tools: Tool[]): void {
+  const names = new Set<string>()
+  for (const tool of tools) {
+    if (!tool.name || tool.definition.function.name !== tool.name) throw new Error(`Tool schema/handler name mismatch: ${tool.name}`)
+    if (names.has(tool.name)) throw new Error(`Duplicate tool name: ${tool.name}`)
+    names.add(tool.name)
+  }
 }
 
 export function getToolDefinitions(tools: Tool[]) {
+  validateTools(tools)
   return tools.map((t) => t.definition)
 }
 

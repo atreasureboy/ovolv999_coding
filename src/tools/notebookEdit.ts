@@ -13,9 +13,10 @@
  */
 
 import { readFileSync } from 'fs'
-import { extname, resolve, isAbsolute } from 'path'
+import { extname } from 'path'
 import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/types.js'
 import { atomicWrite } from '../core/atomicWrite.js'
+import { resolveWorkspacePath } from '../core/workspacePath.js'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -120,10 +121,12 @@ NotebookEdit({
     const editMode = (input.edit_mode ?? 'replace') as EditMode
 
     // Validate path
-    if (!notebookPath) {
+    if (!notebookPath || typeof notebookPath !== 'string') {
       return { content: 'Error: notebook_path is required', isError: true }
     }
-    const fullPath = isAbsolute(notebookPath) ? notebookPath : resolve(ctx.cwd, notebookPath)
+    let fullPath: string
+    try { fullPath = resolveWorkspacePath(ctx, notebookPath) }
+    catch (error) { return { content: `Error: ${(error as Error).message}`, isError: true } }
     if (extname(fullPath) !== '.ipynb') {
       return { content: 'Error: file must be a Jupyter notebook (.ipynb)', isError: true }
     }
@@ -224,7 +227,9 @@ NotebookEdit({
     }
 
     // Back up before modifying (undo/checkpoint support)
-    ctx.fileHistory?.trackEdit(fullPath)
+    const backup = ctx.fileHistory?.trackEdit(fullPath)
+    if (backup?.status === 'failed') return { content: `Backup failed; notebook was not changed: ${backup.error}`, isError: true }
+    ctx.signal?.throwIfAborted()
 
     // Write back — atomic so a crash mid-write cannot leave a half-
     // written notebook on disk (which Jupyter would refuse to open).

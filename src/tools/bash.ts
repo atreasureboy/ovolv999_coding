@@ -33,6 +33,7 @@ import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/type
 import { BASH_DESCRIPTION } from '../prompts/tools.js'
 import { mkdirSync, accessSync, constants } from 'fs'
 import { join } from 'path'
+import { withGitResource } from '../core/gitResource.js'
 
 const MAX_OUTPUT_LENGTH = 30_000
 // Per-stream live buffer — head + tail, each up to this many BYTES
@@ -200,55 +201,50 @@ export class BashTool implements Tool {
    * though the trailing `rm` makes the whole command unsafe.
    */
   isConcurrencySafe(input: Record<string, unknown>): boolean {
-    const command = typeof input.command === 'string' ? input.command.toLowerCase() : ''
+    const command = typeof input.command === 'string' ? input.command.trim() : ''
     if (!command) return false
-
-    // Background commands still run the pattern check below — two parallel
-    // `npm install` in background will corrupt node_modules just the same.
-
-    // Step 1: any shell control operator makes the command non-safe.
-    // We can't reason about what each side does without parsing, so
-    // refuse to parallelize anything that chains multiple commands.
-    if (/(\|\||&&|;|\|)/.test(command)) return false
-
-    // Step 2: explicit unsafe mutating patterns win next — a `rm` is
-    // a `rm` regardless of how it's framed.
-    const unsafePatterns = [
-      /^(npm\s+(install|i|ci|uninstall|rm|publish)\b)/,
-      /^(pnpm\s+(install|add|remove|rm)\b)/,
-      /^(yarn\s+(add|remove|install)\b)/,
-      /^(git\s+(add|commit|push|pull|merge|rebase|reset|checkout|stash|cherry-pick)\b)/,
-      /^(rm\s|mv\s|cp\s|mkdir\s|rmdir\s|chmod\s|chown\s)/,
-      /^(curl\s|wget\s)/,
-      /^(docker\s|kubectl\s|terraform\s)/,
-      /^(npm\s+run\s|pnpm\s+run\s|yarn\s)/,
-    ]
-    for (const pattern of unsafePatterns) {
-      if (pattern.test(command)) return false
+    if (/[|;&<>`$\r\n()'"\\]/.test(command)) return false
+    const [program, ...args] = command.split(/\s+/)
+    if (['ls', 'cat', 'head', 'tail', 'echo', 'pwd', 'whoami', 'which', 'whereis', 'grep'].includes(program)) return true
+    if (program === 'date') return args.every(arg => ['-u', '--utc', '--universal'].includes(arg) || arg.startsWith('+'))
+    if (program === 'file') return args.every(arg => !arg.startsWith('-'))
+    if (program === 'git') {
+      if (args[0] === 'branch') return args.length === 1 || args.length === 2 && ['--list', '--show-current'].includes(args[1])
+      if (args[0] === 'remote') return args.length === 1 || args.length === 2 && args[1] === '-v'
+      if (args[0] === 'status') return args.slice(1).every(arg => ['--short', '-s', '--branch', '-b', '--porcelain', '--porcelain=v1', '--porcelain=v2', '--show-stash', '--ignored', '--untracked-files=no', '--untracked-files=normal', '--untracked-files=all'].includes(arg))
+      return false
     }
-
-    // Step 3: explicit safe read-only patterns.
-    const safePatterns = [
-      /^(ls|cat|head|tail|echo|pwd|whoami|date|which|whereis|file)\b/,
-      /^(git\s+(status|log|diff|branch|show|blame|remote|rev-parse|config\s+--get)\b)/,
-      /^(grep|rg|find|fd)\b/,
-      /^(npm\s+(list|ls|view|info|outdated)\b)/,
-      /^(pnpm\s+(list|ls|why)\b)/,
-      /^(node\s+--version|npm\s+--version|pnpm\s+--version|npx\s+--version)/,
-      /^(npx\s+tsc\s+--noemit)/,
-      /^(npx\s+eslint\s+.*--check)/,
-      /^(npx\s+prettier\s+.*--check)/,
-      /^(test\s|-d\s|-f\s|-e\s)/,
-    ]
-    for (const pattern of safePatterns) {
-      if (pattern.test(command)) return true
+    if (program === 'rg') {
+      if (!args.includes('--no-config')) return false
+      const safeFlags = ['--no-config', '--line-number', '-n', '--ignore-case', '-i', '--files-with-matches', '-l', '--files-without-match', '-L', '--fixed-strings', '-F', '--files', '--hidden', '--no-ignore', '--glob', '-g', '--regexp', '-e', '--file', '-f', '--count', '-c', '--word-regexp', '-w', '--invert-match', '-v', '--quiet', '-q']
+      for (const arg of args) {
+        if (arg.startsWith('-') && !safeFlags.includes(arg)) return false
+      }
+      return true
     }
-
-    // Default: conservative — treat unknown commands as unsafe
+    if (['node', 'npm', 'pnpm', 'npx'].includes(program)) return args.length === 1 && args[0] === '--version'
     return false
   }
 
   async execute(input: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+    if (typeof input.command !== 'string' || !/\bgit(?:\.exe)?(?=\s|["'])/i.test(input.command)) {
+      return this.executeCommand(input, context)
+    }
+    return new Promise<ToolResult>(resolve => {
+      void withGitResource(context.cwd, context.signal, async () => {
+        const pending: Promise<void>[] = []
+        try {
+          resolve(await this.executeCommand(input, context, promise => pending.push(promise)))
+        } catch (error) {
+          resolve({ content: `Failed to execute command: ${(error as Error).message}`, isError: true })
+        } finally {
+          await Promise.all(pending)
+        }
+      }, !this.isConcurrencySafe(input)).catch(error => resolve({ content: `Git operation could not acquire repository access: ${(error as Error).message}`, isError: true }))
+    })
+  }
+
+  private async executeCommand(input: Record<string, unknown>, context: ToolContext, track?: (promise: Promise<void>) => void): Promise<ToolResult> {
     const { command, timeout, run_in_background, description, follow_mode } = input as unknown as BashInput
 
     if (!command || typeof command !== 'string') {
@@ -263,7 +259,11 @@ export class BashTool implements Tool {
     // ── Background mode (fire-and-forget with auto log redirect) ─────────────
     if (run_in_background) {
       if (context.backgroundTaskManager) {
-        const id = context.backgroundTaskManager.createTask(command, {
+        let onSettled: (() => void) | undefined
+        if (track) track(new Promise<void>(resolve => { onSettled = resolve }))
+        let id: string
+        try {
+          id = context.backgroundTaskManager.createTask(command, {
           description,
           cwd: context.cwd,
           sessionDir: context.sessionDir,
@@ -273,7 +273,12 @@ export class BashTool implements Tool {
           // this, a long-running background task would survive its parent
           // cancellation and leak until something else killed it.
           signal: context.signal,
-        })
+            onSettled,
+          })
+        } catch (error) {
+          onSettled?.()
+          throw error
+        }
         const task = context.backgroundTaskManager.getTask(id)
         return {
           content: `Background task created: ${id}\nCommand: ${command}\nPID: ${task?.pid ?? 'unknown'}\nStatus: running\n\nUse TaskGet with task_id="${id}" or /tasks to check status and output.`,
@@ -329,6 +334,10 @@ export class BashTool implements Tool {
       }
       // Prevent ENOENT crash — spawn emits async 'error' if shell binary is missing
       child.on('error', () => {})
+      if (track) track(new Promise<void>(resolve => {
+        child.once('close', () => resolve())
+        child.once('error', () => { if (child.pid === undefined) resolve() })
+      }))
 
       // Wire the abort signal to the background child. Without this, an
       // outer cancel would leave the child + its subprocess tree running
@@ -367,7 +376,7 @@ export class BashTool implements Tool {
     }
 
     // ── Foreground mode with abort support ──────────────────────
-    return this.runForeground(command, timeoutMs, follow_mode, context)
+    return this.runForeground(command, timeoutMs, follow_mode, context, track)
   }
 
   /**
@@ -394,6 +403,7 @@ export class BashTool implements Tool {
     timeoutMs: number,
     followMode: boolean | undefined,
     context: ToolContext,
+    track?: (promise: Promise<void>) => void,
   ): Promise<ToolResult> {
     // Pre-abort: if the signal is already aborted, refuse to spawn the
     // process at all. Returning a plain cancelled result here avoids the
@@ -486,6 +496,10 @@ export class BashTool implements Tool {
         detached: true,
         stdio: ['ignore', 'pipe', 'pipe'],
       })
+      if (track) track(new Promise<void>(resolve => {
+        child.once('close', () => resolve())
+        child.once('error', () => { if (child.pid === undefined) resolve() })
+      }))
 
       // ── Output capture (bounded live streaming) ───────────────
       // Each stream is capped at MAX_LIVE_OUTPUT_LENGTH BYTES (UTF-8 byte

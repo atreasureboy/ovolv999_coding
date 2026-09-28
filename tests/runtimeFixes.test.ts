@@ -22,11 +22,12 @@
  * mutable state.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it , vi  } from 'vitest'
 import { ExecutionEngine } from '../src/core/engine.js'
 import { PermissionManager } from '../src/core/permissionSystem.js'
 import { AgentTool } from '../src/tools/agent.js'
 import type { EngineConfig, Tool } from '../src/core/types.js'
+import type * as VerificationModule from '../src/core/verification.js'
 
 // ── Shared infra ──────────────────────────────────────────────────────────
 
@@ -286,7 +287,7 @@ describe('RUNTIME-FIX priority-1: ExecutionEngine rejects concurrent runTurn', (
     engAsAny.modules = [explodingModule]
 
     // First runTurn: setup reaches module.boot() which throws.
-    await expect(engine.runTurn('q', [])).rejects.toThrow(/module boot exploded/)
+    await expect(engine.runTurn('q', [])).resolves.toMatchObject({ result: { status: 'failed', output: expect.stringContaining('module boot exploded') } })
 
     // Restore a clean (empty) modules array so the second runTurn
     // doesn't re-trigger the explosion during its setup.
@@ -361,51 +362,26 @@ describe('RUNTIME-FIX priority-2: child EngineTearDown via AgentTool', () => {
     expect(disposeCallCount).toBe(1)
   })
 
-  it('AgentTool calls childEngine.dispose() when the parent task is aborted', async () => {
+  it('AgentTool calls childEngine.dispose() when an active parent task is aborted', async () => {
     let disposeCallCount = 0
-    let abortFired = false
+    let rejectChild!: (error: Error) => void
+    let markStarted!: () => void
+    const started = new Promise<void>(resolve => { markStarted = resolve })
     const childEngine = {
-      runTurn: async (): Promise<never> => new Promise<never>((_resolve, reject) => {
-        // Park until aborted — the deferred never resolves on its own.
-        // simulate an abort-aware child that rejects on abort
-        setImmediate(() => {
-          if (!abortFired) {
-            reject(new Error('aborted before runTurn returned'))
-          }
-        })
+      runTurn: (): Promise<never> => new Promise<never>((_resolve, reject) => {
+        rejectChild = reject
+        markStarted()
       }),
-      abort: () => { abortFired = true },
+      abort: () => rejectChild(new Error('child cancelled')),
       dispose: () => { disposeCallCount++ },
     }
-    const parentConfig: EngineConfig = baseConfig({
-      agentFactory: () => childEngine,
-    })
-    const tool = new AgentTool({
-      factory: () => childEngine,
-      parentConfig,
-      parentRenderer: fakeRenderer(),
-    })
-    const ac = new AbortController()
-    const promise = tool.execute(
-      { description: 'subtask', prompt: 'p', subagent_type: 'general-purpose' },
-      { cwd: '/host', permissionMode: 'auto', signal: ac.signal } ,
-    )
-    // Park the awaiter — give AgentTool a tick to register the abort
-    // listener via `context.signal.addEventListener('abort', ...)`.
-    await settle()
-    ac.abort()
-    // Let any abort side effects propagate. The fake child's runTurn
-    // never resolves, so we can't safely await it — but we can race its
-    // rejection against a short timeout to verify the abort listener fired.
-    const out = await Promise.race([
-      promise,
-      new Promise<{ isError: boolean }>((r) => setTimeout(() => r({ isError: true }), 100)),
-    ])
-    expect(out.isError).toBe(true)
-    // Even though the fake child's runTurn never resolved, the abort
-    // listener fires synchronously and AgentTool returns a synthetic
-    // result. The `finally` block then runs dispose.
-    expect(disposeCallCount).toBeGreaterThanOrEqual(1)
+    const tool = new AgentTool({ factory: () => childEngine, parentConfig: baseConfig(), parentRenderer: fakeRenderer() })
+    const controller = new AbortController()
+    const result = tool.execute({ description: 'subtask', prompt: 'p' }, { cwd: '/host', permissionMode: 'auto', signal: controller.signal })
+    await started
+    controller.abort()
+    expect((await result).isError).toBe(true)
+    expect(disposeCallCount).toBe(1)
   })
 
   it('AgentTool is robust to a child without a dispose() method (optional interface)', async () => {
@@ -458,6 +434,7 @@ describe('RUNTIME-FIX priority-3: enforceAggregateToolResultBudget catches many-
     }))
     const bigTool: Tool = {
       name: 'Big',
+      metadata: { readOnly: true, concurrencySafe: true },
       definition: {
         type: 'function',
         function: { name: 'Big', description: '', parameters: { type: 'object', properties: {} } },
@@ -486,19 +463,12 @@ describe('RUNTIME-FIX priority-3: enforceAggregateToolResultBudget catches many-
    * structural regression guard for future edits that might re-introduce
    * the bug.
    */
-  it('enforceAggregateToolResultBudget source uses continue-not-break on small items (regression guard)', async () => {
-    // Read the engine source and grep for the documented pattern.
-    const fs = await import('fs')
-    const src = fs.readFileSync(
-      new URL('../src/core/engine.ts', import.meta.url).pathname,
-      'utf8',
-    )
-    // Confirm the new "continue" semantics for medium items.
-    expect(src).toMatch(/if \(item\.size <= itemTarget\) continue/)
-    // Confirm the head+tail truncation fallback exists.
-    expect(src).toMatch(/chars truncated to fit aggregate budget/)
-    // Regression guard: confirm the legacy `break` pattern is GONE.
-    expect(src).not.toMatch(/if \(item\.size <= MAX_TOOL_RESULT_LENGTH\) break/)
+  it('includes markers inside the actual aggregate result budget', async () => {
+    const { enforceAggregateToolResultBudget } = await import('../src/core/engine.js')
+    const results = Array.from({ length: 10 }, (_, i) => ({ content: 'x'.repeat(15_000), tc: { id: String(i), name: 'Read' } }))
+    enforceAggregateToolResultBudget(results)
+    expect(results.reduce((sum, result) => sum + result.content.length, 0)).toBeLessThanOrEqual(60_000)
+    expect(results.some(result => result.content.includes('truncated'))).toBe(true)
   })
 })
 
@@ -719,4 +689,9 @@ describe('RUNTIME-FIX priority-6: _suppressCompactWarning suppression is observe
     expect(engAsAny._suppressCompactWarning).toBe(false)
     expect(warningCount).toBe(0)
   })
+})
+
+vi.mock('../src/core/verification.js', async importOriginal => {
+  const actual = await importOriginal<typeof VerificationModule>()
+  return { ...actual, captureArtifactVersion: () => Promise.resolve('unchanged-abort-fixture') }
 })

@@ -1,5 +1,7 @@
 # Dependencies
 node_modules/
+.pnpm-store/
+.artifacts/
 package-lock.json
 
 # Build output

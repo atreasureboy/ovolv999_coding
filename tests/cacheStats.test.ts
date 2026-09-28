@@ -2,7 +2,10 @@
  * Tests for src/utils/cacheStats.ts
  */
 
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, beforeAll, afterAll, vi } from 'vitest'
+import { mkdtempSync, rmSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
 import {
   resetCacheStats,
   recordCacheEntry,
@@ -12,6 +15,19 @@ import {
   formatCacheStats,
   formatCacheWarning,
 } from '../src/utils/cacheStats.js'
+
+let testHome: string
+
+beforeAll(() => {
+  testHome = mkdtempSync(join(tmpdir(), 'ovolv999-cache-'))
+  vi.stubEnv('HOME', testHome)
+  vi.stubEnv('USERPROFILE', testHome)
+})
+
+afterAll(() => {
+  vi.unstubAllEnvs()
+  rmSync(testHome, { recursive: true, force: true })
+})
 
 beforeEach(() => {
   resetCacheStats()

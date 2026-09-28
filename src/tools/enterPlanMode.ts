@@ -12,7 +12,7 @@ import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/type
 
 export class EnterPlanModeTool implements Tool {
   name = 'EnterPlanMode'
-  metadata = { readOnly: true, concurrencySafe: true }
+  metadata = { readOnly: true, concurrencySafe: false }
 
   definition: ToolDefinition = {
     type: 'function',
@@ -39,7 +39,7 @@ After analysis, call ExitPlanMode with your plan to request user approval.`,
   }
 
   isConcurrencySafe(): boolean {
-    return true
+    return false
   }
 
   execute(_input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {

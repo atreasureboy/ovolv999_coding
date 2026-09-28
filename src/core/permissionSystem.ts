@@ -185,7 +185,7 @@ export function checkRules(
     ?? input.pattern as string | undefined
     ?? ''
 
-  for (const rule of rules) {
+  for (const rule of [...rules].sort((a, b) => ({ deny: 0, ask: 1, allow: 2 })[a.behavior] - ({ deny: 0, ask: 1, allow: 2 })[b.behavior])) {
     if (rule.toolName !== toolName) continue
     if (matchRule(rule.ruleContent, commandField)) {
       return { behavior: rule.behavior, matchedRule: rule }

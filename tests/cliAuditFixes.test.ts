@@ -115,40 +115,19 @@ describe('CLI #1: single readline ownership', () => {
 // 2. Non-TTY ExitPlanMode auto-approves, never EOF-rejects
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe('CLI #2: ExitPlanMode auto-approve in non-interactive', () => {
-  it('auto-approves when no callback is wired (sub-agent / pipe mode)', async () => {
-    const tool = new ExitPlanModeTool()
-    const result = await tool.execute({ plan: '## Step 1\nDo thing' }, {
-      cwd: '/test',
-      permissionMode: 'auto',
-    })
-    expect(result.isError).toBe(false)
-    expect(result.content).toContain('auto-approved')
+describe('CLI #2: ExitPlanMode requires approval', () => {
+  it('reports needs_input when no approval callback is wired', async () => {
+    const result = await new ExitPlanModeTool().execute({ plan: 'Implement the requested change' }, { cwd: '/test', permissionMode: 'auto' })
+    expect(result.isError).toBe(true)
+    expect(result.status).toBe('needs_input')
   })
 
-  it('auto-approves when isTTY=false (no EOF rejection)', async () => {
-    const shared = makeSharedPrompt({ isTTY: false })
-    // Simulate the bin/ovogogogo.ts wiring: if activePrompt is null OR
-    // !isTTY, auto-approve. We model that contract here.
-    const isInteractive = !!shared.isTTY
-    let result: { isError: boolean; content: string }
-    if (!isInteractive) {
-      // non-TTY → auto-approve (NOT EOF)
-      result = { isError: false, content: 'Plan mode exited (auto-approved in non-interactive mode).' }
-    } else {
-      // interactive → ask the user
-      const tool = new ExitPlanModeTool()
-      const execResult = tool.execute({ plan: 'X' }, {
-        cwd: '/test',
-        permissionMode: 'auto',
-        exitPlanMode: () => Promise.resolve(true),
-      })
-      result = await execResult
-    }
-    expect(result!.isError).toBe(false)
-    expect(result!.content).toContain('auto-approved')
-    // The contract: shared.readLine is NEVER called for non-TTY approval
-    expect((shared.readLine as ReturnType<typeof vi.fn>).mock.calls.length).toBe(0)
+  it('accepts an explicitly approved plan through the configured channel', async () => {
+    const result = await new ExitPlanModeTool().execute({ plan: 'Implement the requested change' }, {
+      cwd: '/test', permissionMode: 'auto', exitPlanMode: () => Promise.resolve(true),
+    })
+    expect(result.isError).toBe(false)
+    expect(result.content).toContain('approved')
   })
 })
 

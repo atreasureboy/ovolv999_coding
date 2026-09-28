@@ -26,10 +26,11 @@ import {
 import { join } from 'path'
 import { homedir } from 'os'
 import { randomBytes } from 'crypto'
+import type { OutcomeStatus, VerificationEvidence } from './outcome.js'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
-export type SessionStatus = 'running' | 'completed' | 'failed' | 'stopped' | 'unknown'
+export type SessionStatus = 'running' | 'stopped' | 'unknown' | OutcomeStatus
 
 export interface SessionMetadata {
   id: string
@@ -42,6 +43,8 @@ export interface SessionMetadata {
   status: SessionStatus
   logPath: string
   exitCode?: number
+  outcome?: OutcomeStatus
+  verification?: VerificationEvidence
   /** Extra args passed to the spawned ovolv999 */
   args?: string[]
 }
@@ -134,6 +137,12 @@ export function updateMetadata(id: string, patch: Partial<SessionMetadata>): Ses
   return updated
 }
 
+export function recordBackgroundOutcome(outcome: OutcomeStatus, verification?: VerificationEvidence): void {
+  const id = process.env.OVOGV999_SESSION_ID
+  if (!id) return
+  updateMetadata(id, { outcome, verification })
+}
+
 // ── Liveness ────────────────────────────────────────────────────────────────
 
 /**
@@ -174,8 +183,11 @@ export function refreshSessionStatus(id: string): SessionMetadata | null {
 
   // Process ended
   const newStatus: SessionStatus =
-    exitCode === undefined ? 'unknown' :
-    exitCode === 0 ? 'completed' :
+    exitCode === undefined ? (meta.outcome === 'cancelled' ? 'cancelled' : 'unknown') :
+    exitCode === 0 ? (meta.outcome ?? 'unknown') :
+    meta.outcome && meta.outcome !== 'completed' ? meta.outcome :
+    exitCode === 124 ? 'limit_reached' :
+    exitCode === 2 ? 'blocked' :
     exitCode === 130 ? 'stopped' :
     'failed'
 
@@ -289,21 +301,15 @@ export function stopSession(id: string, graceMs = 5000): boolean {
   }
 
   // Check after grace period — caller can await this
-  const deadline = Date.now() + graceMs
   const checkLiveness = (): void => {
-    if (isPidAlive(meta.pid!) && Date.now() < deadline) {
+    if (isPidAlive(meta.pid)) {
       // Still alive — escalate
       try { process.kill(meta.pid!, 'SIGKILL') } catch { /* ignore */ }
     }
+    if (!isPidAlive(meta.pid)) updateMetadata(id, { status: 'cancelled', outcome: 'cancelled', endedAt: new Date().toISOString() })
   }
-  setTimeout(checkLiveness, graceMs)
-
-  // Write exit file so refreshSessionStatus classifies it as "stopped"
-  try {
-    writeFileSync(getExitPath(id), '130\n')
-  } catch { /* ignore */ }
-
-  updateMetadata(id, { status: 'stopped', endedAt: new Date().toISOString(), exitCode: 130 })
+  setTimeout(checkLiveness, graceMs).unref()
+  updateMetadata(id, { outcome: 'cancelled' })
   return true
 }
 
@@ -377,7 +383,6 @@ export function attachToSession(id: string, pollMs = 500): AttachResult | null {
   const meta = getSession(id)
   if (!meta) return null
 
-  const logPath = getLogPath(id)
   let offset = getLogSize(id)
   let stopped = false
   let timer: ReturnType<typeof setTimeout> | null = null
@@ -508,13 +513,11 @@ export function initChildLogCapture(): string | null {
     } catch { /* ignore disk errors */ }
   }
 
-  // @ts-ignore — patching the write method signature for log capture
-  process.stdout.write = (data: unknown, ...rest: unknown[]): boolean => {
+  process.stdout.write = (data: unknown): boolean => {
     appendLog(data)
     return origWrite(data as string | Uint8Array)
   }
-  // @ts-ignore — same
-  process.stderr.write = (data: unknown, ...rest: unknown[]): boolean => {
+  process.stderr.write = (data: unknown): boolean => {
     appendLog(data)
     return origErrWrite(data as string | Uint8Array)
   }
@@ -564,6 +567,11 @@ const STATUS_ICON: Record<SessionStatus, string> = {
   failed: '✗',
   stopped: '◼',
   unknown: '?',
+  cancelled: '◼',
+  interrupted: '◼',
+  limit_reached: '◼',
+  blocked: '◼',
+  needs_input: '?',
 }
 
 function formatAge(iso: string): string {

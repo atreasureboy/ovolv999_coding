@@ -67,15 +67,16 @@ describe('partitionToolCalls', () => {
     expect(batches).toHaveLength(0)
   })
 
-  it('puts Bash in parallel batch (per design: dependent ops use &&)', () => {
+  it('serializes Bash when no tool classifier is registered', () => {
     const calls = [
       makeParsedToolCall('Read', { file_path: 'a.ts' }),
       makeParsedToolCall('Bash', { command: 'ls' }),
     ]
 
     const batches = partitionToolCalls(calls)
-    expect(batches).toHaveLength(1)
+    expect(batches).toHaveLength(2)
     expect(batches[0].safe).toBe(true)
+    expect(batches[1].safe).toBe(false)
   })
 
   it('starts new batch when unsafe tool interrupts safe sequence', () => {

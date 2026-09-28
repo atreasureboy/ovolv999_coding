@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
 import { encrypt, decrypt, setSecret, getSecret, deleteSecret, listSecrets, getVaultMetadata, detectBackend } from '../src/utils/keychain.js'
 import { existsSync, rmSync } from 'fs'
 import { join } from 'path'
@@ -7,18 +7,17 @@ import { tmpdir } from 'os'
 import { mkdtempSync } from 'fs'
 
 const PASSPHRASE = 'test-passphrase-123'
-let origHome: string | undefined
 let testDir: string
 
 beforeAll(() => {
   testDir = mkdtempSync(join(tmpdir(), 'ovolv999-vault-'))
-  origHome = process.env.HOME
-  process.env.HOME = testDir
+  vi.stubEnv('HOME', testDir)
+  vi.stubEnv('USERPROFILE', testDir)
   process.env.OVOLV999_VAULT_PASSPHRASE = PASSPHRASE
 })
 
 afterAll(() => {
-  if (origHome !== undefined) process.env.HOME = origHome
+  vi.unstubAllEnvs()
   delete process.env.OVOLV999_VAULT_PASSPHRASE
   rmSync(testDir, { recursive: true, force: true })
 })

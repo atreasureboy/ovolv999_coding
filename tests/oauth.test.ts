@@ -6,7 +6,7 @@
  * exercised only structurally (it requires a real callback server).
  */
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest'
 import {
   generatePKCE,
   generateState,
@@ -30,16 +30,15 @@ import { join } from 'path'
 import { homedir } from 'os'
 
 let testHome: string
-let origHome: string | undefined
 
 beforeAll(() => {
   testHome = mkdtempSync(join(tmpdir(), 'ovolv999-oauth-'))
-  origHome = process.env.HOME
-  process.env.HOME = testHome
+  vi.stubEnv('HOME', testHome)
+  vi.stubEnv('USERPROFILE', testHome)
 })
 
 afterAll(() => {
-  if (origHome !== undefined) process.env.HOME = origHome
+  vi.unstubAllEnvs()
   rmSync(testHome, { recursive: true, force: true })
 })
 

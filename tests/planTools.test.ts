@@ -34,11 +34,11 @@ describe('EnterPlanModeTool', () => {
   it('has correct name and metadata', () => {
     expect(tool.name).toBe('EnterPlanMode')
     expect(tool.metadata.readOnly).toBe(true)
-    expect(tool.metadata.concurrencySafe).toBe(true)
+    expect(tool.metadata.concurrencySafe).toBe(false)
   })
 
-  it('is concurrency-safe', () => {
-    expect(tool.isConcurrencySafe?.()).toBe(true)
+  it('serializes the permission transition', () => {
+    expect(tool.isConcurrencySafe?.()).toBe(false)
   })
 
   it('calls enterPlanMode callback and returns entered message (T1)', async () => {
@@ -86,8 +86,8 @@ describe('VerifyPlanExecutionTool', () => {
 
     const result = await tool.execute({}, makeCtx({ cwd }))
     expect(result.isError).toBe(false)
-    expect(result.content).toContain('All checks passed')
-    expect(result.content).toContain('passed')
+    expect(result.verification?.status).toBe('passed')
+    expect(result.verification?.commands).toEqual([expect.objectContaining({ passed: true, exitCode: 0 })])
   })
 
   it('returns isError=true when build script fails (T4)', async () => {
@@ -98,7 +98,8 @@ describe('VerifyPlanExecutionTool', () => {
 
     const result = await tool.execute({}, makeCtx({ cwd }))
     expect(result.isError).toBe(true)
-    expect(result.content).toContain('Verification failed')
+    expect(result.verification?.status).toBe('failed')
+    expect(result.verification?.commands).toEqual([expect.objectContaining({ passed: false, exitCode: 1 })])
     expect(result.content).toContain('FAILED')
   })
 
@@ -106,6 +107,7 @@ describe('VerifyPlanExecutionTool', () => {
     const cwd = freshProject()
     const result = await tool.execute({}, makeCtx({ cwd }))
     expect(result.isError).toBe(false)
-    expect(result.content).toContain('No verification commands detected')
+    expect(result.verification?.status).toBe('not_applicable')
+    expect(result.verification?.commands).toEqual([])
   })
 })

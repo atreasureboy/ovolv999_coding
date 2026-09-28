@@ -35,17 +35,16 @@ interface FileState {
   hash?: string
 }
 
-const _readFiles = new Set<string>()
-const _fileStates = new Map<string, FileState>()
+export class FileReadState {
+  private _readFiles = new Set<string>()
+  private _fileStates = new Map<string, FileState>()
 
 /**
  * SHA-256 of a UTF-8 string. Hex digest is 64 chars — cheap to store and
  * compare, and collision-resistant in practice (any collision here would
  * mean SHA-256 is broken).
  */
-function hashText(content: string): string {
-  return createHash('sha256').update(content, 'utf8').digest('hex')
-}
+
 
 /**
  * Mark a file as read and cache its current state.
@@ -60,21 +59,21 @@ function hashText(content: string): string {
  * membership (hasFileBeenRead) still updates so a later successful read
  * can populate the state.
  */
-export function markFileRead(filePath: string, content?: string): void {
+markFileRead(filePath: string, content?: string): void {
   const normalized = resolve(filePath)
-  _readFiles.add(normalized)
+  this._readFiles.add(normalized)
   try {
     const stat = statSync(normalized)
     const state: FileState = { mtime: stat.mtimeMs, size: stat.size }
     if (content !== undefined) {
       state.hash = hashText(content)
     }
-    _fileStates.set(normalized, state)
+    this._fileStates.set(normalized, state)
   } catch { /* best-effort — file may have been deleted between Read and mark */ }
 }
 
-export function hasFileBeenRead(filePath: string): boolean {
-  return _readFiles.has(resolve(filePath))
+hasFileBeenRead(filePath: string): boolean {
+  return this._readFiles.has(resolve(filePath))
 }
 
 /**
@@ -89,9 +88,9 @@ export function hasFileBeenRead(filePath: string): boolean {
  * Returns true (treat as changed) when the file was never read or has
  * been deleted since the last read.
  */
-export function hasFileChanged(filePath: string, currentContent?: string): boolean {
+hasFileChanged(filePath: string, currentContent?: string): boolean {
   const normalized = resolve(filePath)
-  const cached = _fileStates.get(normalized)
+  const cached = this._fileStates.get(normalized)
   if (!cached) return true  // never read → treat as changed
 
   let stat
@@ -115,7 +114,22 @@ export function hasFileChanged(filePath: string, currentContent?: string): boole
   return true
 }
 
-export function clearFileState(): void {
-  _readFiles.clear()
-  _fileStates.clear()
+clearFileState(): void {
+  this._readFiles.clear()
+  this._fileStates.clear()
 }
+
+}
+
+function hashText(content: string): string {
+  return createHash('sha256').update(content, 'utf8').digest('hex')
+}
+
+const legacyFileState = new FileReadState()
+export function getFileState(context: { fileState?: FileReadState }): FileReadState {
+  return context.fileState ?? legacyFileState
+}
+export function markFileRead(filePath: string, content?: string): void { legacyFileState.markFileRead(filePath, content) }
+export function hasFileBeenRead(filePath: string): boolean { return legacyFileState.hasFileBeenRead(filePath) }
+export function hasFileChanged(filePath: string, content?: string): boolean { return legacyFileState.hasFileChanged(filePath, content) }
+export function clearFileState(): void { legacyFileState.clearFileState() }

@@ -6,7 +6,8 @@
 import { readFile, stat } from 'fs/promises'
 import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/types.js'
 import { READ_FILE_DESCRIPTION } from '../prompts/tools.js'
-import { markFileRead, hasFileChanged, hasFileBeenRead } from '../core/fileState.js'
+import { getFileState } from '../core/fileState.js'
+import { resolveWorkspacePath } from '../core/workspacePath.js'
 
 export interface ReadFileInput {
   file_path: string
@@ -47,23 +48,21 @@ export class FileReadTool implements Tool {
     },
   }
 
-  async execute(input: Record<string, unknown>, _context: ToolContext): Promise<ToolResult> {
-    const { file_path, offset, limit } = input as unknown as ReadFileInput
+  async execute(input: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+    const { file_path: rawPath, offset, limit } = input as unknown as ReadFileInput
 
-    if (!file_path || typeof file_path !== 'string') {
+    const fileState = getFileState(context)
+    if (!rawPath || typeof rawPath !== 'string') {
       return { content: 'Error: file_path is required', isError: true }
     }
+    let file_path: string
+    try { file_path = resolveWorkspacePath(context, rawPath) }
+    catch (error) { return { content: `Error: ${(error as Error).message}`, isError: true } }
 
     try {
       // File unchanged detection (Claude Code pattern) — skip re-reading if not modified
       // Only applies to full reads (no offset/limit) of previously-read files.
       // Use === undefined (not falsy) so offset:0 is treated as "read from line 0"
-      if (offset === undefined && limit === undefined && hasFileBeenRead(file_path) && !hasFileChanged(file_path)) {
-        return {
-          content: `File: ${file_path}\nFile unchanged since last read. The content from the earlier Read is still current.`,
-          isError: false,
-        }
-      }
 
       // Size guard — prevent OOM on very large files (binary detection reads
       // the entire file into memory, so we must check size first)
@@ -80,6 +79,13 @@ export class FileReadTool implements Tool {
       }
 
       const raw = await readFile(file_path, 'utf8')
+      if (offset === undefined && limit === undefined && fileState.hasFileBeenRead(file_path) && !fileState.hasFileChanged(file_path, raw)) {
+        return {
+          content: `File: ${file_path}\nFile unchanged since last read. The content from the earlier Read is still current.`,
+          isError: false,
+        }
+      }
+
 
       // Binary file detection — check for null bytes in first 8000 chars.
       // For binary files we still mark as read (so hasFileBeenRead works)
@@ -87,7 +93,7 @@ export class FileReadTool implements Tool {
       // the byte content vs how a later Writer would re-hash it.
       const sample = raw.slice(0, 8000)
       if (sample.includes('\0')) {
-        markFileRead(file_path)
+        fileState.markFileRead(file_path)
         return {
           content: `File: ${file_path}\n(Binary file — not displayed. Use Bash to process: \`xxd\`, \`file\`, or \`strings\`)`,
           isError: false,
@@ -100,7 +106,7 @@ export class FileReadTool implements Tool {
       // Handle empty files — don't render a phantom "1\t" line. Pass the
       // empty string so the cache hash matches a later "" write.
       if (total === 1 && lines[0] === '') {
-        markFileRead(file_path, raw)
+        fileState.markFileRead(file_path, raw)
         return {
           content: `File: ${file_path} (empty file, 0 bytes)`,
           isError: false,
@@ -121,7 +127,7 @@ export class FileReadTool implements Tool {
           ? `File: ${file_path} (showing lines ${startLine}-${endLine} of ${total})\nUse offset=${endLine + 1} to read next page.\n`
           : `File: ${file_path}\n`
 
-      markFileRead(file_path, raw)
+      fileState.markFileRead(file_path, raw)
 
       return { content: header + numbered, isError: false }
     } catch (err: unknown) {

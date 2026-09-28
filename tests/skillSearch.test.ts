@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest'
 import {
   loadUsageStats,
   saveUsageStats,
@@ -15,13 +15,12 @@ import { join } from 'path'
 
 let testDir: string
 let projectDir: string
-let origHome: string | undefined
 
 beforeAll(() => {
   testDir = mkdtempSync(join(tmpdir(), 'ovolv999-skills-'))
   projectDir = mkdtempSync(join(tmpdir(), 'ovolv999-proj-'))
-  origHome = process.env.HOME
-  process.env.HOME = testDir
+  vi.stubEnv('HOME', testDir)
+  vi.stubEnv('USERPROFILE', testDir)
 
   // Create a skill in the project
   const skillsDir = join(projectDir, '.ovogo', 'skills')
@@ -37,7 +36,7 @@ beforeAll(() => {
 })
 
 afterAll(() => {
-  if (origHome !== undefined) process.env.HOME = origHome
+  vi.unstubAllEnvs()
   rmSync(testDir, { recursive: true, force: true })
   rmSync(projectDir, { recursive: true, force: true })
 })

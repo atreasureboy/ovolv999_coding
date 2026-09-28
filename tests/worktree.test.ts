@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync } from 'fs'
+import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { execSync } from 'child_process'
@@ -12,6 +12,14 @@ import {
   _resetWorktreeManagersForTest,
 } from '../src/tools/worktree.js'
 import type { ToolContext } from '../src/core/types.js'
+import { createVerificationPlan, executeVerification } from '../src/core/verification.js'
+
+async function accept(manager: WorktreeManager, name: string): Promise<void> {
+  const artifact = manager.getArtifact(name)
+  const cwd = artifact.workspace.cwd
+  const evidence = await executeVerification({ cwd, runId: 'test-run', plan: createVerificationPlan(cwd, [`"${process.execPath}" -e "process.exit(0)"`]) })
+  await manager.acceptArtifact(name, evidence, artifact)
+}
 
 function makeCtx(cwd: string): ToolContext {
   return { cwd, permissionMode: 'auto' }
@@ -107,12 +115,12 @@ describe('WorktreeManager', () => {
     const mgr = new WorktreeManager(dir)
     const info = mgr.createWorktree('discard-me')
     expect(existsSync(info.path)).toBe(true)
-    mgr.removeWorktree('discard-me', { merge: false, deleteBranch: true })
+    mgr.removeWorktree('discard-me', { merge: false, deleteBranch: true, discardApproved: true })
     expect(existsSync(info.path)).toBe(false)
     expect(mgr.getWorktree('discard-me')).toBeUndefined()
   })
 
-  it('merges worktree changes back to base', () => {
+  it('merges worktree changes back to base', async () => {
     const mgr = new WorktreeManager(dir)
     const info = mgr.createWorktree('merge-me')
     // Make a commit in the worktree
@@ -120,6 +128,7 @@ describe('WorktreeManager', () => {
     execSync('git add -A && git commit -m "work in worktree"', {
       cwd: info.path, stdio: 'pipe',
     })
+    await accept(mgr, 'merge-me')
     mgr.removeWorktree('merge-me', { merge: true, deleteBranch: true })
     // File should now be in main
     expect(existsSync(join(dir, 'merged.txt'))).toBe(true)
@@ -258,6 +267,8 @@ describe('ExitWorktreeTool', () => {
     execSync('git add -A && git commit -m "work"', { cwd: wtPath, stdio: 'pipe' })
 
     const exit = new ExitWorktreeTool()
+    const manager = getWorktreeManager(dir)
+    await accept(manager, 'merging')
     const result = await exit.execute({ name: 'merging', action: 'merge' }, makeCtx(dir))
     expect(result.isError).toBe(false)
     expect(result.content).toContain('merged')

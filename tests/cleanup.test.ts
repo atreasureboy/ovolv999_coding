@@ -10,6 +10,7 @@ import { registerCleanup } from '../src/utils/cleanup.js'
 
 describe('registerCleanup', () => {
   let originalIsTTY: boolean | undefined
+  let originalExitCode: typeof process.exitCode
   let onSpy: ReturnType<typeof vi.spyOn>
   let offSpy: ReturnType<typeof vi.spyOn>
   let exitSpy: ReturnType<typeof vi.spyOn>
@@ -17,6 +18,7 @@ describe('registerCleanup', () => {
 
   beforeEach(() => {
     originalIsTTY = process.stdin.isTTY
+    originalExitCode = process.exitCode
     registeredHandlers = new Map()
     onSpy = vi.spyOn(process, 'on').mockImplementation(((event: string, handler: (...args: unknown[]) => void) => {
       registeredHandlers.set(event, handler)
@@ -26,9 +28,7 @@ describe('registerCleanup', () => {
       registeredHandlers.delete(event)
       return process
     }) as never)
-    exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {
-      throw new Error('process.exit called')
-    }))
+    exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never)
   })
 
   afterEach(() => {
@@ -36,6 +36,7 @@ describe('registerCleanup', () => {
       value: originalIsTTY,
       writable: true,
     })
+    process.exitCode = originalExitCode
     onSpy.mockRestore()
     offSpy.mockRestore()
     exitSpy.mockRestore()
@@ -68,38 +69,42 @@ describe('registerCleanup', () => {
     expect(registeredHandlers.has('unhandledRejection')).toBe(true)
   })
 
-  it('calls onCleanup when SIGTERM handler fires', () => {
+  it('calls onCleanup when SIGTERM handler fires', async () => {
     const onCleanup = vi.fn()
     registerCleanup({ onCleanup })
     const handler = registeredHandlers.get('SIGTERM')!
-    expect(() => handler()).toThrow('process.exit called')
+    handler()
+    await vi.waitFor(() => expect(exitSpy).toHaveBeenCalledWith(130))
     expect(onCleanup).toHaveBeenCalledTimes(1)
   })
 
-  it('calls onCleanup when SIGHUP handler fires', () => {
+  it('calls onCleanup when SIGHUP handler fires', async () => {
     const onCleanup = vi.fn()
     registerCleanup({ onCleanup })
     const handler = registeredHandlers.get('SIGHUP')!
-    expect(() => handler()).toThrow('process.exit called')
+    handler()
+    await vi.waitFor(() => expect(exitSpy).toHaveBeenCalledWith(130))
     expect(onCleanup).toHaveBeenCalledTimes(1)
   })
 
-  it('calls onCleanup when uncaughtException handler fires', () => {
+  it('calls onCleanup when uncaughtException handler fires', async () => {
     const onCleanup = vi.fn()
     registerCleanup({ onCleanup })
     const handler = registeredHandlers.get('uncaughtException')!
-    expect(() => handler(new Error('boom'))).toThrow('process.exit called')
+    handler(new Error('boom'))
+    await vi.waitFor(() => expect(exitSpy).toHaveBeenCalledWith(1))
     expect(onCleanup).toHaveBeenCalledTimes(1)
   })
 
-  it('calls onCleanup when unhandledRejection handler fires', () => {
+  it('calls onCleanup when unhandledRejection handler fires', async () => {
     const onCleanup = vi.fn()
     registerCleanup({ onCleanup })
     const handler = registeredHandlers.get('unhandledRejection')!
     // Use a pre-rejected promise but catch it locally to avoid vitest detecting it
     const rejected = Promise.reject(new Error('oops'))
     rejected.catch(() => {}) // prevent unhandled rejection warning
-    expect(() => handler(rejected)).toThrow('process.exit called')
+    handler(rejected)
+    await vi.waitFor(() => expect(exitSpy).toHaveBeenCalledWith(1))
     expect(onCleanup).toHaveBeenCalledTimes(1)
   })
 
@@ -118,10 +123,13 @@ describe('registerCleanup', () => {
     expect(() => cleanup()).not.toThrow()
   })
 
-  it('survives onCleanup throwing', () => {
+  it('survives onCleanup throwing', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true)
     const onCleanup = vi.fn(() => { throw new Error('cleanup failed') })
     const cleanup = registerCleanup({ onCleanup })
-    expect(() => cleanup()).not.toThrow()
+    await expect(cleanup()).resolves.toBeUndefined()
+    expect(process.exitCode).toBe(1)
+    stderr.mockRestore()
   })
 
   it('disables raw mode during cleanup', () => {

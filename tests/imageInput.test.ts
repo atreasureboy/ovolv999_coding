@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
 import {
   validateImage,
   getMimeType,
@@ -9,12 +9,22 @@ import {
   storeImage,
   getClipboardImagePath,
 } from '../src/utils/imageInput.js'
-import { writeFileSync, mkdirSync, rmSync, existsSync } from 'fs'
+import { writeFileSync, mkdirSync, rmSync, existsSync, mkdtempSync } from 'fs'
 import { join } from 'path'
-import { homedir } from 'os'
 import { tmpdir } from 'os'
 
-const TMP = join(tmpdir(), 'ovolv999-test-images')
+let TMP: string
+
+beforeAll(() => {
+  TMP = mkdtempSync(join(tmpdir(), 'ovolv999-test-images-'))
+  vi.stubEnv('HOME', TMP)
+  vi.stubEnv('USERPROFILE', TMP)
+})
+
+afterAll(() => {
+  vi.unstubAllEnvs()
+  rmSync(TMP, { recursive: true, force: true })
+})
 
 function makeTmpDir(): string {
   if (!existsSync(TMP)) mkdirSync(TMP, { recursive: true })

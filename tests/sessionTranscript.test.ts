@@ -1,4 +1,7 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
+import { mkdtempSync, rmSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
 import {
   buildTranscript,
   formatAsJson,
@@ -11,6 +14,19 @@ import {
   type TranscriptMessage,
   type TranscriptMetadata,
 } from '../src/core/sessionTranscript.js'
+
+let testHome: string
+
+beforeAll(() => {
+  testHome = mkdtempSync(join(tmpdir(), 'ovolv999-transcript-'))
+  vi.stubEnv('HOME', testHome)
+  vi.stubEnv('USERPROFILE', testHome)
+})
+
+afterAll(() => {
+  vi.unstubAllEnvs()
+  rmSync(testHome, { recursive: true, force: true })
+})
 
 function makeMessages(): TranscriptMessage[] {
   return [

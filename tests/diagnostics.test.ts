@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest'
+import { join } from 'path'
 import {
   parseTscOutput,
   parseEslintJson,
@@ -24,7 +25,7 @@ describe('diagnostics', () => {
 
       const diags = parseTscOutput(output, process.cwd())
       expect(diags).toHaveLength(2)
-      expect(diags[0].filePath).toBe('src/foo.ts')
+      expect(diags[0].filePath).toBe(join('src', 'foo.ts'))
       expect(diags[0].line).toBe(10)
       expect(diags[0].column).toBe(5)
       expect(diags[0].severity).toBe('error')
@@ -51,7 +52,7 @@ describe('diagnostics', () => {
       ].join('\n')
       const diags = parseTscOutput(output, process.cwd())
       expect(diags).toHaveLength(3)
-      expect(diags.every(d => d.filePath === 'src/a.ts')).toBe(true)
+      expect(diags.every(d => d.filePath === join('src', 'a.ts'))).toBe(true)
     })
   })
 

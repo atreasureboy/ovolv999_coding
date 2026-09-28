@@ -9,10 +9,11 @@
  * tests/runtimeFixes.test.ts.
  */
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it , vi  } from 'vitest'
 import { ExecutionEngine } from '../src/core/engine.js'
 import { AgentTool } from '../src/tools/agent.js'
 import type { EngineConfig, Tool } from '../src/core/types.js'
+import type * as VerificationModule from '../src/core/verification.js'
 
 // ── Queue-based fake OpenAI ──
 type Queued = { k: 's'; s: AsyncIterable<unknown> } | { k: 'e'; e: Error }
@@ -96,7 +97,7 @@ describe('RUNTIME3-1: user_cancelled ≠ stream_timeout', () => {
     // skipped (not 'stream_timeout'), and the stream's second yield
     // terminates the loop with 'stop_sequence'. Pre-fix: would have
     // thrown 'Stream timed out' here.
-    expect(result.result.reason).toBe('stop_sequence')
+    expect(result.result.status).toBe('cancelled')
   })
 })
 
@@ -141,7 +142,7 @@ describe('RUNTIME3-2: tool arguments must be a non-null object', () => {
 // 3) AgentTool pre-aborted early-return
 // ─────────────────────────────────────────────────────────────────────
 describe('RUNTIME3-3: AgentTool pre-aborted cleanup', () => {
-  it('disposes child engine even when parent signal is already aborted', async () => {
+  it('does not create child resources when parent signal is already aborted', async () => {
     let disposed = 0, ran = 0
     const child = {
       runTurn: () => { ran++; return Promise.resolve({ result: { output: 'never', reason: 'stop_sequence' as const } }) },
@@ -153,7 +154,7 @@ describe('RUNTIME3-3: AgentTool pre-aborted cleanup', () => {
     const out = await tool.execute({ description: 'sub', prompt: 'p', subagent_type: 'general-purpose' }, { cwd: '/tmp', permissionMode: 'auto', signal: ac.signal })
     expect(out.isError).toBe(true)
     expect(ran).toBe(0)       // pre-aborted → never invoked
-    expect(disposed).toBe(1)  // BUT still disposed via finally
+    expect(disposed).toBe(0)
   })
 
   it('detaches abort listener on a clean run (late abort does not fire child.abort)', async () => {
@@ -169,4 +170,8 @@ describe('RUNTIME3-3: AgentTool pre-aborted cleanup', () => {
     ac.abort()                 // fires after listener was removed in finally
     expect(lateAbort).toBe(false)
   })
+})
+vi.mock('../src/core/verification.js', async importOriginal => {
+  const actual = await importOriginal<typeof VerificationModule>()
+  return { ...actual, captureArtifactVersion: () => Promise.resolve('unchanged-abort-fixture') }
 })

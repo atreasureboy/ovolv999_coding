@@ -1,3 +1,5 @@
+import { safeHistoryStart } from './messageGroups.js'
+import { getModelInfo } from './providers.js'
 /**
  * Conversation Compact — auto-summarize when context grows too large
  *
@@ -50,6 +52,7 @@ export function isAbort(err: unknown, signal?: AbortSignal): boolean {
 // Model max context window (tokens). Matches claude-sonnet-4-x 200k context.
 // Sub-agents inherit the same model so one constant is sufficient here.
 export const MODEL_MAX_CONTEXT_TOKENS = 200_000
+export const UNKNOWN_MODEL_CONTEXT_TOKENS = 64_000
 
 /**
  * Per-character token estimate factor. ASCII is the common case and the
@@ -197,7 +200,9 @@ export function resolveContextWindow(model: string, override?: number): number {
   if (isFinitePositiveInteger(override)) {
     return override as number
   }
-  if (typeof model !== 'string' || !model) return MODEL_MAX_CONTEXT_TOKENS
+  if (typeof model !== 'string' || !model) return UNKNOWN_MODEL_CONTEXT_TOKENS
+  const metadata = getModelInfo(model)
+  if (metadata) return metadata.contextWindow
 
   // Find longest matching pattern so more-specific rules shadow generic ones
   let bestMatch: { pattern: RegExp; window: number } | null = null
@@ -209,7 +214,7 @@ export function resolveContextWindow(model: string, override?: number): number {
     }
   }
   if (bestMatch) return bestMatch.window
-  return MODEL_MAX_CONTEXT_TOKENS
+  return UNKNOWN_MODEL_CONTEXT_TOKENS
 }
 
 // Percentage-based thresholds — the single source of truth for context pressure
@@ -390,6 +395,8 @@ export function estimateTokens(messages: OpenAIMessage[]): number {
   for (const msg of messages) {
     if (typeof msg.content === 'string') {
       tokens += estimateTextTokens(msg.content)
+    } else if (Array.isArray(msg.content)) {
+      for (const part of msg.content) tokens += part.type === 'text' ? estimateTextTokens(part.text) : 1024
     } else if (msg.content === null) {
       tokens += 1 // ≈1 token for null content with tool_calls
     }
@@ -561,50 +568,7 @@ export interface CompactResult {
  * down without spinning up a fake OpenAI client.
  */
 export function computeSafeSplitPoint(messages: OpenAIMessage[]): number {
-  const initial = messages.length - KEEP_RECENT_MESSAGES
-
-  // `idx` is safe iff messages[idx] is a valid leading message and any
-  // tool_calls it names are matched by tool results inside [idx+1..).
-  const isSafe = (idx: number): boolean => {
-    if (idx < 0 || idx >= messages.length) return false
-    const m = messages[idx]
-    if (!m) return false
-    if (m.role === 'tool') return false
-    if (m.role === 'assistant' && m.tool_calls && m.tool_calls.length > 0) {
-      const ids = new Set(m.tool_calls.map((tc) => tc.id))
-      for (let j = idx + 1; j < messages.length; j++) {
-        const n = messages[j]
-        if (!n) break
-        if (n.role === 'tool' && n.tool_call_id && ids.has(n.tool_call_id)) {
-          ids.delete(n.tool_call_id)
-        } else if (n.role !== 'tool') {
-          // Encountered a non-tool message before satisfying all ids →
-          // some tool_calls are unmatched.
-          break
-        }
-      }
-      return ids.size === 0
-    }
-    return true
-  }
-
-  if (initial <= 0) return Math.max(0, initial)
-
-  // Walk FORWARD from initial split, skipping any leading unsafe boundary.
-  let split = initial
-  while (split < messages.length && !isSafe(split)) {
-    split++
-  }
-  if (split < messages.length) return split
-
-  // Walk BACKWARD from the end — pick the largest safe index we can find.
-  // (We may have overshot because messages[initial..] is wholly a long
-  //  orphan block — e.g. trailing tool results with no assistant call.)
-  for (let s = messages.length - 1; s > 0; s--) {
-    if (isSafe(s)) return s
-  }
-  // Nothing safe — caller treats this as "cannot keep anything verbatim".
-  return messages.length
+  return safeHistoryStart(messages, KEEP_RECENT_MESSAGES)
 }
 
 /**
@@ -710,7 +674,7 @@ export async function maybeCompact(
   const summaryContent = `[CONVERSATION SUMMARY — previous context compacted]\n\n${summary}`
 
   const summaryMessage: OpenAIMessage = {
-    role: 'user',
+    role: 'system', source: 'summary',
     content: summaryContent,
   }
 

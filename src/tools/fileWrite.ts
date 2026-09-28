@@ -7,8 +7,9 @@ import { existsSync } from 'fs'
 import { readFile } from 'fs/promises'
 import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/types.js'
 import { WRITE_FILE_DESCRIPTION } from '../prompts/tools.js'
-import { hasFileBeenRead, hasFileChanged, markFileRead } from '../core/fileState.js'
+import { getFileState } from '../core/fileState.js'
 import { atomicWrite } from '../core/atomicWrite.js'
+import { resolveWorkspacePath } from '../core/workspacePath.js'
 
 export interface WriteFileInput {
   file_path: string
@@ -42,17 +43,21 @@ export class FileWriteTool implements Tool {
   }
 
   async execute(input: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
-    const { file_path, content } = input as unknown as WriteFileInput
+    const { file_path: rawPath, content } = input as unknown as WriteFileInput
 
-    if (!file_path || typeof file_path !== 'string') {
+    const fileState = getFileState(context)
+    if (!rawPath || typeof rawPath !== 'string') {
       return { content: 'Error: file_path is required', isError: true }
     }
+    let file_path: string
+    try { file_path = resolveWorkspacePath(context, rawPath) }
+    catch (error) { return { content: `Error: ${(error as Error).message}`, isError: true } }
     if (typeof content !== 'string') {
       return { content: 'Error: content must be a string', isError: true }
     }
 
     // Enforce read-before-overwrite for existing files (like Claude Code)
-    if (existsSync(file_path) && !hasFileBeenRead(file_path)) {
+    if (existsSync(file_path) && !fileState.hasFileBeenRead(file_path)) {
       return {
         content: `Error: ${file_path} already exists. You must Read it first before overwriting. Use the Read tool.`,
         isError: true,
@@ -82,7 +87,7 @@ export class FileWriteTool implements Tool {
     // couldn't verify is exactly the silent-overwrite scenario this guard
     // exists to prevent.
     // ─────────────────────────────────────────────────────────────────────
-    if (existsSync(file_path) && hasFileBeenRead(file_path)) {
+    if (existsSync(file_path) && fileState.hasFileBeenRead(file_path)) {
       let currentContent: string
       try {
         currentContent = await readFile(file_path, 'utf8')
@@ -96,7 +101,7 @@ export class FileWriteTool implements Tool {
           isError: true,
         }
       }
-      if (hasFileChanged(file_path, currentContent)) {
+      if (fileState.hasFileChanged(file_path, currentContent)) {
         return {
           content: `Error: ${file_path} has been modified since you last read it (by a linter, formatter, or the user). Read the file again before overwriting to avoid losing changes.`,
           isError: true,
@@ -105,7 +110,9 @@ export class FileWriteTool implements Tool {
     }
 
     // Back up the file before modifying (undo/checkpoint support)
-    context.fileHistory?.trackEdit(file_path)
+    const backup = context.fileHistory?.trackEdit(file_path)
+    if (backup?.status === 'failed') return { content: `Backup failed; file was not changed: ${backup.error}`, isError: true }
+    context.signal?.throwIfAborted()
 
     try {
       // Atomic write: write to a uniquely-suffixed tmp file in the same
@@ -117,7 +124,7 @@ export class FileWriteTool implements Tool {
       //   - subsequent Read sees "File unchanged" without re-reading
       //   - subsequent Write/Edit hash-checks against this baseline
       // Pass `content` (the bytes we just wrote) to populate the hash.
-      markFileRead(file_path, content)
+      fileState.markFileRead(file_path, content)
 
       // Line count: strip one trailing newline so "hello\n" = 1 line, not 2
       const lines = content.endsWith('\n') ? content.slice(0, -1).split('\n').length : content.split('\n').length

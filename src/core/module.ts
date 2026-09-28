@@ -29,6 +29,8 @@ export type ModuleFactory = (ctx: ModuleContext) => AgentModule
 /** Context passed to module.boot() */
 export interface ModuleBootContext {
   cwd: string
+  abortSignal?: AbortSignal
+  model?: string
   sessionDir?: string
   config: EngineConfig
   /** The user's message for this run — used for relevance-based memory retrieval */
@@ -61,6 +63,8 @@ export interface ModuleIterationResult {
 /** Context passed to module.onComplete() */
 export interface ModuleRunContext {
   cwd: string
+  abortSignal?: AbortSignal
+  model?: string
   sessionDir?: string
   turnResult: TurnResult
   messages: OpenAIMessage[]
@@ -75,6 +79,8 @@ export interface ModuleRunContext {
  */
 export interface AgentModule {
   readonly name: string
+  onModelChange?(model: string): void
+  dispose?(): void | Promise<void>
   /** Modules that must be enabled before this one (resolved by registry) */
   readonly dependencies?: string[]
 

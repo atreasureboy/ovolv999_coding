@@ -6,7 +6,7 @@
  * performUpdate) are exercised structurally only.
  */
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest'
 import {
   parseVersion,
   compareVersions,
@@ -27,16 +27,15 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 
 let testHome: string
-let origHome: string | undefined
 
 beforeAll(() => {
   testHome = mkdtempSync(join(tmpdir(), 'ovolv999-updater-'))
-  origHome = process.env.HOME
-  process.env.HOME = testHome
+  vi.stubEnv('HOME', testHome)
+  vi.stubEnv('USERPROFILE', testHome)
 })
 
 afterAll(() => {
-  if (origHome !== undefined) process.env.HOME = origHome
+  vi.unstubAllEnvs()
   rmSync(testHome, { recursive: true, force: true })
 })
 

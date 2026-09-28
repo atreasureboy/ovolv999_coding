@@ -16,9 +16,10 @@
  * layer so a crash mid-rewrite never leaves a torn file.
  */
 
-import { appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from 'fs'
+import { appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync, statSync } from 'fs'
 import { join } from 'path'
 import { randomBytes, randomUUID } from 'crypto'
+import { withPersistenceLock } from './persistenceLock.js'
 
 export interface EpisodicMemoryEntry {
   id: string
@@ -29,6 +30,12 @@ export interface EpisodicMemoryEntry {
   outcome: 'success' | 'failure' | 'partial'
   duration?: number      // ms
   timestamp: string      // ISO 8601
+}
+
+export interface EpisodicMemoryWriteResult extends EpisodicMemoryEntry {
+  persistence: 'persisted' | 'failed'
+  persistenceError?: string
+  retention?: 'applied' | 'pending'
 }
 
 const VALID_OUTCOMES: ReadonlySet<EpisodicMemoryEntry['outcome']> = new Set([
@@ -140,6 +147,8 @@ export class EpisodicMemory {
    * it up from observed writes.
    */
   private entryCount: number | null = null
+  private lastObservedMtimeMs = -1
+  private lastObservedSize = -1
   /**
    * Per-instance cap. Defaults to MAX_EPISODES; configurable via
    * the constructor option. Validated as a positive integer at
@@ -156,24 +165,40 @@ export class EpisodicMemory {
     this.maxEpisodes = sanitizeMaxEpisodes(options.maxEpisodes)
   }
 
-  /** Append a new episode entry */
-  write(entry: Omit<EpisodicMemoryEntry, 'id'>): EpisodicMemoryEntry {
+  write(entry: Omit<EpisodicMemoryEntry, 'id'>): EpisodicMemoryWriteResult {
     const full: EpisodicMemoryEntry = { ...entry, id: nextId() }
     try {
-      appendFileSync(this.filePath, JSON.stringify(full) + '\n', 'utf8')
-      // Successful append → bump the tracked count. We increment
-      // AFTER the append so a failed append doesn't desync the
-      // counter, and we lazy-init from `null` to 1 if this is the
-      // first observed write to an existing-but-uncounted file.
-      if (this.entryCount === null) this.entryCount = 1
-      else this.entryCount++
-    } catch { /* best-effort */ }
-    // Enforce the cap AFTER appending so the on-disk state is always
-    // consistent: a successful append is reflected on disk before we
-    // decide whether to compact. Eviction only fires when the count
-    // crosses the threshold; under-cap writes skip the rewrite.
-    this.enforceCap()
-    return full
+      return withPersistenceLock(this.filePath, () => {
+        try {
+          const stat = statSync(this.filePath)
+          if (stat.mtimeMs !== this.lastObservedMtimeMs || stat.size !== this.lastObservedSize) this.entryCount = null
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+          this.entryCount = 0
+        }
+        const count = this.ensureCount()
+        const fd = openSync(this.filePath, 'a')
+        try {
+          appendFileSync(fd, JSON.stringify(full) + '\n', 'utf8')
+          fsyncSync(fd)
+        } finally {
+          closeSync(fd)
+        }
+        this.entryCount = count + 1
+        const retained = this.enforceCap()
+        try {
+          const stat = statSync(this.filePath)
+          this.lastObservedMtimeMs = stat.mtimeMs
+          this.lastObservedSize = stat.size
+        } catch {
+          this.entryCount = null
+        }
+        return { ...full, persistence: 'persisted', retention: retained ? 'applied' : 'pending' }
+      })
+    } catch (error) {
+      this.entryCount = null
+      return { ...full, persistence: 'failed', persistenceError: error instanceof Error ? error.message : 'Persistence failed' }
+    }
   }
 
   /**
@@ -192,13 +217,13 @@ export class EpisodicMemory {
    * after the constructor, and it fires once per `maxEpisodes` writes
    * — making the amortized cost of N writes O(N) instead of O(N²).
    */
-  private enforceCap(): void {
+  private enforceCap(): boolean {
     const cap = this.maxEpisodes
     const count = this.ensureCount()
-    if (count <= cap) return
+    if (count <= cap) return true
 
     const all = this.readAll()
-    if (all.length <= cap) return
+    if (all.length <= cap) return false
 
     // Keep the most recent `cap` entries (chronological order:
     // readAll preserves file order, so the tail is the newest).
@@ -212,7 +237,7 @@ export class EpisodicMemory {
     let tmpFd: number | null = null
     try {
       tmpFd = openSync(tmpPath, 'w')
-      writeSync(tmpFd, payload, 0, payload.length, 0)
+      writeFileSync(tmpFd, payload)
       fsyncSync(tmpFd)
       closeSync(tmpFd)
       tmpFd = null
@@ -221,6 +246,7 @@ export class EpisodicMemory {
       // subsequent writes don't re-trigger compaction for another
       // cap-sized batch of appends.
       this.entryCount = keep.length
+      return true
     } catch {
       if (tmpFd !== null) {
         try { closeSync(tmpFd) } catch { /* swallow */ }
@@ -230,9 +256,7 @@ export class EpisodicMemory {
       } catch {
         /* swallow */
       }
-      /* swallow — better to overshoot the cap for one cycle than to
-         lose the append that triggered this. The next ensureCount()
-         call will reconcile from disk. */
+      return false
     }
   }
 
@@ -257,9 +281,8 @@ export class EpisodicMemory {
     let raw: string
     try {
       raw = readFileSync(this.filePath, 'utf8')
-    } catch {
-      this.entryCount = 0
-      return 0
+    } catch (error) {
+      throw new Error('Episodes could not be read; append was not committed', { cause: error })
     }
     if (raw.length === 0) {
       this.entryCount = 0

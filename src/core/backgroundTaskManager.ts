@@ -282,8 +282,15 @@ export class BackgroundTaskManager {
       sessionDir?: string
       metadata?: Record<string, unknown>
       signal?: AbortSignal
+      onSettled?: () => void
     },
   ): string {
+    let settled = false
+    const onSettled = (): void => {
+      if (settled) return
+      settled = true
+      options?.onSettled?.()
+    }
     const id = `task_${randomUUID().slice(0, 8)}`
     const now = Date.now()
 
@@ -400,6 +407,7 @@ export class BackgroundTaskManager {
       info.endTime = Date.now()
       info.durationMs = info.endTime - info.startTime
       task.process = null
+      onSettled()
       return true
     }
 
@@ -422,6 +430,7 @@ export class BackgroundTaskManager {
       info.durationMs = 0
       info.exitCode = -1
       task.stopped = true
+      onSettled()
       return id
     }
 
@@ -466,6 +475,7 @@ export class BackgroundTaskManager {
     }
 
     proc.on('close', (code: number | null) => {
+      onSettled()
       // Process has exited. Always clear timer + null the handle FIRST,
       // so the escalation callback (if it races us) sees task.process
       // !== proc and bails out. Only THEN decide whether to override
@@ -486,6 +496,7 @@ export class BackgroundTaskManager {
     })
 
     proc.on('error', (err: Error & { code?: string }) => {
+      if (proc.pid === undefined) onSettled()
       // Same reasoning as 'close': process is gone (or never came up).
       // Always clean up the timer + handle first.
       removeSignalListener()

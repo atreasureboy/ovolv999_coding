@@ -9,7 +9,7 @@
  */
 
 import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/types.js'
-import { runVerification } from './agent.js'
+import { createVerificationPlan, executeVerification } from '../core/verification.js'
 
 export class VerifyPlanExecutionTool implements Tool {
   name = 'VerifyPlanExecution'
@@ -42,20 +42,17 @@ Returns pass/fail per command plus a failure summary (stdout/stderr, truncated).
     return false
   }
 
-  execute(_input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+  async execute(_input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     try {
-      const result = runVerification(ctx.cwd)
-      if (!result) {
-        return Promise.resolve({
-          content: 'No verification commands detected for this project.',
-          isError: false,
-        })
+      const plan = createVerificationPlan(ctx.cwd, undefined, [...(ctx.verificationExcludedPaths ?? []), ...(ctx.sessionDir ? [ctx.sessionDir] : [])])
+      const verification = await executeVerification({ cwd: ctx.cwd, plan, signal: ctx.signal, runId: ctx.runId })
+      const failed = verification.status === 'failed' || ctx.signal?.aborted === true
+      return {
+        content: `[Verification: ${verification.status}]\n\n${verification.output}`,
+        isError: failed,
+        status: ctx.signal?.aborted ? 'cancelled' : failed ? 'failed' : undefined,
+        verification,
       }
-      const icon = result.passed ? '✓' : '✗'
-      return Promise.resolve({
-        content: `${icon} ${result.passed ? 'All checks passed' : 'Verification failed'}\n\n${result.output}`,
-        isError: !result.passed,
-      })
     } catch (err) {
       return Promise.resolve({
         content: `Verification error: ${(err as Error).message}`,

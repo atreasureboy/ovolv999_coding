@@ -769,120 +769,23 @@ describe('FileWriteTool — readFile failure during staleness check (defect #10)
 
 // ─── 11. FileEdit formatter uses execFileSync (no shell-string concat) ─────
 
-describe('FileEditTool — formatter uses execFileSync, not execSync+shell', () => {
-  /**
-   * Source-level regression guard. The auto-format path must NEVER shell-
-   * interpolate file_path: that input is untrusted LLM-controlled and any
-   * shell-string concat (e.g. `npx prettier --write "${file_path}"`) would
-   * expose the host to command injection. We require execFileSync (argv
-   * array) and reject execSync entirely.
-   */
-  it('imports execFileSync from child_process and does not use execSync', async () => {
-    const { readFile } = await import('fs/promises')
-    const src = await readFile(join(__dirname, '../src/tools/fileEdit.ts'), 'utf8')
-    expect(src).toMatch(
-      /import\s*\{[^}]*\bexecFileSync\b[^}]*\}\s*from\s*['"]child_process['"]/,
-    )
-    expect(src).not.toMatch(/\bexecSync\s*\(/)
-    // And the formatter invocations must use array-form argv:
-    expect(src).toMatch(/execFileSync\(\s*['"]npx['"]\s*,\s*\[\s*['"]prettier['"]\s*,\s*['"]--write['"]\s*,\s*file_path\s*\]/)
-    expect(src).toMatch(/execFileSync\(\s*['"]npx['"]\s*,\s*\[\s*['"]eslint['"]\s*,\s*['"]--fix['"]\s*,\s*file_path\s*\]/)
-  })
-
-  /**
-   * Behavioral test: when the formatter IS invoked (prettier config present),
-   * it must call execFileSync — NOT a shell. We install a fake `npx` script
-   * at the front of PATH that records its argv to a log file. With
-   * execFileSync+argv the fake npx sees file_path as ONE element. With the
-   * old execSync+shell-string pattern the entire command would be
-   * shell-parsed by /bin/sh first, and the fake script would never run.
-   *
-   * We use a file_path that contains a literal shell metacharacter so that
-   * the test would FAIL loudly under any regression to shell interpolation:
-   * a shell would either split on `;` and try to run `touch /tmp/...PWNED`,
-   * or execute the file_path as a command substitution.
-   */
-  it('formatter receives file_path as a single argv element (no shell parsing)', async () => {
-    if (process.platform === 'win32') {
-      // Windows: PATH resolution + .bat vs executable semantics differ.
-      // The source-level guard above covers Windows too — that's the
-      // cross-platform line of defense.
-      expect(true).toBe(true)
-      return
-    }
-
-    // Make a file whose NAME contains shell metacharacters. The literal
-    // name is what execFileSync should hand to the child as argv[2]. A
-    // shell-string concat that escapes the quoting would either split
-    // the command on ';' or try to run `touch` as a separate command.
-    const dir = newDir('formatter-execfile')
-    // Sentinel lives in the same dir. If the shell were to interpret
-    // `$(touch PWNED)` inside the filename, cwd-relative `touch PWNED`
-    // would create this file. With execFileSync+argv it never runs.
-    const sentinel = join(dir, 'PWNED')
-    // Filename is a single path component (no `/` past `dir/`). Linux
-    // accepts `$`, `(`, `)`, spaces in filenames.
-    const fp = join(dir, 'a$(touch PWNED)')
-    writeFileSync(fp, 'hello\n', 'utf8')
-    // Trigger the prettier path.
-    writeFileSync(join(dir, '.prettierrc'), '{}', 'utf8')
-
-    // Install a fake `npx` that records argv to a log file inside dir.
-    const fakeBin = join(dir, 'bin')
-    mkdirSync(fakeBin, { recursive: true })
-    const argvLog = join(dir, 'argv.log')
-    const npxScript = join(fakeBin, 'npx')
-    writeFileSync(
-      npxScript,
-      [
-        '#!/bin/sh',
-        // Record each argv element on its own line, one per line. We use
-        // shell $@ here (the FAKE script's own shell) but the file_path
-        // has already arrived as a single argv element — that's the
-        // property we're testing.
-        `printf '%s\\n' "$@" > "${argvLog}"`,
-        'exit 0',
-      ].join('\n') + '\n',
-      'utf8',
-    )
-    chmodSync(npxScript, 0o755)
-
-    const pathMod = await import('path')
-    const originalPath = process.env.PATH
-    process.env.PATH = `${fakeBin}${pathMod.delimiter}${originalPath ?? ''}`
-    try {
-      const read = new FileReadTool()
-      await read.execute({ file_path: fp }, fakeContext(dir))
-
-      const edit = new FileEditTool()
-      const result = await edit.execute(
-        { file_path: fp, old_string: 'hello', new_string: 'world' },
-        fakeContext(dir),
-      )
-      // Edit must succeed (or fail only for benign reasons like timeout).
-      // The point of the test is that whatever happened, the fake npx's
-      // argv log proves how file_path was passed.
-      expect(result.isError).toBe(false)
-
-      // The sentinel must NOT exist — no shell split on `;`.
-      expect(existsSync(sentinel)).toBe(false)
-
-      // The fake npx must have been invoked with file_path as a single
-      // argv element. argv[0] = 'prettier', argv[1] = '--write',
-      // argv[2] = file_path (one line in the log).
-      expect(existsSync(argvLog)).toBe(true)
-      const argvLines = readFileSync(argvLog, 'utf8').split('\n').filter((s) => s.length > 0)
-      // argv = ['prettier', '--write', <file_path>] (3 elements)
-      expect(argvLines).toHaveLength(3)
-      expect(argvLines[0]).toBe('prettier')
-      expect(argvLines[1]).toBe('--write')
-      expect(argvLines[2]).toBe(fp)
-      // Crucially: the embedded `$(...)` survived verbatim — not
-      // interpreted by any shell between Edit and our fake npx.
-      expect(argvLines[2]).toContain('$(touch PWNED)')
-    } finally {
-      process.env.PATH = originalPath
-    }
+describe('FileEditTool formatter process', () => {
+  it('runs the installed formatter with literal argv on every platform', async () => {
+    const dir = newDir('formatter-process')
+    const fp = join(dir, 'a$(touch PWNED).ts')
+    writeFileSync(fp, 'hello\n')
+    writeFileSync(join(dir, '.prettierrc'), '{}')
+    const formatter = join(dir, 'node_modules', 'prettier')
+    mkdirSync(formatter, { recursive: true })
+    writeFileSync(join(formatter, 'package.json'), JSON.stringify({ name: 'prettier', bin: 'cli.cjs' }))
+    writeFileSync(join(formatter, 'cli.cjs'), "require('node:fs').writeFileSync('argv.json', JSON.stringify(process.argv.slice(2)))")
+    await new FileReadTool().execute({ file_path: fp }, fakeContext(dir))
+    const result = await new FileEditTool().execute({ file_path: fp, old_string: 'hello', new_string: 'world' }, fakeContext(dir))
+    expect(result.isError).toBe(false)
+    expect(result.content).toContain('formatted with prettier')
+    expect(JSON.parse(readFileSync(join(dir, 'argv.json'), 'utf8'))).toEqual(['--write', fp])
+    expect(existsSync(join(dir, 'PWNED'))).toBe(false)
+    expect(readFileSync(fp, 'utf8')).toBe('world\n')
   })
 })
 

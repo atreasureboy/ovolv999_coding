@@ -2,7 +2,7 @@
  * Tests for src/ui/statusLineCustom.ts
  */
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest'
 import {
   renderStatusLine,
   loadConfig,
@@ -20,16 +20,15 @@ import { join } from 'path'
 import { homedir } from 'os'
 
 let testHome: string
-let origHome: string | undefined
 
 beforeAll(() => {
   testHome = mkdtempSync(join(tmpdir(), 'ovolv999-sl-'))
-  origHome = process.env.HOME
-  process.env.HOME = testHome
+  vi.stubEnv('HOME', testHome)
+  vi.stubEnv('USERPROFILE', testHome)
 })
 
 afterAll(() => {
-  if (origHome !== undefined) process.env.HOME = origHome
+  vi.unstubAllEnvs()
   rmSync(testHome, { recursive: true, force: true })
 })
 
@@ -142,7 +141,7 @@ describe('statusLineCustom', () => {
 
   describe('renderStatusLine — script mode', () => {
     it('runs a shell script with env vars', () => {
-      const out = renderStatusLine(baseCtx, { script: 'echo "MODE=$STATUS_MODE MODEL=$STATUS_MODEL"' })
+      const out = renderStatusLine(baseCtx, { script: `"${process.execPath}" -e "console.log('MODE='+process.env.STATUS_MODE+' MODEL='+process.env.STATUS_MODEL)"` })
       expect(out).toContain('MODE=plan')
       expect(out).toContain('MODEL=claude-sonnet-4')
     })

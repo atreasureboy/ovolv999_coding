@@ -167,13 +167,13 @@ describe('hooks', () => {
     })
 
     it('passes env vars to hook', () => {
-      const hook: HookConfig = { matcher: '*', command: 'echo $TOOL_NAME' }
+      const hook: HookConfig = { matcher: '*', command: `"${process.execPath}" -e "console.log(process.env.TOOL_NAME)"` }
       const result = runHook(hook, ctx)
       expect(result.stdout.trim()).toBe('Bash')
     })
 
     it('passes tool input fields as env vars', () => {
-      const hook: HookConfig = { matcher: '*', command: 'echo $TOOL_INPUT_COMMAND' }
+      const hook: HookConfig = { matcher: '*', command: `"${process.execPath}" -e "console.log(process.env.TOOL_INPUT_COMMAND)"` }
       const result = runHook(hook, { ...ctx, toolInput: { command: 'git status' } })
       expect(result.stdout.trim()).toBe('git status')
     })

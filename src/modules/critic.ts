@@ -33,6 +33,8 @@ export class CriticModule implements AgentModule {
     return {}
   }
 
+  onModelChange(model: string): void { this.model = model }
+
   async onIteration(ctx: ModuleIterationContext): Promise<ModuleIterationResult | void> {
     if (this.config.planMode) return
     if (this.config.poor?.enabled) return

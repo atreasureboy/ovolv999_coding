@@ -168,6 +168,11 @@ export class LspClient extends EventEmitter {
       return false
     }
 
+    this.proc.on('error', (err: Error) => {
+      for (const { reject } of this.pending.values()) reject(err)
+      this.pending.clear()
+      this.initialized = false
+    })
     if (!this.proc.stdout || !this.proc.stdin) {
       return false
     }

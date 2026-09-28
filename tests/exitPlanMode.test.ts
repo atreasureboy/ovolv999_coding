@@ -13,8 +13,8 @@ describe('ExitPlanModeTool', () => {
     expect(tool.name).toBe('ExitPlanMode')
   })
 
-  it('is concurrency-safe', () => {
-    expect(tool.isConcurrencySafe?.()).toBe(true)
+  it('serializes the permission transition', () => {
+    expect(tool.isConcurrencySafe?.()).toBe(false)
   })
 
   it('rejects empty plan', async () => {
@@ -48,11 +48,11 @@ describe('ExitPlanModeTool', () => {
     expect(result.content).toContain('still in plan mode')
   })
 
-  it('auto-approves when no callback (sub-agent/piped mode)', async () => {
+  it('requires input when no approval channel exists', async () => {
     const result = await tool.execute({ plan: 'My plan' }, makeCtx())
-    expect(result.isError).toBe(false)
-    expect(result.content).toContain('auto-approved')
-    expect(result.content).toContain('My plan')
+    expect(result.isError).toBe(true)
+    expect(result.status).toBe('needs_input')
+    expect(result.content).toContain('Plan mode remains active')
   })
 
   it('returns error if callback throws', async () => {

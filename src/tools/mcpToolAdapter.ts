@@ -53,9 +53,9 @@ export class McpToolAdapter implements Tool {
     return false
   }
 
-  async execute(input: Record<string, unknown>, _ctx: ToolContext): Promise<ToolResult> {
+  async execute(input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     try {
-      const result = await this.client.callTool(this.toolInfo.name, input)
+      const result = await this.client.callTool(this.toolInfo.name, input, ctx.signal)
       return {
         content: result.content || `(MCP tool ${this.toolInfo.name} returned no text content)`,
         isError: result.isError,

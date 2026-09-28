@@ -21,9 +21,15 @@ import type { AgentConfig } from '../core/agentPresets.js'
 import { resolveAgentConfig, validateAgentConfig, PRESET_NAMES } from '../core/agentPresets.js'
 import { Renderer } from '../ui/renderer.js'
 import { tmuxLayout } from '../ui/tmuxLayout.js'
-import { appendFileSync, existsSync, readFileSync } from 'fs'
-import { join } from 'path'
-import { execSync } from 'child_process'
+import { appendFileSync } from 'fs'
+import { join, resolve } from 'path'
+import { createVerificationPlan, captureArtifactVersion, executeVerification } from '../core/verification.js'
+import { normalizeOutcome, settleWithin } from '../core/outcome.js'
+import type { VerificationEvidence } from '../core/outcome.js'
+import { getWorktreeManager } from './worktree.js'
+import { randomUUID } from 'crypto'
+import { withWorkspaceAccess, workspaceIdentity, isWorkspaceQuarantined, quarantineWorkspace } from '../core/runContext.js'
+export { detectVerifyCommands } from '../core/verification.js'
 import { str } from '../core/strings.js'
 import type { PermissionManager } from '../core/permissionSystem.js'
 
@@ -37,93 +43,35 @@ const AGENT_EVENT_LOG_FILE = 'agent_events.ndjson'
 
 // ── Verification gate (AgentOS §6 "No Tuple, No Merge") ─────────────────────
 
-function packageManagerCommand(cwd: string, script: string, packageManager?: string): string {
-  const pm = packageManager?.split('@')[0]
-  if (pm === 'bun' || existsSync(join(cwd, 'bun.lock')) || existsSync(join(cwd, 'bun.lockb'))) return `bun run ${script} 2>&1`
-  if (pm === 'pnpm' || existsSync(join(cwd, 'pnpm-lock.yaml'))) return `pnpm run ${script} 2>&1`
-  if (pm === 'yarn' || existsSync(join(cwd, 'yarn.lock'))) return `yarn ${script} 2>&1`
-  return script === 'test' ? 'npm test 2>&1' : `npm run ${script} 2>&1`
+export async function runVerification(cwd: string, signal?: AbortSignal): Promise<{ passed: boolean; output: string } | null> {
+  const result = await executeVerification({ cwd, signal })
+  return result.status === 'not_applicable' ? null : { passed: result.status === 'passed', output: result.output }
 }
 
-function readPackageInfo(cwd: string): { scripts: Record<string, string>; packageManager?: string } {
+const workspaceQueues = new Map<string, Promise<void>>()
+
+async function awaitChild<T>(promise: Promise<T>, cwd: string, signal: AbortSignal | undefined, graceMs: number): Promise<T> {
+  if (!signal) return promise
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let abort: () => void = () => {}
   try {
-    const raw = readFileSync(join(cwd, 'package.json'), 'utf8')
-    const parsed = JSON.parse(raw) as { scripts?: unknown; packageManager?: unknown }
-    return {
-      scripts: parsed.scripts && typeof parsed.scripts === 'object' && !Array.isArray(parsed.scripts)
-        ? parsed.scripts as Record<string, string>
-        : {},
-      packageManager: typeof parsed.packageManager === 'string' ? parsed.packageManager : undefined,
-    }
-  } catch {
-    return { scripts: {} }
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        abort = () => {
+          timer = setTimeout(() => {
+            quarantineWorkspace(cwd, promise)
+            reject(new Error('Cancelled child did not settle; workspace quarantined until completion.'))
+          }, graceMs)
+        }
+        signal.addEventListener('abort', abort, { once: true })
+        if (signal.aborted) abort()
+      }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+    signal.removeEventListener('abort', abort)
   }
-}
-
-/**
- * Detect appropriate verification commands based on project files.
- * Project scripts win over generic guesses so verification follows local intent.
- */
-export function detectVerifyCommands(cwd: string): string[] {
-  const has = (f: string): boolean => {
-    try { return existsSync(join(cwd, f)) } catch { return false }
-  }
-
-  // Python
-  if (has('pyproject.toml') || has('setup.py') || has('requirements.txt')) {
-    return ['python -m compileall -q . 2>&1']
-  }
-  // Go
-  if (has('go.mod')) {
-    return ['go vet ./... 2>&1']
-  }
-  // Rust
-  if (has('Cargo.toml')) {
-    return ['cargo check 2>&1']
-  }
-  // TypeScript / JavaScript
-  if (has('package.json')) {
-    const { scripts, packageManager } = readPackageInfo(cwd)
-    const commands: string[] = []
-    const firstTypecheck = scripts.typecheck ? 'typecheck' : scripts.tsc ? 'tsc' : scripts.build ? 'build' : null
-    if (firstTypecheck) commands.push(packageManagerCommand(cwd, firstTypecheck, packageManager))
-    if (scripts.lint) commands.push(packageManagerCommand(cwd, 'lint', packageManager))
-    if (scripts.test) commands.push(packageManagerCommand(cwd, 'test', packageManager))
-    if (commands.length > 0) return commands
-  }
-  if (has('tsconfig.json')) {
-    return ['npx tsc --noEmit 2>&1']
-  }
-  // No known project type — skip verification
-  return []
-}
-
-/**
- * Run verification commands and return results.
- * Returns null if no commands or all pass, or a formatted failure summary.
- */
-export function runVerification(cwd: string): { passed: boolean; output: string } | null {
-  const commands = detectVerifyCommands(cwd)
-  if (commands.length === 0) return null
-
-  const results: string[] = []
-  let allPassed = true
-
-  for (const cmd of commands) {
-    try {
-      execSync(cmd, { cwd, encoding: 'utf8', timeout: 60_000, stdio: ['ignore', 'pipe', 'pipe'] })
-      results.push(`✓ ${cmd.split(' ')[1] || cmd} — passed`)
-    } catch (err: unknown) {
-      allPassed = false
-      const e = err as { stdout?: string; stderr?: string; message?: string }
-      const output = (e.stdout ?? '') + (e.stderr ?? '')
-      const trimmed = output.trim().slice(0, 800)
-      results.push(`✗ ${cmd.split(' ')[1] || cmd} — FAILED\n${trimmed}`)
-    }
-  }
-
-  if (results.length === 0) return null
-  return { passed: allPassed, output: results.join('\n\n') }
 }
 
 // ── Prompt helpers ─────────────────────────────────────────────────────────
@@ -187,7 +135,7 @@ export interface AgentToolWiring {
 
 export class AgentTool implements Tool {
   name = 'Agent'
-  metadata = { concurrencySafe: true, longRunning: true }
+  metadata = { concurrencySafe: false, mutatesState: true, longRunning: true }
 
   /** Immutable per-instance wiring — captured once in the constructor and
    * shared by every parallel Agent call dispatched from this tool. May
@@ -209,7 +157,7 @@ export class AgentTool implements Tool {
     type: 'function',
     function: {
       name: 'Agent',
-      description: `Spawn a specialized sub-agent for a focused task. Multiple Agent calls in one response run concurrently (Promise.all).
+      description: `Spawn a specialized sub-agent for a focused task. Calls sharing a workspace execute serially; pass a worktree name to bind a child to an isolated workspace.
 
 ## Agent Configuration
 
@@ -218,13 +166,13 @@ Option 2 — Custom config: agent_config: { identity, modules, tools, maxIterati
 
 ## Verification Gate
 
-Set verify: true to auto-run tsc --noEmit after the sub-agent completes code changes.
-Failed verification includes error details so you can fix immediately.
+Code changes always run the project verification commands. Set verify: true to request checks for analysis tasks too.
+Failed or unavailable verification prevents acceptance of code changes.
 
 ## Rules
 - prompt must be fully self-contained (sub-agent has no parent context)
 - Sub-agent cannot call Agent (no recursion, max depth 5)
-- Independent tasks can run concurrently (multiple Agent calls in one response)`,
+- Shared workspace tasks are serialized until child execution, verification, and cleanup finish`,
       parameters: {
         type: 'object',
         properties: {
@@ -233,7 +181,8 @@ Failed verification includes error details so you can fix immediately.
           subagent_type: { type: 'string', enum: PRESET_NAMES, description: 'Preset name (default: general-purpose)' },
           agent_config: { type: 'object', description: 'Custom config (overrides subagent_type)' },
           max_iterations: { type: 'number', description: 'Max iterations (overrides preset default)' },
-          verify: { type: 'boolean', description: 'Verification gate: auto-run tsc --noEmit after completion (default false)' },
+          verify: { type: 'boolean', description: 'Request project checks even when no files changed; edits are always verified' },
+          worktree: { type: 'string', description: 'Existing managed worktree name for this task workspace' },
         },
         required: ['description', 'prompt'],
       },
@@ -277,7 +226,37 @@ Failed verification includes error details so you can fix immediately.
       agentConfig.maxIterations = Math.min(input.max_iterations, 200)
     }
 
-    return this.runAgentTask(description, prompt, agentConfig, agentLabel, verify, context)
+    let taskContext = { ...context, runId: context.runId ?? randomUUID(), runFamilyId: context.runFamilyId ?? this.parentConfig.runFamilyId ?? randomUUID() }
+    const worktreeName = typeof input.worktree === 'string' ? input.worktree : undefined
+    if (worktreeName) {
+      try {
+        const binding = getWorktreeManager(context.cwd).getBinding(worktreeName)
+        getWorktreeManager(context.cwd).invalidateAcceptance(worktreeName)
+        taskContext = { ...taskContext, cwd: binding.cwd, workspace: binding }
+      } catch (error) {
+        return { content: 'Error binding worktree: ' + (error as Error).message, isError: true, status: 'blocked' }
+      }
+    }
+    const workspace = workspaceIdentity(taskContext.cwd)
+    if (isWorkspaceQuarantined(workspace)) return { content: 'Workspace is blocked by unfinished child resources.', isError: true, status: 'blocked' }
+    const queueKey = `${workspace}:${this.parentConfig.initialAgentDepth ?? 0}`
+    const previous = workspaceQueues.get(queueKey) ?? Promise.resolve()
+    let release!: () => void
+    const current = new Promise<void>(resolveQueue => { release = resolveQueue })
+    const queued = previous.then(() => current)
+    workspaceQueues.set(queueKey, queued)
+    try {
+      await previous
+      if (taskContext.signal?.aborted) return { content: 'Cancelled before child execution.', isError: true, status: 'cancelled' }
+      if (isWorkspaceQuarantined(workspace)) return { content: 'Workspace is blocked by unfinished child resources.', isError: true, status: 'blocked' }
+      return await withWorkspaceAccess(taskContext.cwd, taskContext.runFamilyId, true, taskContext.signal ?? new AbortController().signal,
+        () => this.runAgentTask(description, prompt, agentConfig, agentLabel, verify, taskContext, worktreeName, context.cwd))
+    } catch (error) {
+      return { content: (error as Error).message, isError: true, status: taskContext.signal?.aborted ? 'cancelled' : 'failed' }
+    } finally {
+      release()
+      if (workspaceQueues.get(queueKey) === queued) workspaceQueues.delete(queueKey)
+    }
   }
 
   // ── runAgentTask — depth is derived, not mutated ─────────────────────────
@@ -297,6 +276,8 @@ Failed verification includes error details so you can fix immediately.
     agentLabel: string,
     verify: boolean,
     context: ToolContext,
+    worktreeName?: string,
+    repositoryPath?: string,
   ): Promise<ToolResult> {
     // The execute() entry point already validated the wiring is present,
     // so `this.*` are guaranteed defined below.
@@ -337,13 +318,19 @@ Failed verification includes error details so you can fix immediately.
     const childRenderer = paneSlot
       ? Renderer.forFile(paneSlot.logFile)
       : (parentRenderer as Renderer)
+    const runtimePaths = [...(parentConfig.verificationExcludedPaths ?? []), ...(context.verificationExcludedPaths ?? []), ...[parentConfig.sessionDir, context.sessionDir].filter((path): path is string => Boolean(path))]
 
     const childConfig: EngineConfig = {
       ...parentConfig,
       agent: agentConfig,
       cwd: context.cwd,
+      parentRunId: context.runId,
+      runFamilyId: context.runFamilyId,
+      parentSignal: context.signal,
+      workspace: context.workspace,
       hookRunner: undefined,
       sessionDir: undefined,
+      verificationExcludedPaths: runtimePaths,
       // Thread depth so the child engine's AgentTool derives the SAME
       // nextDepth = inheritedDepth + 1 = nextDepth + 1 hop later, even
       // though we don't mutate any counter on the parent side.
@@ -434,133 +421,88 @@ Failed verification includes error details so you can fix immediately.
     // still required on the normal (no-abort) exit path.
     let abortListener: (() => void) | null = null
 
+    let response: ToolResult | undefined
+    let verificationExcludedPaths: readonly string[] = []
     try {
-      if (context.signal) {
-        if (context.signal.aborted) {
-          // Pre-aborted path: the parent task was already cancelled
-          // BEFORE we got to attach our abort listener. Surface a
-          // synthetic cancellation result and let `finally` clean up
-          // the timer + dispose the child. Without the move-into-try
-          // refactor, the early `return` would skip both — leaking
-          // the heartbeat timer AND leaving the child engine's
-          // background tasks (its BackgroundTaskManager, transient
-          // caches) running indefinitely.
-          mainRenderer.agentDone(description, false)
-          if (paneSlot) { tmuxLayout.releaseSlot(paneSlot.slot); childRenderer.destroy() }
-          return { content: `[${agentLabel}] Cancelled (parent task aborted)`, isError: true }
+      abortListener = () => childEngine.abort()
+      context.signal?.addEventListener('abort', abortListener, { once: true })
+      if (context.signal?.aborted) {
+        response = { content: '[' + agentLabel + '] Cancelled (parent task aborted)', isError: true, status: 'cancelled' }
+      } else {
+        const plan = createVerificationPlan(context.cwd, undefined, runtimePaths)
+        verificationExcludedPaths = plan.excludedPaths
+        const before = await captureArtifactVersion(context.cwd, verificationExcludedPaths)
+        context.signal?.throwIfAborted()
+        const { result } = await awaitChild(childEngine.runTurn(delegatedPrompt, []), context.cwd, context.signal, parentConfig.cancellationGraceMs ?? 2000)
+        const artifactVersion = await captureArtifactVersion(context.cwd, verificationExcludedPaths)
+        const changed = before !== artifactVersion
+        let status = context.signal?.aborted ? 'cancelled' as const : normalizeOutcome(result)
+        let verification: VerificationEvidence = result.verification ?? {
+          status: 'not_run', workspace: resolve(context.cwd), commands: [], output: '',
         }
-        abortListener = () => childEngine.abort()
-        context.signal.addEventListener('abort', abortListener, { once: true })
-      }
-
-      const { result } = await childEngine.runTurn(delegatedPrompt, [])
-      const durationMs = Date.now() - agentStartTime
-
-      mainRenderer.agentDone(description, result.reason !== 'error')
-      if (paneSlot) { tmuxLayout.releaseSlot(paneSlot.slot); childRenderer.destroy() }
-
-      // ── Verification Gate (AgentOS "No Tuple, No Merge") ──
-      let verifySection = ''
-      if (verify && result.reason !== 'error' && !agentConfig.identity.planMode) {
-        const verifyResult = runVerification(context.cwd)
-        if (verifyResult) {
-          const icon = verifyResult.passed ? '✓' : '✗'
-          verifySection = `\n\n---\n[Verify Gate] ${icon}\n${verifyResult.output}`
-          context.eventLog?.append('invoke_completed', agentLabel, {
-            description,
-            verified: true,
-            verification_passed: verifyResult.passed,
-          }, [agentLabel, 'verify', verifyResult.passed ? 'passed' : 'failed'])
+        const manager = worktreeName ? getWorktreeManager(repositoryPath!) : undefined
+        const artifact = worktreeName ? manager!.getArtifact(worktreeName) : undefined
+        if ((changed || verify) && status === 'completed') {
+          if (!(verification.status === 'passed' && verification.workspace === plan.workspace
+            && verification.artifactVersion === artifactVersion && verification.definitionHash === plan.definitionHash)) {
+            verification = await executeVerification({ cwd: context.cwd, plan, signal: context.signal, runId: context.runId, artifactVersion })
+          }
+          if (context.signal?.aborted) status = 'cancelled'
+          else if (verification.status === 'failed') status = 'failed'
+          else if (changed && verification.status !== 'passed') status = 'blocked'
         }
-      }
-
-      context.eventLog?.append('invoke_completed', agentLabel, {
-        description,
-        success: result.reason !== 'error',
-        reason: result.reason,
-        duration_ms: durationMs,
-        call_depth: nextDepth,
-        output_preview: result.output.slice(0, 500),
-      }, [agentLabel, 'invoke', result.reason !== 'error' ? 'success' : 'error'])
-
-      if (!result.output) {
-        return {
-          content: `[${agentLabel}] "${description}" done (${result.reason}), no text output.${verifySection}`,
-          isError: false,
+        if (status === 'completed' && verification.status === 'passed' && worktreeName && artifact) {
+          await manager!.acceptArtifact(worktreeName, verification, artifact)
         }
+        const verifySection = verification.output ? '\n\n---\n[Verify Gate] ' + verification.status + '\n' + verification.output : ''
+        response = {
+          content: '[' + agentLabel + '] "' + description + '" (' + status + '):\n\n' + (result.output || 'No text output.') + verifySection,
+          isError: status !== 'completed', status, verification,
+        }
+        const summary = result.output.split('\n').filter(line => line.trim()).slice(0, 8).join('\n')
+        if (summary) mainRenderer.agentSummary(agentLabel, description, summary)
       }
-
-      const summaryLines = result.output
-        .split('\n')
-        .map((l: string) => l.trimEnd())
-        .filter((l: string) => l.trim().length > 0)
-        .slice(0, 8)
-        .join('\n')
-      if (summaryLines) {
-        mainRenderer.agentSummary(agentLabel, description, summaryLines)
-      }
-
-      return {
-        content: `[${agentLabel}] "${description}":\n\n${result.output}${verifySection}`,
-        isError: false,
-      }
-    } catch (err: unknown) {
-      mainRenderer.agentDone(description, false)
-      if (paneSlot) { tmuxLayout.releaseSlot(paneSlot.slot); childRenderer.destroy() }
-      appendAgentEvent(parentConfig, {
-        event: 'delegation.error',
-        agent_label: agentLabel,
-        description,
-        success: false,
-        duration_ms: Date.now() - agentStartTime,
-        error: (err as Error).message,
-      })
-      return {
-        content: `[${agentLabel}] "${description}" error: ${(err as Error).message}`,
-        isError: true,
+    } catch (error) {
+      response = {
+        content: '[' + agentLabel + '] "' + description + '" error: ' + (error as Error).message,
+        isError: true, status: context.signal?.aborted ? 'cancelled' : 'failed',
       }
     } finally {
-      // ── Always tear down timer + listener + child engine ──────────
-      // Three pieces of teardown that MUST happen on every exit path
-      // (success, error, pre-aborted early return):
-      //
-      // 1. clearInterval — heartbeat runs forever otherwise. Safe to
-      //    call even when the interval was never scheduled (e.g. some
-      //    future refactor moves setInterval back inside the try); an
-      //    already-cleared timer is a no-op for clearInterval.
-      //
-      // 2. removeEventListener — detach the parent-signal listener so
-      //    the AbortSignal no longer holds a strong reference to the
-      //    child engine closure. Without this, the parent's signal
-      //    (which can outlive the child) would prevent the child from
-      //    being GC'd until the parent itself is torn down. Safe even
-      //    when no listener was registered (removeEventListener on a
-      //    never-added handler is a no-op).
-      //
-      // 3. childEngine.dispose?.() — tear down the child engine's
-      //    background tasks. The child ExecutionEngine owns its own
-      //    BackgroundTaskManager distinct from the parent's — so
-      //    `run_in_background:true` Bash calls inside the sub-agent
-      //    are tracked on the child, not the host. Without an explicit
-      //    dispose, a sub-agent that spawns a long-running process
-      //    would keep that process alive after the sub-agent finishes
-      //    (or aborts, or errors). `dispose()` is optional on
-      //    ChildEngineLike (simple test stubs omit it); the call is
-      //    wrapped in try/catch so disposal failures never propagate
-      //    out of the host's runTurn.
       clearInterval(heartbeatTimer)
-      if (abortListener && context.signal) {
-        try {
-          context.signal.removeEventListener('abort', abortListener)
-        } catch {
-          // signal may have been detached elsewhere; teardown is best-effort
-        }
-      }
+      const disposal = Promise.resolve().then(() => childEngine.dispose?.())
       try {
-        childEngine.dispose?.()
-      } catch {
-        // best-effort teardown; never throw out of the host's finally
+        await settleWithin(disposal, 3000)
+      } catch (error) {
+        quarantineWorkspace(context.cwd, disposal)
+        response = { ...response, isError: true, status: 'blocked', content: (response?.content ?? '') + '\nChild cleanup failed: ' + (error as Error).message }
+      }
+      if (abortListener) context.signal?.removeEventListener('abort', abortListener)
+      if (paneSlot) {
+        try { tmuxLayout.releaseSlot(paneSlot.slot) } finally { childRenderer.destroy() }
       }
     }
+    response ??= { content: 'Child execution did not produce a terminal result.', isError: true, status: 'failed' }
+    if (response.verification?.status === 'passed' && response.status === 'completed') {
+      try {
+        if (response.verification.artifactVersion !== await captureArtifactVersion(context.cwd, verificationExcludedPaths)) {
+          response = { ...response, isError: true, status: 'failed', verification: { ...response.verification, status: 'failed', output: `${response.verification.output}\nArtifact changed during child cleanup.` } }
+        }
+      } catch (error) {
+        response = { ...response, isError: true, status: 'blocked', content: `${response.content}\nCannot recheck final artifact: ${(error as Error).message}` }
+      }
+    }
+    if (context.signal?.aborted && response.status === 'completed') {
+      response = { ...response, isError: true, status: 'cancelled', content: `${response.content}\nCancelled during child cleanup.` }
+    }
+    if (response.isError && worktreeName) getWorktreeManager(repositoryPath!).invalidateAcceptance(worktreeName)
+    const event = {
+      description, success: !response.isError, status: response.status,
+      verification: response.verification, duration_ms: Date.now() - agentStartTime,
+      call_depth: nextDepth, output_preview: response.content.slice(0, 500),
+    }
+    mainRenderer.agentDone(description, !response.isError)
+    context.eventLog?.append('invoke_completed', agentLabel, event, [agentLabel, 'invoke', response.isError ? 'error' : 'success'])
+    appendAgentEvent(parentConfig, { event: 'delegation.completed', agent_label: agentLabel, ...event })
+    return response
   }
 }

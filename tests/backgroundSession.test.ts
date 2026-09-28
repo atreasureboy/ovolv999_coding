@@ -6,7 +6,7 @@
  * metadata/log/attach/liveness logic is exercised directly.
  */
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest'
 import {
   getSessionsDir, getMetadataPath, getLogPath, getExitPath,
   generateSessionId, saveMetadata, loadMetadata, updateMetadata,
@@ -23,16 +23,15 @@ import { join } from 'path'
 import { homedir } from 'os'
 
 let testHome: string
-let origHome: string | undefined
 
 beforeAll(() => {
   testHome = mkdtempSync(join(tmpdir(), 'ovolv999-bg-'))
-  origHome = process.env.HOME
-  process.env.HOME = testHome
+  vi.stubEnv('HOME', testHome)
+  vi.stubEnv('USERPROFILE', testHome)
 })
 
 afterAll(() => {
-  if (origHome !== undefined) process.env.HOME = origHome
+  vi.unstubAllEnvs()
   rmSync(testHome, { recursive: true, force: true })
 })
 
@@ -128,8 +127,8 @@ describe('backgroundSession', () => {
       expect(refreshSessionStatus('nope')).toBeNull()
     })
 
-    it('marks session completed when exit file shows 0', () => {
-      saveMetadata(makeMeta({ id: 'sess-r1', pid: 999_999, status: 'running' }))
+    it('marks session completed when an accepted outcome exits with 0', () => {
+      saveMetadata(makeMeta({ id: 'sess-r1', pid: 999_999, status: 'running', outcome: 'completed' }))
       writeFileSync(getExitPath('sess-r1'), '0\n')
       const meta = refreshSessionStatus('sess-r1')
       expect(meta!.status).toBe('completed')

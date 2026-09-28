@@ -70,7 +70,7 @@ export interface AppProps {
     prompt: string,
     history: OpenAIMessage[],
     images?: Array<{ path: string; dataUrl: string }>,
-  ) => Promise<{ newHistory: OpenAIMessage[]; reason: string }>
+  ) => Promise<{ newHistory: OpenAIMessage[]; reason: string; status?: string }>
   /** Slash command dispatcher. Returns null if not a slash command. */
   dispatchSlash: (input: string) => Promise<boolean>
   /** Initial history (for resume). */
@@ -144,7 +144,7 @@ export function App({
       try {
         const result = await runTurn(expandedText, history, images.length > 0 ? images : undefined)
         setHistory(result.newHistory)
-        store.addInfo(`Done · ${result.reason}`)
+        store.addInfo(`Task ${result.status ?? result.reason}`)
       } catch (err: unknown) {
         const error = err as Error
         if (error.name !== 'AbortError') {
@@ -196,7 +196,7 @@ export function App({
     if (keybindings.conflicts.length > 0) {
       store.addInfo(`⚠ ${keybindings.conflicts.length} keybinding conflict(s). Run /keybindings to see details.`)
     }
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [])
 
   // ── Global key handler (Ctrl+C, Ctrl+L, Ctrl+O, ?, etc.) ──────────────────
 

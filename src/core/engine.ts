@@ -1,3 +1,5 @@
+import { createModelGateway } from './modelGateway.js'
+import { trimHistory, settleHistory } from './messageGroups.js'
 /**
  * Think-Act-Observe Engine — with streaming output
  *
@@ -59,7 +61,9 @@ import type { AgentModule, ModuleBootResult, ModuleBootContext } from './module.
 import { globalModuleRegistry } from './moduleRegistry.js'
 import { applyAgentToConfig } from './agentPresets.js'
 import { filterToolsForSubAgent } from './agentToolFilter.js'
-import { clearFileState } from './fileState.js'
+import { createRunContext, runOperation, quarantineRun, quarantineWorkspace, isWorkspaceQuarantined, withWorkspaceAccess, type RunContext } from './runContext.js'
+import { normalizeOutcome, settleWithin, type VerificationEvidence } from './outcome.js'
+import { createVerificationPlan, captureArtifactVersion, executeVerification } from './verification.js'
 import {
   transitionQueryState,
   isTerminal,
@@ -70,7 +74,7 @@ import {
 import { CostTracker, type TokenUsage } from './costTracker.js'
 import { BackgroundTaskManager } from './backgroundTaskManager.js'
 import { FileHistory } from './fileHistory.js'
-import { PermissionManager } from './permissionSystem.js'
+import { PermissionManager, checkRules } from './permissionSystem.js'
 import { classifyCommandRisk } from './riskClassifier.js'
 import { normalizeCJKInput } from './strings.js'
 
@@ -198,19 +202,19 @@ function enforceAggregateToolResultBudget(
     // so the aggregate fits when every item is processed.
     const original = item.r.content
     if (original.length === 0) continue
-    const headLen = Math.max(1, Math.floor(itemTarget / 2))
-    const tailLen = Math.max(1, itemTarget - headLen)
-    const truncated =
-      original.slice(0, headLen) +
-      `\n\n[... ${original.length - (headLen + tailLen)} chars truncated to fit aggregate budget ...]\n\n` +
-      original.slice(original.length - tailLen)
+    const marker = '\n[output truncated to fit aggregate budget]\n'
+    const budget = Math.max(0, itemTarget - marker.length)
+    const headLen = Math.floor(budget / 2)
+    const tailLen = budget - headLen
+    const truncated = itemTarget <= marker.length ? marker.slice(0, itemTarget)
+      : original.slice(0, headLen) + marker + (tailLen ? original.slice(-tailLen) : '')
     results[item.i].content = truncated
     currentTotal += truncated.length - original.length
   }
 }
 
 const LEGACY_PLAN_MODE_TOOLS = new Set(['Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'ExitPlanMode'])
-const LEGACY_CONCURRENCY_SAFE_TOOLS = new Set(['Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'Bash', 'Agent', 'ShellSession', 'TmuxSession'])
+const LEGACY_CONCURRENCY_SAFE_TOOLS = new Set(['Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch'])
 
 // ── Internal types ───────────────────────────────────────────────────────────
 
@@ -247,9 +251,10 @@ function partitionToolCalls(calls: ParsedToolCall[], tools?: Tool[]): ToolBatch[
   for (const call of calls) {
     // Per-input check: if the tool implements isConcurrencySafe, use it
     const tool = tools?.find(t => t.name === call.tc.name)
-    const safe = tool?.isConcurrencySafe
+    const declaredSafe = tool?.isConcurrencySafe
       ? tool.isConcurrencySafe(call.input)
       : (tool?.metadata?.concurrencySafe ?? LEGACY_CONCURRENCY_SAFE_TOOLS.has(call.tc.name))
+    const safe = declaredSafe && (!tool || tool.metadata?.readOnly === true || tool.name === 'Bash')
     const last = batches[batches.length - 1]
 
     if (last && last.safe && safe) {
@@ -307,8 +312,6 @@ export class ExecutionEngine {
   private _consecutiveCompactFailures = 0
   /** Suppress compact warning after successful compaction (next turn only) */
   private _suppressCompactWarning = false
-  /** Cached resolved context window for the current model — refreshed lazily */
-  private _resolvedContextWindow: number | null = null
   /**
    * Reentrancy guard for `runTurn`. Every ExecutionEngine is single-turn
    * per instance: the legacy design reused a singleton slot
@@ -321,6 +324,9 @@ export class ExecutionEngine {
    * branch of priority-1.
    */
   private _turnInFlight = false
+  private activeRun: RunContext | null = null
+  private disposal: Promise<void> | null = null
+  private disposed = false
   /**
    * Wall-clock timestamp (epoch ms) of the most recent assistant message
    * the engine has seen. Used by {@link maybeTimeBasedMicroCompact} to
@@ -341,19 +347,8 @@ export class ExecutionEngine {
    */
   private pendingSnipCount: number | null = null
 
-  /**
-   * Resolve the model-aware context window (cached for the engine's
-   * lifetime). The override + lookup is stable since model/maxContextTokens
-   * are constructor-set, so we compute once and reuse.
-   */
   private getModelContextWindow(): number {
-    if (this._resolvedContextWindow === null) {
-      this._resolvedContextWindow = resolveContextWindow(
-        this.config.model,
-        this.config.maxContextTokens,
-      )
-    }
-    return this._resolvedContextWindow
+    return resolveContextWindow(this.config.model, this.config.maxContextTokens)
   }
 
   /**
@@ -368,14 +363,24 @@ export class ExecutionEngine {
 
   constructor(config: EngineConfig, renderer: Renderer, client?: OpenAI) {
     // Merge agent config into effective config (overrides legacy fields)
-    this.config = applyAgentToConfig(config)
+    this.config = applyAgentToConfig({
+      ...config,
+      extraTools: config.extraTools ? [...config.extraTools] : undefined,
+      enabledModules: config.enabledModules ? [...config.enabledModules] : undefined,
+      verificationExcludedPaths: config.verificationExcludedPaths ? [...config.verificationExcludedPaths] : undefined,
+      poor: config.poor ? { ...config.poor } : undefined,
+      mcp: config.mcp ? { servers: structuredClone(config.mcp.servers) } : undefined,
+      agent: config.agent ? { ...config.agent, identity: { ...config.agent.identity }, tools: config.agent.tools ? [...config.agent.tools] : undefined, disallowedTools: config.agent.disallowedTools ? [...config.agent.disallowedTools] : undefined, modules: config.agent.modules ? structuredClone(config.agent.modules) : undefined } : undefined,
+    })
+    config = this.config
     this.renderer = renderer
     this.client = client ?? new OpenAI({
       apiKey: config.apiKey,
       baseURL: config.baseURL,
-      maxRetries: 5,      // SDK auto-retries 429/5xx with exponential backoff
+      maxRetries: 0,      // SDK auto-retries 429/5xx with exponential backoff
       timeout: 120_000,   // 2 min — covers slow reasoning models (deepseek-reasoner)
     })
+    this.client = createModelGateway(this.client, this.config, () => this.activeRun)
     // Wire the engine's private AgentTool only when an agentFactory is
     // available. With no factory, the AgentTool is constructed without
     // wiring and returns "not initialized" at action time — callers can
@@ -458,21 +463,29 @@ export class ExecutionEngine {
    * idempotent). Safe to call before any turn has run (no-op on an
    * empty task map). Never throws.
    */
-  dispose(): void {
-    try {
-      this.backgroundTaskManager.dispose()
-    } catch {
-      // disposal must not throw — AgentTool calls this from a finally
-      // block and any throw would propagate out of the host's runTurn
-    }
-    for (const module of this.modules) {
-      const dispose = (module as { dispose?: () => void | Promise<void> }).dispose
-      if (typeof dispose === 'function') {
-        Promise.resolve(dispose.call(module)).catch(() => {
-          // module dispose failures must never break engine disposal
-        })
+  dispose(): Promise<void> {
+    if (this.disposal) return this.disposal
+    this.disposed = true
+    this.abort()
+    this.disposal = (async () => {
+      const failures: string[] = []
+      const resources: Array<[string, () => void | Promise<void>]> = [
+        ...[...(this.activeRun?.pending.entries() ?? [])].map(([name, pending]) => [name, () => pending.then(() => {}, () => {})] as [string, () => Promise<void>]),
+        ['background', () => this.backgroundTaskManager.dispose()],
+        ...this.modules.map(module => [module.name, () => module.dispose?.()] as [string, () => void | Promise<void>]),
+      ]
+      for (const [name, cleanup] of resources) {
+        const pending = Promise.resolve().then(cleanup)
+        try { await settleWithin(pending, this.config.cancellationGraceMs ?? 2000) }
+        catch {
+          quarantineWorkspace(this.config.cwd, pending)
+          failures.push(name)
+          this.renderer.warn('Resource cleanup incomplete: ' + name)
+        }
       }
-    }
+      if (failures.length) throw new Error('Resource cleanup incomplete: ' + failures.join(', '))
+    })()
+    return this.disposal
   }
 
   /** Soft interrupt — pause after current tool, preserve history */
@@ -530,11 +543,9 @@ export class ExecutionEngine {
     //      allowlist, no global denylist.
     if (this.config.agent) {
       const allNames = defs.map(t => t.function.name)
-      const filtered = filterToolsForSubAgent(
-        allNames,
-        this.config.agent.tools,
-        this.config.agent.disallowedTools,
-      )
+      const filtered = (this.config.initialAgentDepth ?? 0) > 0
+        ? filterToolsForSubAgent(allNames, this.config.agent.tools, this.config.agent.disallowedTools)
+        : allNames.filter(name => (!this.config.agent?.tools || this.config.agent.tools.includes(name)) && !this.config.agent?.disallowedTools?.includes(name))
       const allowedSet = new Set(filtered)
       defs = defs.filter(t => allowedSet.has(t.function.name))
     }
@@ -840,6 +851,8 @@ export class ExecutionEngine {
         }
       }
     }, 10_000)
+    const stopWatchdog = (): void => clearInterval(watchdog)
+    turnAbortSignal.addEventListener('abort', stopWatchdog, { once: true })
 
     try {
       for await (const chunk of stream) {
@@ -900,6 +913,7 @@ export class ExecutionEngine {
         }
       }
 
+      turnAbortSignal.throwIfAborted()
       const trailingContent = thinkingTagFilter.finish()
       const trailingThinking = thinkingTagFilter.drainThinking()
       if (trailingThinking) {
@@ -915,9 +929,11 @@ export class ExecutionEngine {
         assistantText += trailingContent
       }
     } catch (err: unknown) {
-      clearInterval(watchdog)
-      this.renderer.stopSpinner()
+      if (!turnAbortSignal.aborted) this.renderer.stopSpinner()
       throw err
+    } finally {
+      stopWatchdog()
+      turnAbortSignal.removeEventListener('abort', stopWatchdog)
     }
 
     clearInterval(watchdog)
@@ -973,7 +989,7 @@ export class ExecutionEngine {
     }
 
     // In plan mode, block write tools (defence in depth)
-    if (planMode && !(tool.metadata?.readOnly === true || LEGACY_PLAN_MODE_TOOLS.has(toolName))) {
+    if (this.isPlanMode() && !(tool.metadata?.readOnly === true || LEGACY_PLAN_MODE_TOOLS.has(toolName))) {
       return {
         content: `Tool "${toolName}" is not available in plan mode. Only read-only tools are allowed. Output your plan as text.`,
         isError: true,
@@ -991,11 +1007,9 @@ export class ExecutionEngine {
     const agentToolsFallback = agent?.tools
     if (agent) {
       const allNames = this.allTools.map(t => t.name)
-      const filtered = filterToolsForSubAgent(
-        allNames,
-        agent.tools,
-        agent.disallowedTools,
-      )
+      const filtered = (this.config.initialAgentDepth ?? 0) > 0
+        ? filterToolsForSubAgent(allNames, agent.tools, agent.disallowedTools)
+        : allNames.filter(name => (!agent.tools || agent.tools.includes(name)) && !agent.disallowedTools?.includes(name))
       if (!filtered.includes(toolName)) {
         return {
           content: `Tool "${toolName}" is not available to this agent.`,
@@ -1009,21 +1023,28 @@ export class ExecutionEngine {
       }
     }
 
-    const isDangerous =
-      toolName === 'Bash' && typeof input.command === 'string'
+    const isDangerous = (toolName === 'ExitWorktree' && input.action === 'discard') ||
+      (toolName === 'Bash' && typeof input.command === 'string'
         ? classifyCommandRisk(input.command) === 'dangerous'
-        : false
-    const permission = this.permissionManager.check(toolName, input, isDangerous)
+        : false)
+    const managerPermission = this.permissionManager.check(toolName, input, isDangerous)
+    const permission = managerPermission === 'deny' ? 'deny'
+      : this.config.permissionMode === 'deny' && tool.metadata?.readOnly !== true ? 'deny'
+      : this.config.permissionMode === 'ask' && tool.metadata?.readOnly !== true && this.permissionManager.getMode() === 'default' && checkRules(this.permissionManager.getRules(), toolName, input)?.behavior !== 'allow' ? 'ask'
+      : managerPermission
     if (permission === 'deny') {
       return {
         content: `Permission denied for ${toolName}. Current mode: ${this.permissionManager.formatMode()}`,
         isError: true,
       }
     }
+    let permissionApproved = permission === 'allow'
     if (permission === 'ask') {
       if (this.config.requestPermission) {
         const riskLevel = isDangerous ? 'dangerous' : 'needs-approval'
         const permResult = await this.config.requestPermission(toolName, input, riskLevel)
+        context.signal?.throwIfAborted()
+        permissionApproved = permResult.approved
         if (!permResult.approved) {
           const feedback = permResult.feedback?.trim()
           return {
@@ -1034,11 +1055,14 @@ export class ExecutionEngine {
           }
         }
       } else {
-        this.renderer.warn(`Permission check: ${toolName} requires attention; continuing in single-user mode.`)
+        return { content: `Approval required for ${toolName}; no approval channel is available.`, isError: true, status: 'needs_input' }
       }
     }
 
-    const result = await tool.execute(input, context)
+    context.signal?.throwIfAborted()
+    const result = await tool.execute(input, { ...context, permissionApproved })
+    if (!result.isError && ['Write', 'Edit', 'NotebookEdit'].includes(toolName) && this.activeRun) this.activeRun.mutationAttempted = true
+    context.signal?.throwIfAborted()
 
     // Notify modules of tool execution (e.g. episodic memory write)
     for (const module of this.modules) {
@@ -1063,123 +1087,61 @@ export class ExecutionEngine {
     messages: OpenAIMessage[],
     turnNumber: number,
   ): Promise<{ aborted: boolean }> {
-    const turnAbortSignal = turnAbortController.signal
+    const run = this.activeRun!
+    const signal = turnAbortController.signal
     const batches = partitionToolCalls(parsedCalls, this.allTools)
-
-    for (const batch of batches) {
-      if (turnAbortSignal.aborted) return { aborted: true }
-
-      if (batch.safe && batch.calls.length > 1) {
-        // ── Parallel batch ───────────────────────────────────
-        for (const { tc, input } of batch.calls) {
-          this.renderer.toolStart(tc.name, input)
-          this.config.hookRunner?.runPreToolCall(tc.name, input)
-          this.eventLog?.append('tool_call', tc.name, { input }, [tc.name])
-        }
-
-        const results = await Promise.all(
-          batch.calls.map(({ tc, input }) =>
-            this.executeToolCall(tc.name, input, toolContext, planMode, turnNumber),
-          ),
-        )
-
-        // Enforce aggregate budget: if the total of all parallel results
-        // exceeds the limit, persist the largest to disk before pushing
-        const aggregateResults = batch.calls.map((call, i) => ({
-          content: results[i].content,
-          tc: { id: call.tc.id, name: call.tc.name },
-        }))
-        enforceAggregateToolResultBudget(aggregateResults, this.config.sessionDir)
-        // Write back any persisted replacements
-        for (let i = 0; i < results.length; i++) {
-          results[i] = { ...results[i], content: aggregateResults[i].content }
-        }
-
-        for (let i = 0; i < batch.calls.length; i++) {
-          const { tc } = batch.calls[i]
-          const result = results[i]
-          this.config.hookRunner?.runPostToolCall(
-            tc.name,
-            result.content,
-            result.isError,
-          )
-          this.renderer.toolResult(tc.name, result.content, result.isError)
-          this.eventLog?.append(
-            'tool_result',
-            tc.name,
-            {
-              content: result.content.slice(0, 500),
-              isError: result.isError,
-            },
-            [tc.name, result.isError ? 'error' : 'success'],
-          )
-          // Prevent empty tool-result content — some models emit stop sequence
-          // and end their turn with zero output when tool_result is empty
-          const safeContent = result.content.trim() || `(${tc.name} completed with no output)`
-          messages.push({
-            role: 'tool',
-            tool_call_id: tc.id,
-            content: truncateToolResult(safeContent, this.config.sessionDir),
-            name: tc.name,
-          })
-        }
-      } else {
-        // ── Serial batch ─────────────────────────────────────
-        for (const { tc, input } of batch.calls) {
-          if (turnAbortSignal.aborted) return { aborted: true }
-
-          this.renderer.toolStart(tc.name, input)
-          this.config.hookRunner?.runPreToolCall(tc.name, input)
-          this.eventLog?.append('tool_call', tc.name, { input }, [tc.name])
-
-          const result = await this.executeToolCall(
-            tc.name,
-            input,
-            toolContext,
-            planMode,
-            turnNumber,
-          )
-
-          this.config.hookRunner?.runPostToolCall(
-            tc.name,
-            result.content,
-            result.isError,
-          )
-          this.renderer.toolResult(tc.name, result.content, result.isError)
-          this.eventLog?.append(
-            'tool_result',
-            tc.name,
-            {
-              content: result.content.slice(0, 500),
-              isError: result.isError,
-            },
-            [tc.name, result.isError ? 'error' : 'success'],
-          )
-
-          const serialSafeContent = result.content.trim() || `(${tc.name} completed with no output)`
-          messages.push({
-            role: 'tool',
-            tool_call_id: tc.id,
-            content: truncateToolResult(serialSafeContent, this.config.sessionDir),
-            name: tc.name,
-          })
-
-          // Soft-interrupt check after each serial tool — ownership-aware:
-          // a sibling turn's soft-abort request must NOT be consumed here.
-          if (this.claimSoftAbort(turnAbortController)) {
-            return { aborted: true }
-          }
-        }
-      }
-
-      // Soft-interrupt check after each batch (parallel too) — same
-      // ownership check as the serial path.
-      if (this.claimSoftAbort(turnAbortController)) {
-        return { aborted: true }
+    const limit = Math.max(1, Math.min(16, Math.floor(this.config.maxToolConcurrency ?? 4)))
+    const settled = new Set<string>()
+    let interrupted = false
+    const publish = (call: ParsedToolCall, result: ToolResult): void => {
+      if (settled.has(call.tc.id)) return
+      settled.add(call.tc.id)
+      const { tc } = call
+      const failureKey = tc.name === 'Agent' ? tc.id : tc.name + ':' + JSON.stringify(call.input)
+      if (result.isError) run.toolFailures.set(failureKey, result)
+      else run.toolFailures.delete(failureKey)
+      this.config.hookRunner?.runPostToolCall(tc.name, result.content, result.isError)
+      this.renderer.toolResult(tc.name, result.content, result.isError)
+      this.eventLog?.append('tool_result', tc.name, { content: result.content.slice(0, 500), isError: result.isError, status: result.status, run_id: run.runId })
+      messages.push({ role: 'tool', tool_call_id: tc.id, name: tc.name, content: truncateToolResult(result.content.trim() || '(' + tc.name + ' returned no output)', this.config.sessionDir) })
+    }
+    const execute = async (call: ParsedToolCall): Promise<ToolResult> => {
+      const { tc, input } = call
+      if (signal.aborted) return { content: 'Cancelled before execution', isError: true, status: 'cancelled' }
+      try {
+        this.renderer.toolStart(tc.name, input)
+        this.config.hookRunner?.runPreToolCall(tc.name, input)
+        this.eventLog?.append('tool_call', tc.name, { input, run_id: run.runId })
+        const tool = findTool(this.allTools, tc.name)
+        const readOnly = tool?.metadata?.readOnly === true || (tc.name === 'Bash' && tool?.isConcurrencySafe?.(input) === true)
+        return await runOperation(run, 'tool:' + tc.name, () => withWorkspaceAccess(
+          toolContext.cwd, run.familyId, !readOnly, signal,
+          () => this.executeToolCall(tc.name, input, toolContext, this.isPlanMode(), turnNumber),
+        ), this.config.toolTimeoutMs ?? 1_800_000, this.config.cancellationGraceMs ?? 2000)
+      } catch (error) {
+        return { content: (error as Error).message ?? String(error), isError: true, status: signal.aborted ? 'cancelled' : (error as Error).name === 'WorkspaceUnavailableError' ? 'blocked' : 'failed' }
       }
     }
-
-    return { aborted: false }
+    try {
+      for (const batch of batches) {
+        for (let offset = 0; offset < batch.calls.length; offset += limit) {
+          if (signal.aborted || interrupted) break
+          const calls = batch.calls.slice(offset, offset + limit)
+          const results = await Promise.all(calls.map(execute))
+          const budgeted = results.map((result, index) => ({ content: result.content, tc: calls[index].tc }))
+          enforceAggregateToolResultBudget(budgeted, this.config.sessionDir)
+          calls.forEach((call, index) => publish(call, { ...results[index], content: budgeted[index].content }))
+          if (this.claimSoftAbort(turnAbortController)) interrupted = true
+          if (results.some(result => result.status === 'needs_input')) interrupted = true
+        }
+        if (signal.aborted || interrupted) break
+      }
+    } finally {
+      for (const call of parsedCalls) {
+        if (!settled.has(call.tc.id)) publish(call, { content: 'Cancelled before execution; no side effects started', isError: true, status: 'cancelled' })
+      }
+    }
+    return { aborted: signal.aborted || interrupted }
   }
 
   // ── Build tool context ──────────────────────────────────────────────────
@@ -1192,6 +1154,14 @@ export class ExecutionEngine {
       cwd: this.config.cwd,
       permissionMode: this.config.permissionMode,
       permissionManager: this.permissionManager,
+      requestPermission: this.config.requestPermission,
+      runId: this.activeRun?.runId,
+      parentRunId: this.activeRun?.parentRunId,
+      workspaceBound: (this.config.initialAgentDepth ?? 0) > 0,
+      runFamilyId: this.activeRun?.familyId,
+      fileState: this.activeRun?.fileState,
+      workspace: this.activeRun?.workspace,
+      verificationExcludedPaths: [...(this.config.verificationExcludedPaths ?? []), ...(this.config.sessionDir ? [this.config.sessionDir] : [])],
       signal: turnAbortSignal,
       apiConfig: {
         apiKey: this.config.apiKey,
@@ -1201,11 +1171,12 @@ export class ExecutionEngine {
       eventLog: this.eventLog,
       backgroundTaskManager: this.backgroundTaskManager,
       askUserQuestion: this.config.askUserQuestion,
-      exitPlanMode: async (plan: string): Promise<boolean> => {
-        const approved = await this.config.exitPlanMode?.(plan) ?? true
+      exitPlanMode: this.config.exitPlanMode ? async (plan: string): Promise<boolean> => {
+        const approved = await this.config.exitPlanMode?.(plan) ?? false
+        turnAbortSignal.throwIfAborted()
         if (approved) this.exitPlanMode()
         return approved
-      },
+      } : undefined,
       enterPlanMode: () => { this.enterPlanMode() },
       fileHistory: this.fileHistory ?? undefined,
       // Module patches override/extend the base context (incl. availableToolNames)
@@ -1251,7 +1222,15 @@ export class ExecutionEngine {
         'Each ExecutionEngine is single-turn; await the in-flight turn or spawn a new engine via EngineConfig.agentFactory.',
       )
     }
+    if (this.disposed) throw new Error('ExecutionEngine is disposed')
+    if (isWorkspaceQuarantined(this.config.cwd)) {
+      return { result: { stopped: true, reason: 'error', status: 'blocked', output: 'Workspace has unfinished operations from a previous run; wait for resource settlement.', verification: { status: 'not_run', workspace: this.config.cwd, commands: [], output: 'Workspace quarantined' } }, newHistory: history }
+    }
     this._turnInFlight = true
+    const run = createRunContext(this.config)
+    this.activeRun = run
+    const turnAbortController = run.controller
+    this.currentTurnAbortController = turnAbortController
 
     // Every line of code below runs inside an OUTER try/finally whose
     // sole job is releasing `_turnInFlight`. Critical: any throw between
@@ -1266,11 +1245,13 @@ export class ExecutionEngine {
     // success, soft-abort, hard-abort, and ANY thrown error all flow
     // through it, so the engine can never get stuck.
     let result: TurnResult
+    let messages: OpenAIMessage[] = [...settleHistory(history), { role: 'user', content: userMessage }]
     try {
-      const planMode = this.planModeActive
+      const planMode = this.isPlanMode()
 
       // Clear file read state for this turn (read-before-edit is per-turn, not cross-turn)
-      clearFileState()
+      const verificationPlan = createVerificationPlan(this.config.cwd, undefined, [...(this.config.verificationExcludedPaths ?? []), ...(this.config.sessionDir ? [this.config.sessionDir] : [])])
+      const startingArtifact = await runOperation(run, 'artifact:snapshot', () => captureArtifactVersion(this.config.cwd, verificationPlan.excludedPaths), 60_000, this.config.cancellationGraceMs ?? 2000)
 
       // ── Boot Sequence: resolve + boot modules ──
       const bootCtx: ModuleBootContext = {
@@ -1278,10 +1259,13 @@ export class ExecutionEngine {
         sessionDir: this.config.sessionDir,
         config: this.config,
         userMessage,
+        abortSignal: turnAbortController.signal,
+        model: this.config.model,
       }
-      this.moduleBootResults = await Promise.all(
-        this.modules.map(m => Promise.resolve(m.boot(bootCtx))),
-      )
+      this.moduleBootResults = []
+      for (const module of this.modules) {
+        this.moduleBootResults.push(await runOperation(run, 'boot:' + module.name, () => Promise.resolve(module.boot(bootCtx)), 60_000, this.config.cancellationGraceMs ?? 2000))
+      }
       const moduleSections = this.moduleBootResults.flatMap(r => r.systemPromptSections ?? [])
       const toolContextPatch = this.moduleBootResults.reduce(
         (acc, r) => ({ ...acc, ...r.toolContextPatch }),
@@ -1301,14 +1285,13 @@ export class ExecutionEngine {
       })
 
       // Build system prompt (with module sections) and tool definitions
-      const systemPrompt = this.buildSystemPrompt(planMode, moduleSections)
+      let systemPrompt = this.buildSystemPrompt(planMode, moduleSections)
       // Estimate system prompt tokens for accurate context budget
       this.systemPromptTokens = Math.ceil(systemPrompt.length / 3.5) + 20
-      const toolDefs = this.getToolDefinitions(planMode, moduleTools)
+      let toolDefs = this.getToolDefinitions(planMode, moduleTools)
 
       // Per-turn AbortController
-      const turnAbortController = new AbortController()
-      this.currentTurnAbortController = turnAbortController
+
 
       // Initialize messages — construct multimodal content if images are provided
       let userContent: string | ContentPart[]
@@ -1320,7 +1303,7 @@ export class ExecutionEngine {
       } else {
         userContent = normalizeCJKInput(userMessage)
       }
-      const messages: OpenAIMessage[] = [...history, { role: 'user', content: userContent }]
+      messages = [...settleHistory(history), { role: 'user', content: userContent }]
 
       // Apply a queued `/snip [N]` first, if any. See `queueSnip`. The
       // boundary marker is inserted into `messages` here so the very
@@ -1393,13 +1376,14 @@ export class ExecutionEngine {
           }
 
           case 'module_iteration': {
+            const iteration = state.iteration
             for (const module of this.modules) {
               if (!module.onIteration) continue
-              const iterResult = await module.onIteration({
-                iteration: state.iteration,
+              const iterResult = await runOperation(run, 'iteration:' + module.name, () => Promise.resolve(module.onIteration?.({
+                iteration,
                 messages,
                 abortSignal: turnAbortController.signal,
-              })
+              })), 60_000, this.config.cancellationGraceMs ?? 2000)
               if (iterResult?.injectMessage) {
                 const msg = iterResult.injectMessage
                 // Show full critic output to user via renderer (not raw stdout)
@@ -1411,7 +1395,7 @@ export class ExecutionEngine {
                   message: msg.slice(0, 500),
                   iteration: state.iteration,
                 })
-                messages.push({ role: 'user', content: msg })
+                messages.push({ role: 'system', source: 'module', content: msg })
               }
             }
             state = transitionQueryState(state, { type: 'continue' })
@@ -1419,17 +1403,29 @@ export class ExecutionEngine {
           }
 
           case 'llm_call': {
+            turnAbortController.signal.throwIfAborted()
+            systemPrompt = this.buildSystemPrompt(this.isPlanMode(), moduleSections)
+            this.systemPromptTokens = estimateTokens([{ role: 'system', content: systemPrompt }])
+            toolDefs = this.getToolDefinitions(this.isPlanMode(), moduleTools)
+            toolContext.availableToolNames = toolDefs.map(def => def.function.name)
+            await this.evaluateContextBudget(messages, toolDefs, turnAbortController.signal)
             const { assistantText, finishReason, rawToolCalls } =
-              await this.callLLM(
+              await runOperation(run, 'model:stream', () => this.callLLM(
                 systemPrompt,
                 messages,
                 toolDefs,
                 turnAbortController.signal,
-              )
+              ), 300_000, this.config.cancellationGraceMs ?? 2000)
 
             if (assistantText) {
-              finalOutput = assistantText
+              finalOutput += assistantText
               turnTokensProduced += Math.ceil(assistantText.length / 3.5)
+            }
+
+            const knownIds = new Set(messages.flatMap(message => message.tool_calls?.map(call => call.id) ?? []))
+            for (const call of rawToolCalls) {
+              if (knownIds.has(call.id)) call.id = `call_${randomUUID()}`
+              knownIds.add(call.id)
             }
 
             // Build assistant message
@@ -1457,7 +1453,7 @@ export class ExecutionEngine {
             if (!assistantText && rawToolCalls.length === 0 && emptyResponseCount < MAX_EMPTY_RETRIES) {
               emptyResponseCount++
               messages.push({
-                role: 'user',
+                role: 'system', source: 'runtime',
                 content: 'Your previous response was empty (no text, no tool call). Please respond with text or invoke a tool.',
               })
               // Re-enter budget_check to loop back to llm_call
@@ -1475,13 +1471,18 @@ export class ExecutionEngine {
                 partial_length: assistantText.length,
               })
               messages.push({
-                role: 'user',
+                role: 'system', source: 'runtime',
                 content: 'Continue your previous response from where it was cut off. Do not repeat what you already wrote — just continue.',
               })
               state = transitionQueryState(state, { type: 'continue' })
               break
             }
 
+            if (!assistantText && rawToolCalls.length === 0) throw new Error('Empty response after bounded retries')
+            if (finishReason === null || finishReason === 'content_filter' || finishReason === 'length') {
+              throw new Error('Incomplete response: ' + (finishReason ?? 'stream ended without finish reason'))
+            }
+            if (finishReason !== 'stop' && finishReason !== 'tool_calls') throw new Error('Unsupported finish reason: ' + finishReason)
             pendingToolCalls = rawToolCalls
             state = transitionQueryState(state, {
               type: 'llm_done',
@@ -1504,7 +1505,7 @@ export class ExecutionEngine {
                   turn_tokens: decision.turnTokens,
                   budget: decision.budget,
                 })
-                messages.push({ role: 'user', content: decision.nudgeMessage })
+                messages.push({ role: 'system', source: 'runtime', content: decision.nudgeMessage })
                 state = transitionQueryState(state, { type: 'continue' })
                 break
               }
@@ -1638,9 +1639,7 @@ export class ExecutionEngine {
       // turn whose `finally` runs after a newer turn has installed its own
       // controller would null out the new turn's slot, making subsequent
       // `engine.abort()` calls silently no-op.
-      if (this.currentTurnAbortController === turnAbortController) {
-        this.currentTurnAbortController = null
-      }
+
       // Ownership-aware soft-flag cleanup: if the flag is still set and its
       // owner is OUR controller (we never claimed it via check_abort),
       // clear it. If the owner is a different controller — meaning a newer
@@ -1652,26 +1651,72 @@ export class ExecutionEngine {
       }
     }
 
+    let verification: VerificationEvidence = { status: 'not_applicable', workspace: this.config.cwd, runId: run.runId, commands: [], output: 'No artifact changes require executable checks' }
+    let status = normalizeOutcome(result)
+    const failures = [...run.toolFailures.values()]
+    if (failures.some(failure => failure.status === 'needs_input')) status = 'needs_input'
+    else if (failures.some(failure => failure.status === 'blocked')) status = 'blocked'
+    else if (failures.length && status === 'completed') status = 'failed'
+    if (turnAbortController.signal.aborted) status = String(turnAbortController.signal.reason).startsWith('timeout:') ? 'failed' : 'cancelled'
+    if (status === 'completed') {
+      try {
+        const artifact = await runOperation(run, 'artifact:final', () => captureArtifactVersion(this.config.cwd, verificationPlan.excludedPaths), 60_000, this.config.cancellationGraceMs ?? 2000)
+        if (artifact !== startingArtifact) {
+          verification = await runOperation(run, 'verification', () => withWorkspaceAccess(this.config.cwd, run.familyId, true, turnAbortController.signal, () => executeVerification({ cwd: this.config.cwd, plan: verificationPlan, signal: turnAbortController.signal, runId: run.runId, artifactVersion: artifact })), 300_000, this.config.cancellationGraceMs ?? 2000)
+          if (verification.status === 'failed') status = 'failed'
+          else if (verification.status !== 'passed') status = 'blocked'
+        } else if (run.mutationAttempted) {
+          status = 'blocked'
+          verification = { ...verification, status: 'not_run', output: 'A file write produced no change in the artifact inventory. Explicit artifact acceptance is required for ignored outputs or unchanged writes.' }
+        }
+      } catch (error) {
+        status = turnAbortController.signal.aborted ? 'cancelled' : 'failed'
+        verification = { status: 'failed', workspace: this.config.cwd, runId: run.runId, commands: [], output: String(error) }
+      }
+    } else verification = { ...verification, status: 'not_run', output: 'Run was not accepted for verification' }
+    result = { ...result, status, verification, runId: run.runId, unfinishedResources: [...run.pending.keys()] }
+    if (status !== 'completed' && result.reason === 'stop_sequence') result.reason = status === 'interrupted' ? 'interrupted' : status === 'limit_reached' ? 'max_iterations' : 'error'
+    run.result = result
     // ── Module onComplete hooks (reflection, etc.) ──
     for (const module of this.modules) {
       try {
-        await module.onComplete?.({
+        if (turnAbortController.signal.aborted) break
+        await runOperation(run, 'finalize:' + module.name, () => Promise.resolve(module.onComplete?.({
           cwd: this.config.cwd,
           sessionDir: this.config.sessionDir,
           turnResult: result,
           messages,
           eventLog: this.eventLog,
-        })
+          abortSignal: turnAbortController.signal,
+          model: this.config.model,
+        })), 60_000, this.config.cancellationGraceMs ?? 2000)
       } catch {
         // module onComplete failures must never break the engine
       }
     }
 
     // ── Lifecycle hook: OnComplete ──
+    if (turnAbortController.signal.aborted) result = { ...result, reason: 'error', status: String(turnAbortController.signal.reason).startsWith('timeout:') ? 'failed' : 'cancelled', unfinishedResources: [...run.pending.keys()] }
     this.config.hookRunner?.runOnComplete?.(result)
 
-    return { result, newHistory: messages }
+    if (result.status === 'completed') {
+      const acceptedArtifact = verification.artifactVersion ?? startingArtifact
+      const finalArtifact = await runOperation(run, 'artifact:after-finalization', () => captureArtifactVersion(this.config.cwd, verificationPlan.excludedPaths), 60_000, this.config.cancellationGraceMs ?? 2000)
+      if (finalArtifact !== acceptedArtifact) {
+        result = { ...result, reason: 'error', status: 'blocked', verification: { ...verification, status: 'failed', output: 'Artifact changed during finalization; previous acceptance is stale.' } }
+      }
+    }
+    run.result = result
+
+    return { result, newHistory: settleHistory(messages) }
+    } catch (error) {
+      const status = turnAbortController.signal.aborted ? 'cancelled' : 'failed'
+      return { result: { stopped: true, reason: 'error', status, runId: run.runId, output: String(error), verification: { status: 'not_run', workspace: this.config.cwd, commands: [], output: 'Initialization failed' }, unfinishedResources: [...run.pending.keys()] }, newHistory: settleHistory(messages) }
     } finally {
+      quarantineRun(run)
+      run.detachParent()
+      this.currentTurnAbortController = null
+      this.activeRun = null
       // OUTER finally: the SINGLE point that releases _turnInFlight.
       // Runs unconditionally — success, soft-abort, hard-abort, state-
       // machine catch-and-suppress, AND any throw from setup (module
@@ -1687,8 +1732,11 @@ export class ExecutionEngine {
     return this.config.model
   }
 
+  getModelClient(): OpenAI { return this.client }
+
   setModel(model: string): void {
     this.config.model = model
+    for (const module of this.modules) module.onModelChange?.(model)
   }
 
   /** Expose the cost tracker for end-of-session cost display */
@@ -1708,7 +1756,7 @@ export class ExecutionEngine {
 
   /** Whether plan mode is currently active */
   isPlanMode(): boolean {
-    return this.planModeActive
+    return this.planModeActive || this.permissionManager.getMode() === 'plan'
   }
 
   /**
@@ -1724,11 +1772,16 @@ export class ExecutionEngine {
   /** Exit plan mode — called by the ExitPlanMode tool after user approval */
   exitPlanMode(): void {
     this.planModeActive = false
+    if (this.permissionManager.getMode() === 'plan') this.permissionManager.setMode('default')
+    this.config.planMode = false
+    if (this.activeRun) this.activeRun.policyRevision++
   }
 
   /** Enter plan mode — called by the EnterPlanMode tool */
   enterPlanMode(): void {
     this.planModeActive = true
+    this.config.planMode = true
+    if (this.activeRun) this.activeRun.policyRevision++
   }
 
   /**
@@ -1742,9 +1795,8 @@ export class ExecutionEngine {
    * a stable reference outside it.
    */
   queueSnip(keepRecent: number): void {
-    if (typeof keepRecent === 'number' && keepRecent >= 0) {
-      this.pendingSnipCount = Math.floor(keepRecent)
-    }
+    if (!Number.isSafeInteger(keepRecent) || keepRecent < 0) throw new Error('keepRecent must be a finite non-negative integer')
+    this.pendingSnipCount = keepRecent
   }
 
   /**
@@ -1763,15 +1815,15 @@ export class ExecutionEngine {
     reason: string | undefined,
   ): { removed: number; tokensFreed: number } {
     const total = messages.length
-    const removeCount = Math.max(0, total - keepRecent)
+    const kept = trimHistory(messages, keepRecent)
+    const removeCount = total - kept.length
     if (removeCount === 0) {
       return { removed: 0, tokensFreed: 0 }
     }
 
     const tokensBefore = estimateTokens(messages)
-    const kept = messages.slice(-keepRecent)
     const boundary: OpenAIMessage = {
-      role: 'user',
+      role: 'system', source: 'runtime',
       content:
         `[snip] ${removeCount} older messages were removed to free context space` +
         (reason ? ` (${reason})` : '') +
@@ -1803,4 +1855,4 @@ export class ExecutionEngine {
 }
 
 // Export partitionToolCalls for testing
-export { partitionToolCalls }
+export { partitionToolCalls, enforceAggregateToolResultBudget }

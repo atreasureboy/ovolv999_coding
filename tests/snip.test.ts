@@ -89,12 +89,12 @@ describe('SnipTool', () => {
     expect(messages[1].content).toBe('Message 15') // 25 - 10 = 15
   })
 
-  it('defaults to keep_recent=10 when keep_recent is invalid', async () => {
+  it('rejects invalid keep_recent without modifying history', async () => {
     const messages = makeMessages(25)
     const ctx = makeContext(messages)
-    await tool.execute({ keep_recent: -5 }, ctx)
-    // Negative falls back to default 10
-    expect(messages.length).toBe(11)
+    const result = await tool.execute({ keep_recent: -5 }, ctx)
+    expect(result.isError).toBe(true)
+    expect(messages.length).toBe(25)
   })
 
   it('does nothing when conversation is already short', async () => {

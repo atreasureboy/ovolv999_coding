@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest'
+import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vitest'
 import {
   loadManifest,
   discoverPlugins,
@@ -21,12 +21,11 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 
 let testDir: string
-let origHome: string | undefined
 
 beforeAll(() => {
   testDir = mkdtempSync(join(tmpdir(), 'ovolv999-plugins-'))
-  origHome = process.env.HOME
-  process.env.HOME = testDir
+  vi.stubEnv('HOME', testDir)
+  vi.stubEnv('USERPROFILE', testDir)
 })
 
 beforeEach(() => {
@@ -40,7 +39,7 @@ beforeEach(() => {
 })
 
 afterAll(() => {
-  if (origHome !== undefined) process.env.HOME = origHome
+  vi.unstubAllEnvs()
   rmSync(testDir, { recursive: true, force: true })
 })
 

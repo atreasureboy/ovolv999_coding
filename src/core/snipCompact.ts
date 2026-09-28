@@ -57,18 +57,6 @@ function isWhitespace(s: unknown): boolean {
   return typeof s === 'string' && s.trim().length === 0
 }
 
-function stringContentLength(content: OpenAIMessage['content']): number {
-  if (typeof content === 'string') return content.length
-  if (content === null || content === undefined) return 0
-  let total = 0
-  for (const part of content) {
-    if (typeof part === 'object' && part !== null && 'text' in part) {
-      total += (part as { text: string }).text.length
-    }
-  }
-  return total
-}
-
 function headTailTruncate(text: string, maxChars: number, head: number, tail: number): string {
   if (text.length <= maxChars) return text
   const saved = text.length - (head + tail)
@@ -129,7 +117,7 @@ function dropEmptyMessages(
   const original = messages.length
   for (let i = messages.length - 1 - protectedRange; i >= 0; i--) {
     const msg = messages[i]
-    if (msg.role === 'system') continue
+    if (msg.role === 'system' || msg.role === 'tool' || msg.tool_calls?.length) continue
     if (isWhitespace(msg.content)) {
       messages.splice(i, 1)
     } else if (Array.isArray(msg.content)) {

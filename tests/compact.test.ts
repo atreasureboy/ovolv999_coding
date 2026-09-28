@@ -12,6 +12,7 @@ import {
   resolveContextWindow,
   KNOWN_MODEL_CONTEXT_WINDOWS,
   MODEL_MAX_CONTEXT_TOKENS,
+  UNKNOWN_MODEL_CONTEXT_TOKENS,
   CONTEXT_MICROCOMPACT_PCT,
   CONTEXT_WARN_PCT,
   CONTEXT_COMPACT_PCT,
@@ -322,12 +323,12 @@ describe('resolveContextWindow', () => {
     expect(resolveContextWindow('gpt-4', 32_000)).toBe(32_000)
   })
 
-  it('falls back to MODEL_MAX_CONTEXT_TOKENS for unknown models', () => {
-    expect(resolveContextWindow('totally-unknown-model-9000')).toBe(MODEL_MAX_CONTEXT_TOKENS)
+  it('uses a conservative fallback for unknown models', () => {
+    expect(resolveContextWindow('totally-unknown-model-9000')).toBe(UNKNOWN_MODEL_CONTEXT_TOKENS)
   })
 
   it('handles missing/empty model name', () => {
-    expect(resolveContextWindow('')).toBe(MODEL_MAX_CONTEXT_TOKENS)
+    expect(resolveContextWindow('')).toBe(UNKNOWN_MODEL_CONTEXT_TOKENS)
   })
 
   it('resolves Claude Sonnet 4.x to 200k', () => {
@@ -351,7 +352,7 @@ describe('resolveContextWindow', () => {
 
   it('handles o-series and GPT-5', () => {
     expect(resolveContextWindow('o1')).toBe(200_000)
-    expect(resolveContextWindow('o1-mini')).toBe(200_000)
+    expect(resolveContextWindow('o1-mini')).toBe(128_000)
     expect(resolveContextWindow('o3-mini')).toBe(200_000)
     expect(resolveContextWindow('gpt-5')).toBe(400_000)
   })

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest'
 import {
   recordPattern,
   recordPatternFailure,
@@ -25,16 +25,15 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 
 let testDir: string
-let origHome: string | undefined
 
 beforeAll(() => {
   testDir = mkdtempSync(join(tmpdir(), 'ovolv999-dream-'))
-  origHome = process.env.HOME
-  process.env.HOME = testDir
+  vi.stubEnv('HOME', testDir)
+  vi.stubEnv('USERPROFILE', testDir)
 })
 
 afterAll(() => {
-  if (origHome !== undefined) process.env.HOME = origHome
+  vi.unstubAllEnvs()
   rmSync(testDir, { recursive: true, force: true })
 })
 
