@@ -19,7 +19,7 @@
 import { appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync, statSync } from 'fs'
 import { join } from 'path'
 import { randomBytes, randomUUID } from 'crypto'
-import { withPersistenceLock } from './persistenceLock.js'
+import { acquirePersistenceLease, withPersistenceLock } from './persistenceLock.js'
 
 export interface EpisodicMemoryEntry {
   id: string
@@ -166,9 +166,22 @@ export class EpisodicMemory {
   }
 
   write(entry: Omit<EpisodicMemoryEntry, 'id'>): EpisodicMemoryWriteResult {
+    return this.writeUsing(entry, action => withPersistenceLock(this.filePath, action))
+  }
+
+  async writeAsync(entry: Omit<EpisodicMemoryEntry, 'id'>): Promise<EpisodicMemoryWriteResult> {
+    try {
+      const lease = await acquirePersistenceLease(this.filePath)
+      try { return this.writeUsing(entry, action => { lease.assertOwned(); return action() }) } finally { lease.release() }
+    } catch (error) {
+      return { ...entry, id: nextId(), persistence: 'failed', persistenceError: error instanceof Error ? error.message : 'Persistence failed' }
+    }
+  }
+
+  private writeUsing(entry: Omit<EpisodicMemoryEntry, 'id'>, guard: (action: () => EpisodicMemoryWriteResult) => EpisodicMemoryWriteResult): EpisodicMemoryWriteResult {
     const full: EpisodicMemoryEntry = { ...entry, id: nextId() }
     try {
-      return withPersistenceLock(this.filePath, () => {
+      return guard(() => {
         try {
           const stat = statSync(this.filePath)
           if (stat.mtimeMs !== this.lastObservedMtimeMs || stat.size !== this.lastObservedSize) this.entryCount = null

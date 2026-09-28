@@ -49,7 +49,7 @@ describe('createSessionDir', () => {
     const cwd = freshDir('create')
     const dir = createSessionDir(cwd, FIXED_DATE)
     // 2026-07-13T10:30:45Z -> ISO `2026-07-13_10:30:45.000Z` -> session_YYYY-MM-DD_HHMMSS
-    expect(dir).toBe(join(cwd, 'sessions', 'session_2026-07-13_103045'))
+    expect(basename(dir)).toMatch(/^session_2026-07-13_103045_[0-9a-f-]{36}$/)
     expect(existsSync(dir)).toBe(true)
     expect(existsSync(join(dir, '..'))).toBe(true)
   })
@@ -70,9 +70,9 @@ describe('createSessionDir', () => {
     const b = createSessionDir(cwd, new Date('2026-07-13T10:30:50.000Z'))
     const c = createSessionDir(cwd, new Date('2026-07-13T10:30:59.000Z'))
 
-    expect(a).toBe(join(cwd, 'sessions', 'session_2026-07-13_103045'))
-    expect(b).toBe(join(cwd, 'sessions', 'session_2026-07-13_103050'))
-    expect(c).toBe(join(cwd, 'sessions', 'session_2026-07-13_103059'))
+    expect(basename(a)).toMatch(/^session_2026-07-13_103045_[0-9a-f-]{36}$/)
+    expect(basename(b)).toMatch(/^session_2026-07-13_103050_[0-9a-f-]{36}$/)
+    expect(basename(c)).toMatch(/^session_2026-07-13_103059_[0-9a-f-]{36}$/)
     expect(new Set([a, b, c]).size).toBe(3)
     for (const d of [a, b, c]) expect(existsSync(d)).toBe(true)
   })
@@ -373,8 +373,8 @@ describe('listSessions', () => {
 
     const sessions = listSessions(cwd)
     expect(sessions).toEqual([
-      { dir: newer, name: 'session_2026-07-13_110000', messages: 1 },
-      { dir: older, name: 'session_2026-07-13_080000', messages: 2 },
+      { dir: newer, name: basename(newer), messages: 1 },
+      { dir: older, name: basename(older), messages: 2 },
     ])
   })
 
@@ -477,7 +477,7 @@ describe('resolveSessionPath', () => {
     } catch (err: unknown) {
       expect(err).toBeInstanceOf(AmbiguousSessionError)
       const e = err as AmbiguousSessionError
-      expect(e.matches).toEqual(['session_2026-07-13_080000', 'session_2026-07-13_090000'])
+      expect(e.matches).toEqual([basename(a), basename(b)])
     }
   })
 
@@ -655,7 +655,7 @@ describe('session envelope (versioning & migration)', () => {
       join(dir, 'history.json'),
       JSON.stringify({
         version: MIN_SUPPORTED_VERSION,
-        schema: CURRENT_SESSION_SCHEMA,
+        schema: `ovogo.session.v${MIN_SUPPORTED_VERSION}`,
         updatedAt: '2026-07-13T00:00:00.000Z',
         messages: [{ role: 'user', content: 'q' }],
       }),
@@ -802,8 +802,8 @@ describe('session envelope (versioning & migration)', () => {
 
     const sessions = listSessions(cwd)
     expect(sessions).toEqual([
-      { dir: currentDir, name: 'session_2026-07-13_110000', messages: 1 },
-      { dir: legacyDir, name: 'session_2026-07-13_080000', messages: 2 },
+      { dir: currentDir, name: basename(currentDir), messages: 1 },
+      { dir: legacyDir, name: basename(legacyDir), messages: 2 },
     ])
   })
 
@@ -991,6 +991,7 @@ describe('envelope hardening: schema name, timestamps, version-gate ordering', (
       JSON.stringify({
         version: CURRENT_SESSION_VERSION,
         schema: CURRENT_SESSION_SCHEMA,
+        sessionId: 'fixture', revision: 1, owner: { pid: process.pid, hostname: 'fixture', birthId: 'fixture' },
         updatedAt: iso,
         messages: [{ role: 'user', content: 'q' }],
       }),
@@ -1189,6 +1190,7 @@ describe('tool-call-id invariant: role=tool requires non-empty tool_call_id', ()
       JSON.stringify({
         version: CURRENT_SESSION_VERSION,
         schema: CURRENT_SESSION_SCHEMA,
+        sessionId: 'fixture', revision: 1, owner: { pid: process.pid, hostname: 'fixture', birthId: 'fixture' },
         updatedAt: '2026-07-13T10:30:45.000Z',
         messages: [
           { role: 'user', content: 'q' },

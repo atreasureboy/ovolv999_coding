@@ -1,7 +1,9 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, openSync, writeSync, fsyncSync, closeSync } from 'fs'
-import { join, resolve } from 'path'
-import { randomBytes } from 'crypto'
+import { basename, join, resolve } from 'path'
+import { createHash, randomBytes, randomUUID } from 'crypto'
 import type { OpenAIMessage, ToolCall } from './types.js'
+import { acquirePersistenceLeaseSync, type PersistenceLease } from './persistenceLock.js'
+import type { ProcessIdentity } from './processIdentity.js'
 
 export interface SessionInfo {
   dir: string
@@ -23,13 +25,13 @@ const SESSION_DIR_PREFIX = 'session_'
 // callers see an actionable error rather than silent corruption.
 
 /** The schema this binary writes. Bump when the on-disk shape changes. */
-export const CURRENT_SESSION_VERSION = 1
+export const CURRENT_SESSION_VERSION = 2
 
 /** The lowest version this binary still understands (>= will migrate; < will reject). */
 export const MIN_SUPPORTED_VERSION = 1
 
 /** Schema name — human-readable identifier separate from numeric version. */
-export const CURRENT_SESSION_SCHEMA = 'ovogo.session.v1'
+export const CURRENT_SESSION_SCHEMA = 'ovogo.session.v2'
 
 export interface SessionEnvelope {
   version: number
@@ -37,6 +39,9 @@ export interface SessionEnvelope {
   /** Last write time. New envelopes always populate this. Validated as ISO. */
   updatedAt: string
   messages: OpenAIMessage[]
+  sessionId: string
+  revision: number
+  owner: ProcessIdentity | null
 }
 
 /**
@@ -47,6 +52,7 @@ export interface SessionEnvelope {
  * new version.
  */
 const SCHEMA_FOR_VERSION: Readonly<Record<number, string>> = Object.freeze({
+  1: 'ovogo.session.v1',
   [CURRENT_SESSION_VERSION]: CURRENT_SESSION_SCHEMA,
 })
 
@@ -155,7 +161,9 @@ function isValidMessageShape(msg: unknown): msg is OpenAIMessage {
   if (!msg || typeof msg !== 'object') return false
   const m = msg as Record<string, unknown>
   if (typeof m.role !== 'string' || !VALID_ROLES.has(m.role as OpenAIMessage['role'])) return false
-  if (m.content !== null && typeof m.content !== 'string') return false
+  if (m.content !== null && typeof m.content !== 'string') {
+    if (!Array.isArray(m.content) || !m.content.every(isValidContentPart)) return false
+  }
   // Optional fields — accept when present, tolerate absence for old formats.
   if (m.tool_calls !== undefined) {
     if (!Array.isArray(m.tool_calls)) return false
@@ -173,6 +181,20 @@ function isValidMessageShape(msg: unknown): msg is OpenAIMessage {
     if (typeof m.tool_call_id !== 'string' || m.tool_call_id.length === 0) return false
   }
   return true
+}
+
+function isValidContentPart(part: unknown): boolean {
+  if (!part || typeof part !== 'object' || Array.isArray(part)) return false
+  const value = part as Record<string, unknown>
+  if (value.type === 'text') return typeof value.text === 'string'
+  if (value.type !== 'image_url' || !value.image_url || typeof value.image_url !== 'object' || Array.isArray(value.image_url)) return false
+  const image = value.image_url as Record<string, unknown>
+  return typeof image.url === 'string' && image.url.length > 0 && (image.detail === undefined || ['auto', 'low', 'high'].includes(image.detail as string))
+}
+
+function sessionIdFor(sessionDir: string): string {
+  return basename(sessionDir).match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)?.[0]
+    ?? `legacy_${createHash('sha256').update(resolve(sessionDir)).digest('hex')}`
 }
 
 /**
@@ -216,12 +238,15 @@ function asEnvelopeRecord(parsed: Record<string, unknown>): EnvelopeRecord {
  * load/migration time so the freshly-upgraded session reads as "just
  * modified".
  */
-function migrateLegacyV0ToV1(messages: OpenAIMessage[]): SessionEnvelope {
+function migrateLegacyV0ToV1(messages: OpenAIMessage[], sessionDir: string): SessionEnvelope {
   return {
     version: CURRENT_SESSION_VERSION,
     schema: CURRENT_SESSION_SCHEMA,
     updatedAt: new Date().toISOString(),
     messages: messages.map((m) => ({ ...m })),
+    sessionId: sessionIdFor(sessionDir),
+    revision: 0,
+    owner: null,
   }
 }
 
@@ -270,7 +295,7 @@ function migrateToCurrent(parsed: unknown, sessionDir: string): SessionEnvelope 
         )
       }
     }
-    return migrateLegacyV0ToV1(parsed as OpenAIMessage[])
+    return migrateLegacyV0ToV1(parsed as OpenAIMessage[], sessionDir)
   }
 
   if (!isEnvelope(parsed)) {
@@ -332,9 +357,14 @@ function migrateToCurrent(parsed: unknown, sessionDir: string): SessionEnvelope 
   }
 
   if (version === CURRENT_SESSION_VERSION) {
-    // Same-version short-circuit — no transform needed.
+    const current = parsed as unknown as SessionEnvelope
+    if (typeof current.sessionId !== 'string' || !current.sessionId || !Number.isSafeInteger(current.revision) || current.revision < 1 || !current.owner || !Number.isInteger(current.owner.pid) || current.owner.pid <= 0 || typeof current.owner.hostname !== 'string' || typeof current.owner.birthId !== 'string' || !current.owner.birthId) {
+      throw new CorruptSessionError(sessionDir, new Error('history sessionId/revision/owner is invalid'))
+    }
     return env as unknown as SessionEnvelope
   }
+
+  if (version === 1) return { ...migrateLegacyV0ToV1(messages as OpenAIMessage[], sessionDir), updatedAt: env.updatedAt }
 
   // Intermediate versions (MIN..CURRENT) — a clean migration step is needed.
   // Future: add migrateToV2, migrateToV3, ... and dispatch by version here.
@@ -357,10 +387,57 @@ export function createSessionDir(cwd: string, now: Date = new Date()): string {
     .replace(/:/g, '')
     .slice(0, 17) // YYYY-MM-DD_HHMMSS
 
-  const dirName = `${SESSION_DIR_PREFIX}${ts}`
-  const sessionDir = join(cwd, 'sessions', dirName)
-  mkdirSync(sessionDir, { recursive: true })
+  const dirName = `${SESSION_DIR_PREFIX}${ts}_${randomUUID()}`
+  const sessionDir = resolve(cwd, 'sessions', dirName)
+  mkdirSync(resolve(cwd, 'sessions'), { recursive: true })
+  mkdirSync(sessionDir)
   return sessionDir
+}
+
+interface SessionWriter {
+  lease: PersistenceLease
+  revision: number
+  sessionId: string
+}
+
+const writers = new Map<string, SessionWriter>()
+const observedRevisions = new Map<string, number>()
+
+export class SessionConflictError extends Error {
+  constructor(sessionDir: string, expected: number, actual: number) {
+    super(`Session revision conflict at ${sessionDir}: expected ${expected}, found ${actual}; reload before saving`)
+    this.name = 'SessionConflictError'
+  }
+}
+
+function readEnvelope(sessionDir: string): SessionEnvelope | null {
+  const path = join(sessionDir, 'history.json')
+  try { return migrateToCurrent(JSON.parse(readFileSync(path, 'utf8')) as unknown, sessionDir) } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+    if (error instanceof CorruptSessionError || error instanceof UnknownSessionVersionError) throw error
+    throw new CorruptSessionError(sessionDir, error)
+  }
+}
+
+export function claimSessionOwnership(sessionDir: string): void {
+  assertNonEmpty(sessionDir, 'sessionDir')
+  const key = resolve(sessionDir)
+  if (writers.has(key)) { writers.get(key)!.lease.assertOwned(); return }
+  mkdirSync(key, { recursive: true })
+  const lease = acquirePersistenceLeaseSync(join(key, 'writer'))
+  try {
+    const current = readEnvelope(key)
+    const revision = current?.revision ?? 0
+    const observed = observedRevisions.get(key)
+    if (observed !== undefined && observed !== revision) throw new SessionConflictError(key, observed, revision)
+    writers.set(key, { lease, revision, sessionId: current?.sessionId ?? sessionIdFor(key) })
+  } catch (error) { lease.release(); throw error }
+}
+
+export function releaseSessionOwnership(sessionDir: string): void {
+  const key = resolve(sessionDir)
+  const writer = writers.get(key)
+  if (writer) { writer.lease.release(); writers.delete(key) }
 }
 
 /**
@@ -409,7 +486,7 @@ export function createSessionDir(cwd: string, now: Date = new Date()): string {
  * history.json. Catching it at save time keeps the on-disk state always
  * self-consistent.
  */
-export function saveSession(sessionDir: string, history: OpenAIMessage[]): void {
+export function saveSession(sessionDir: string, history: OpenAIMessage[], expectedRevision?: number): void {
   assertNonEmpty(sessionDir, 'sessionDir')
   if (!Array.isArray(history)) {
     throw new TypeError('history must be an array of OpenAIMessage')
@@ -433,11 +510,23 @@ export function saveSession(sessionDir: string, history: OpenAIMessage[]): void 
   // all atomic-replace file mutations.
   const tmpPath = `${historyPath}.tmp.${process.pid}.${Date.now()}.${randomBytes(8).toString('hex')}`
   mkdirSync(sessionDir, { recursive: true })
+  claimSessionOwnership(sessionDir)
+  const writer = writers.get(resolve(sessionDir))!
+  writer.lease.assertOwned()
+  const current = readEnvelope(sessionDir)
+  const actualRevision = current?.revision ?? 0
+  if (actualRevision !== writer.revision || (expectedRevision !== undefined && expectedRevision !== actualRevision)) {
+    throw new SessionConflictError(sessionDir, expectedRevision ?? writer.revision, actualRevision)
+  }
+  if (current && current.sessionId !== writer.sessionId) throw new CorruptSessionError(sessionDir, new Error('Session identity changed while owned'))
 
   const envelope: SessionEnvelope = {
     version: CURRENT_SESSION_VERSION,
     schema: CURRENT_SESSION_SCHEMA,
     updatedAt: new Date().toISOString(),
+    sessionId: writer.sessionId,
+    revision: writer.revision + 1,
+    owner: writer.lease.owner,
     // Spread each message so all fields are preserved verbatim — in
     // particular `tool_call_id` on `tool` role messages (without it, the
     // OpenAI-compatible API rejects the row as orphan-without-anchor)
@@ -457,11 +546,15 @@ export function saveSession(sessionDir: string, history: OpenAIMessage[]): void 
     // gap: by the time we rename, the bytes are durably committed.
     const payload = Buffer.from(JSON.stringify(envelope, null, 2), 'utf8')
     tmpFd = openSync(tmpPath, 'w')
-    writeSync(tmpFd, payload, 0, payload.length, 0)
+    let written = 0
+    while (written < payload.length) written += writeSync(tmpFd, payload, written, payload.length - written, written)
     fsyncSync(tmpFd)
     closeSync(tmpFd)
     tmpFd = null
+    writer.lease.assertOwned()
     renameSync(tmpPath, historyPath)
+    writer.revision = envelope.revision
+    observedRevisions.set(resolve(sessionDir), envelope.revision)
   } catch (err) {
     // Best-effort: remove OUR orphan tmp file so we don't leak it on disk.
     // We only touch the path we just created — concurrent writers' tmps
@@ -496,25 +589,9 @@ export function saveSession(sessionDir: string, history: OpenAIMessage[]): void 
  */
 export function loadSession(sessionDir: string): OpenAIMessage[] {
   assertNonEmpty(sessionDir, 'sessionDir')
-  const historyPath = join(sessionDir, 'history.json')
-
-  if (!existsSync(historyPath)) return []
-
-  let raw: string
-  try {
-    raw = readFileSync(historyPath, 'utf8')
-  } catch (err) {
-    throw new CorruptSessionError(sessionDir, err)
-  }
-
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(raw)
-  } catch (err) {
-    throw new CorruptSessionError(sessionDir, err)
-  }
-
-  return migrateToCurrent(parsed, sessionDir).messages
+  const envelope = readEnvelope(sessionDir)
+  observedRevisions.set(resolve(sessionDir), envelope?.revision ?? 0)
+  return envelope?.messages ?? []
 }
 
 /**

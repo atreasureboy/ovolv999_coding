@@ -62,7 +62,7 @@ Higher-priority sources override lower ones on conflict.`,
       },
     } satisfies ToolDefinition,
 
-    execute(input: Record<string, unknown>): Promise<ToolResult> {
+    async execute(input: Record<string, unknown>): Promise<ToolResult> {
       const content = str(input.content)
       if (!content || content.length < 5) {
         return Promise.resolve({
@@ -79,7 +79,7 @@ Higher-priority sources override lower ones on conflict.`,
         : 0.7
       const source = str(input.source, 'agent_inferred') as 'user_stated' | 'agent_inferred' | 'tool_observed'
 
-      const entry = semantic.write({
+      const entry = await semantic.writeAsync({
         content: content.slice(0, 500),
         tags,
         source,
@@ -324,17 +324,17 @@ export class MemoryModule implements AgentModule {
     }
   }
 
-  onToolCall(
+  async onToolCall(
     toolName: string,
     input: Record<string, unknown>,
     result: { content: string; isError: boolean },
     turnNumber: number,
-  ): void {
+  ): Promise<void> {
     // Don't track memory tool calls themselves (avoid noise)
     if (toolName.startsWith('memory_')) return
 
     // Record both successes and failures (AgentOS pattern — learn from mistakes)
-    const persisted = this.episodic.write({
+    const persisted = await this.episodic.writeAsync({
       turn: turnNumber,
       toolName,
       inputSummary: JSON.stringify(input).slice(0, 200),

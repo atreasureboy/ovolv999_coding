@@ -29,7 +29,7 @@ function worker(dir: string, mode: string) {
   if (!existsSync(runtime)) {
     mkdirSync(runtime, { recursive: true })
     writeFileSync(join(runtime, 'package.json'), '{"type":"module"}')
-    for (const name of ['semanticMemory', 'episodicMemory', 'persistenceLock']) {
+    for (const name of ['semanticMemory', 'episodicMemory', 'persistenceLock', 'processIdentity']) {
       const source = readFileSync(new URL(`../src/core/${name}.ts`, import.meta.url), 'utf8')
       writeFileSync(join(runtime, `${name}.js`), transpileModule(source, { compilerOptions: { module: ModuleKind.ESNext, target: 9 } }).outputText)
     }

@@ -82,7 +82,8 @@ describe('persistence failure contracts', () => {
     vi.spyOn(fs, 'renameSync').mockImplementationOnce(() => { throw new Error('rename denied') })
     expect(semantic.write({ ...entry('unchanged disk memory'), confidence: 0.9 }).persistence).toBe('failed')
     expect(new SemanticMemory(dir).readAll()[0].confidence).toBe(0.4)
-    expect(fs.readdirSync(join(dir, 'memory'))).toEqual(['semantic.jsonl'])
+    expect(fs.readdirSync(join(dir, 'memory')).sort()).toEqual(['semantic.jsonl', 'semantic.jsonl.lock.owners'])
+    expect(fs.readdirSync(join(dir, 'memory', 'semantic.jsonl.lock.owners'))).toEqual([])
   })
 
   it('preserves the original baseline when recent versions are evicted', () => {

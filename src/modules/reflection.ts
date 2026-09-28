@@ -89,7 +89,7 @@ export class ReflectionModule implements AgentModule {
       ctx.abortSignal?.throwIfAborted()
       let persisted = 0
       for (const entry of parsed) {
-        const result = this.semantic.write({
+        const result = await this.semantic.writeAsync({
           content: `[run ${outcome}; verification ${verification}] ${entry.content}`,
           provenance: { status: 'unverified', claimedSource: 'agent_inferred', outcome, verification },
           tags: entry.tags,
@@ -212,7 +212,7 @@ export async function consolidateSession(
     let persisted = 0
     const outcome = episodes.some(episode => episode.outcome !== 'success') ? 'contains_failures_or_incomplete_actions' : 'tool_successes_only'
     for (const entry of parsed) {
-      const result = semantic.write({
+      const result = await semantic.writeAsync({
         content: `[session ${outcome}; verification not_run] ${entry.content}`,
         provenance: { status: 'unverified', claimedSource: 'consolidation', outcome, verification: 'not_run' },
         tags: entry.tags,

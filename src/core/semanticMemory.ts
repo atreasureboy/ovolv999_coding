@@ -1,7 +1,7 @@
 import { appendFileSync, closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { createHash, randomBytes, randomUUID } from 'crypto'
-import { withPersistenceLock } from './persistenceLock.js'
+import { acquirePersistenceLease, withPersistenceLock } from './persistenceLock.js'
 
 export interface MemoryProvenance {
   status: 'unverified' | 'verified'
@@ -95,13 +95,26 @@ export class SemanticMemory {
   }
 
   write(entry: Omit<SemanticMemoryEntry, 'id'>): SemanticMemoryWriteResult {
+    return this.writeUsing(entry, action => withPersistenceLock(this.filePath, action))
+  }
+
+  async writeAsync(entry: Omit<SemanticMemoryEntry, 'id'>): Promise<SemanticMemoryWriteResult> {
+    try {
+      const lease = await acquirePersistenceLease(this.filePath)
+      try { return this.writeUsing(entry, action => { lease.assertOwned(); return action() }) } finally { lease.release() }
+    } catch (error) {
+      return { ...entry, id: `sem_${randomUUID()}`, persistence: 'failed', persistenceError: error instanceof Error ? error.message : 'Persistence failed' }
+    }
+  }
+
+  private writeUsing(entry: Omit<SemanticMemoryEntry, 'id'>, guard: (action: () => SemanticMemoryWriteResult) => SemanticMemoryWriteResult): SemanticMemoryWriteResult {
     const full: SemanticMemoryEntry = {
       ...entry,
       id: `sem_${randomUUID()}`,
       provenance: { ...entry.provenance, status: 'unverified', claimedSource: entry.source },
     }
     try {
-      return withPersistenceLock(this.filePath, () => {
+      return guard(() => {
         if (!this.ensureLoaded(true)) throw new Error('Memory could not be read; write was not committed')
         const next = new Map(this.entries)
         const hash = contentHash(entry.content)

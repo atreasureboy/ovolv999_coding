@@ -96,7 +96,7 @@ export interface AgentModule {
     input: Record<string, unknown>,
     result: ToolResult,
     turnNumber: number,
-  ): void
+  ): void | Promise<void>
 
   /** Called after the engine loop finishes (e.g. reflection knowledge extraction) */
   onComplete?(ctx: ModuleRunContext): void | Promise<void>
