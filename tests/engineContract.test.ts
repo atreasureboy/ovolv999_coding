@@ -10,6 +10,8 @@ import { globalModuleRegistry } from '../src/core/moduleRegistry.js'
 import { BashTool } from '../src/tools/bash.js'
 import type { EngineConfig, Tool, ToolContext } from '../src/core/types.js'
 import type { Renderer } from '../src/ui/renderer.js'
+import { RunStore } from '../src/core/runStore.js'
+import { runtimeStateRoot } from '../src/core/runtimeState.js'
 
 const dirs: string[] = []
 const engines: ExecutionEngine[] = []
@@ -275,6 +277,7 @@ describe('engine behavioral contract', () => {
     const { result } = await engine.runTurn('explain', [])
     expect(result.status).toBe('blocked')
     expect(result.verification?.status).toBe('failed')
+    expect(RunStore.inspect(join(runtimeStateRoot(), 'runs', result.runId + '.json')).status).toBe('blocked')
   })
 
   it('propagates a failed real child verification to the parent outcome', async () => {

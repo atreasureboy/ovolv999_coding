@@ -1,3 +1,4 @@
+import { spawnManaged } from '../core/executionBackend.js'
 /**
  * BashTool — shell command execution with proper abort + process-group cleanup.
  *
@@ -27,7 +28,7 @@
  *       whole subprocess tree)
  */
 
-import { spawn, execSync } from 'child_process'
+import { execSync } from 'child_process'
 import type { ChildProcess } from 'child_process'
 import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/types.js'
 import { BASH_DESCRIPTION } from '../prompts/tools.js'
@@ -266,6 +267,7 @@ export class BashTool implements Tool {
           id = context.backgroundTaskManager.createTask(command, {
           description,
           cwd: context.cwd,
+          profile: context.executionProfile,
           sessionDir: context.sessionDir,
           metadata: { source: 'Bash.run_in_background' },
           // Forward the caller's abort signal so a parent cancel stops
@@ -303,7 +305,7 @@ export class BashTool implements Tool {
       const shellArgs = IS_WIN_CMD ? ['/c', actualCommand] : ['-c', actualCommand]
 
       // Pre-abort: if the signal is already aborted, refuse to spawn the
-      // background process at all. This MUST run before spawn() — otherwise
+      // background process at all. This MUST run before spawnManaged() — otherwise
       // we waste a fork just to immediately kill the child. Mirrors the
       // foreground runForeground() pre-abort contract.
       if (context.signal?.aborted) {
@@ -322,8 +324,9 @@ export class BashTool implements Tool {
         // engine would refuse to exit until the background process
         // finishes naturally. The abort listener (wired below) is
         // independent of unref and still fires on cancellation.
-        child = spawn(SHELL, shellArgs, {
+        child = spawnManaged(SHELL, shellArgs, {
           cwd: context.cwd,
+          profile: context.executionProfile,
           env: process.env,
           detached: true,
           stdio: 'ignore',
@@ -455,19 +458,22 @@ export class BashTool implements Tool {
         const tmuxSessionName = `ovogo-follow-${ts}`
         let paneJoined = false
         try {
-          spawn('tmux', ['new-session', '-d', '-s', tmuxSessionName, '-x', '200', '-y', '50'], {
+          spawnManaged('tmux', ['new-session', '-d', '-s', tmuxSessionName, '-x', '200', '-y', '50'], {
             cwd: context.cwd,
+          profile: context.executionProfile,
             detached: true,
           }).on('error', () => {})
-          spawn('tmux', ['send-keys', '-t', tmuxSessionName, `tail -n +1 -f "${followLogFile}"`, 'Enter'], {
+          spawnManaged('tmux', ['send-keys', '-t', tmuxSessionName, `tail -n +1 -f "${followLogFile}"`, 'Enter'], {
             cwd: context.cwd,
+          profile: context.executionProfile,
           }).on('error', () => {})
           // Try to join the follow pane into the user's current tmux window
           try {
             const currentTmux = process.env.TMUX_PANE ? process.env.TMUX?.split(',')[0]?.replace(/^\//, '') : null
             if (currentTmux) {
-              spawn('tmux', ['join-pane', '-t', `${currentTmux}`, `-s`, `${tmuxSessionName}`, '-l', '15'], {
+              spawnManaged('tmux', ['join-pane', '-t', `${currentTmux}`, `-s`, `${tmuxSessionName}`, '-l', '15'], {
                 cwd: context.cwd,
+          profile: context.executionProfile,
               }).on('error', () => {})
               paneJoined = true
             }
@@ -478,7 +484,7 @@ export class BashTool implements Tool {
             : `[Spectator: tmux attach -t ${tmuxSessionName}]`
 
           followCleanup = () => {
-            try { spawn('tmux', ['kill-session', '-t', tmuxSessionName], { detached: true }).on('error', () => {}) } catch { /* ignore */ }
+            try { spawnManaged('tmux', ['kill-session', '-t', tmuxSessionName], { detached: true, profile: context.executionProfile }).on('error', () => {}) } catch { /* ignore */ }
           }
         } catch { /* tmux not available, degrade gracefully */ }
       }
@@ -490,8 +496,9 @@ export class BashTool implements Tool {
       // Then `process.kill(-pid, SIGTERM)` reaches the shell + every
       // backgrounded subprocess (the original exec()-based path missed
       // these because the child shared the parent's pgid).
-      const child: ChildProcess = spawn(SHELL, shellArgs, {
+      const child: ChildProcess = spawnManaged(SHELL, shellArgs, {
         cwd: context.cwd,
+          profile: context.executionProfile,
         env: process.env,
         detached: true,
         stdio: ['ignore', 'pipe', 'pipe'],

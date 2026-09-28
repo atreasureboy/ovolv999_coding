@@ -1,3 +1,4 @@
+import { assertExecutionProfile, createProcessScope } from './executionBackend.js'
 import { createModelGateway } from './modelGateway.js'
 import { trimHistory, settleHistory } from './messageGroups.js'
 /**
@@ -61,7 +62,7 @@ import type { AgentModule, ModuleBootResult, ModuleBootContext } from './module.
 import { globalModuleRegistry } from './moduleRegistry.js'
 import { applyAgentToConfig } from './agentPresets.js'
 import { filterToolsForSubAgent } from './agentToolFilter.js'
-import { createRunContext, runOperation, quarantineRun, quarantineWorkspace, isWorkspaceQuarantined, withWorkspaceAccess, type RunContext } from './runContext.js'
+import { initializeRunStore, createRunContext, runOperation, quarantineRun, quarantineWorkspace, isWorkspaceQuarantined, withWorkspaceAccess, type RunContext } from './runContext.js'
 import { normalizeOutcome, settleWithin, type VerificationEvidence } from './outcome.js'
 import { createVerificationPlan, captureArtifactVersion, executeVerification } from './verification.js'
 import {
@@ -362,6 +363,7 @@ export class ExecutionEngine {
   }
 
   constructor(config: EngineConfig, renderer: Renderer, client?: OpenAI) {
+    assertExecutionProfile(config.executionProfile)
     // Merge agent config into effective config (overrides legacy fields)
     this.config = applyAgentToConfig({
       ...config,
@@ -1060,13 +1062,23 @@ export class ExecutionEngine {
     }
 
     context.signal?.throwIfAborted()
-    const result = await tool.execute(input, { ...context, permissionApproved })
+    const run = this.activeRun
+    const operationId = run?.store?.intent(toolName, tool.metadata?.readOnly === true)
+    const processScope = createProcessScope(this.config.executionProfile)
+    const result = await processScope.run(() => tool.execute(input, { ...context, permissionApproved }))
+    if (operationId && run?.store) {
+      if (processScope.pending.size) {
+        const receipt = Promise.all([...processScope.pending]).then(() => run.store!.receipt(operationId, result.isError ? 'failed' : 'completed'))
+        run.pending.set('physical:' + operationId, receipt)
+        void receipt.then(() => run.pending.delete('physical:' + operationId), () => run.controller.abort('RunStore receipt persistence failed'))
+      } else run.store.receipt(operationId, result.isError ? 'failed' : 'completed')
+    }
     if (!result.isError && ['Write', 'Edit', 'NotebookEdit'].includes(toolName) && this.activeRun) this.activeRun.mutationAttempted = true
-    context.signal?.throwIfAborted()
+    if (context.signal?.aborted) return { ...result, isError: true, status: 'cancelled', content: 'Cancelled after physical tool completion: ' + result.content }
 
     // Notify modules of tool execution (e.g. episodic memory write)
     for (const module of this.modules) {
-      module.onToolCall?.(toolName, input, result, turnNumber)
+      await module.onToolCall?.(toolName, input, result, turnNumber)
     }
 
     return result
@@ -1152,6 +1164,7 @@ export class ExecutionEngine {
   ): ToolContext {
     return {
       cwd: this.config.cwd,
+      executionProfile: this.config.executionProfile,
       permissionMode: this.config.permissionMode,
       permissionManager: this.permissionManager,
       requestPermission: this.config.requestPermission,
@@ -1247,11 +1260,13 @@ export class ExecutionEngine {
     let result: TurnResult
     let messages: OpenAIMessage[] = [...settleHistory(history), { role: 'user', content: userMessage }]
     try {
+      initializeRunStore(run)
       const planMode = this.isPlanMode()
 
       // Clear file read state for this turn (read-before-edit is per-turn, not cross-turn)
       const verificationPlan = createVerificationPlan(this.config.cwd, undefined, [...(this.config.verificationExcludedPaths ?? []), ...(this.config.sessionDir ? [this.config.sessionDir] : [])])
-      const startingArtifact = await runOperation(run, 'artifact:snapshot', () => captureArtifactVersion(this.config.cwd, verificationPlan.excludedPaths), 60_000, this.config.cancellationGraceMs ?? 2000)
+      const startingArtifact = await runOperation(run, 'artifact:snapshot', () => captureArtifactVersion(this.config.cwd, verificationPlan.excludedPaths, { signal: run.controller.signal }), 60_000, this.config.cancellationGraceMs ?? 2000)
+      run.store?.acceptance(verificationPlan.definitionHash, startingArtifact)
 
       // ── Boot Sequence: resolve + boot modules ──
       const bootCtx: ModuleBootContext = {
@@ -1660,11 +1675,11 @@ export class ExecutionEngine {
     if (turnAbortController.signal.aborted) status = String(turnAbortController.signal.reason).startsWith('timeout:') ? 'failed' : 'cancelled'
     if (status === 'completed') {
       try {
-        const artifact = await runOperation(run, 'artifact:final', () => captureArtifactVersion(this.config.cwd, verificationPlan.excludedPaths), 60_000, this.config.cancellationGraceMs ?? 2000)
+        const artifact = await runOperation(run, 'artifact:final', () => captureArtifactVersion(this.config.cwd, verificationPlan.excludedPaths, { signal: run.controller.signal }), 60_000, this.config.cancellationGraceMs ?? 2000)
         if (artifact !== startingArtifact) {
-          verification = await runOperation(run, 'verification', () => withWorkspaceAccess(this.config.cwd, run.familyId, true, turnAbortController.signal, () => executeVerification({ cwd: this.config.cwd, plan: verificationPlan, signal: turnAbortController.signal, runId: run.runId, artifactVersion: artifact })), 300_000, this.config.cancellationGraceMs ?? 2000)
+          verification = await runOperation(run, 'verification', () => withWorkspaceAccess(this.config.cwd, run.familyId, true, turnAbortController.signal, () => executeVerification({ cwd: this.config.cwd, plan: verificationPlan, executionProfile: this.config.executionProfile, signal: turnAbortController.signal, runId: run.runId, artifactVersion: artifact })), 300_000, this.config.cancellationGraceMs ?? 2000)
           if (verification.status === 'failed') status = 'failed'
-          else if (verification.status !== 'passed') status = 'blocked'
+          else if (verification.status !== 'passed' || verification.sufficientForCompletion === false) status = 'blocked'
         } else if (run.mutationAttempted) {
           status = 'blocked'
           verification = { ...verification, status: 'not_run', output: 'A file write produced no change in the artifact inventory. Explicit artifact acceptance is required for ignored outputs or unchanged writes.' }
@@ -1676,6 +1691,7 @@ export class ExecutionEngine {
     } else verification = { ...verification, status: 'not_run', output: 'Run was not accepted for verification' }
     result = { ...result, status, verification, runId: run.runId, unfinishedResources: [...run.pending.keys()] }
     if (status !== 'completed' && result.reason === 'stop_sequence') result.reason = status === 'interrupted' ? 'interrupted' : status === 'limit_reached' ? 'max_iterations' : 'error'
+    if (run.pending.size && result.status === 'completed') result = { ...result, status: 'blocked', reason: 'error', unfinishedResources: [...run.pending.keys()] }
     run.result = result
     // ── Module onComplete hooks (reflection, etc.) ──
     for (const module of this.modules) {
@@ -1701,15 +1717,19 @@ export class ExecutionEngine {
 
     if (result.status === 'completed') {
       const acceptedArtifact = verification.artifactVersion ?? startingArtifact
-      const finalArtifact = await runOperation(run, 'artifact:after-finalization', () => captureArtifactVersion(this.config.cwd, verificationPlan.excludedPaths), 60_000, this.config.cancellationGraceMs ?? 2000)
+      const finalArtifact = await runOperation(run, 'artifact:after-finalization', () => captureArtifactVersion(this.config.cwd, verificationPlan.excludedPaths, { signal: run.controller.signal }), 60_000, this.config.cancellationGraceMs ?? 2000)
       if (finalArtifact !== acceptedArtifact) {
         result = { ...result, reason: 'error', status: 'blocked', verification: { ...verification, status: 'failed', output: 'Artifact changed during finalization; previous acceptance is stale.' } }
       }
     }
+    if (run.pending.size && result.status === 'completed') result = { ...result, status: 'blocked', reason: 'error', unfinishedResources: [...run.pending.keys()] }
+    if (result.status === 'completed') run.store?.acceptance(verificationPlan.definitionHash, verification.artifactVersion ?? startingArtifact)
+    run.store?.finish(result.status ?? 'unknown')
     run.result = result
 
     return { result, newHistory: settleHistory(messages) }
     } catch (error) {
+      try { run.store?.finish('needs_recovery') } catch (failure) { this.renderer.warn('Run state could not be persisted: ' + String(failure)) }
       const status = turnAbortController.signal.aborted ? 'cancelled' : 'failed'
       return { result: { stopped: true, reason: 'error', status, runId: run.runId, output: String(error), verification: { status: 'not_run', workspace: this.config.cwd, commands: [], output: 'Initialization failed' }, unfinishedResources: [...run.pending.keys()] }, newHistory: settleHistory(messages) }
     } finally {

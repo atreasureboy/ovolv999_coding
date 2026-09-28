@@ -15,10 +15,8 @@
  * Inspired by Claude Code's ACP implementation and the LSP specification.
  */
 
-import { createInterface, type Interface as ReadlineInterface } from 'readline'
+import { StringDecoder } from 'string_decoder'
 import { EventEmitter } from 'events'
-import { writeFileSync, readFileSync } from 'fs'
-import { resolve } from 'path'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -55,8 +53,8 @@ export interface ACPCapabilities {
 export interface ACPHandlers {
   onMessage?: (text: string, images?: string[]) => Promise<string>
   onInterrupt?: () => void
-  onFileRead?: (path: string) => string
-  onFileWrite?: (path: string, content: string) => void
+  onFileRead?: (path: string) => string | Promise<string>
+  onFileWrite?: (path: string, content: string) => void | Promise<void>
   onCost?: () => { inputTokens: number; outputTokens: number; totalCost: number }
 }
 
@@ -95,13 +93,14 @@ export function parseMessage(line: string): JsonRpcMessage | null {
 }
 
 function isValidMessage(obj: unknown): boolean {
-  if (typeof obj !== 'object' || obj === null) return false
+  if (typeof obj !== 'object' || obj === null || Array.isArray(obj)) return false
   const o = obj as Record<string, unknown>
   if (o.jsonrpc !== '2.0') return false
+  if ('id' in o && typeof o.id !== 'string' && (typeof o.id !== 'number' || !Number.isFinite(o.id))) return false
   // Request: has method
   // Response: has result or error, and id
   // Notification: has method, no id
-  if (typeof o.method === 'string') return true // request or notification
+  if (typeof o.method === 'string' && o.method.length > 0) return true // request or notification
   if ('result' in o || 'error' in o) return true // response
   return false
 }
@@ -138,58 +137,74 @@ export class ACPServer extends EventEmitter {
   private handlers: ACPHandlers
   private cwd: string
   private initialized = false
-  private rl: ReadlineInterface | null = null
+  private detachInput?: () => void
+  private active = 0
+  private maxMessageBytes: number
+  private advertised: Partial<ACPCapabilities>
   private writeFn: (data: string) => void
 
   constructor(
     handlers: ACPHandlers,
-    options: { cwd: string; write?: (data: string) => void },
+    options: { cwd: string; write?: (data: string) => void; maxMessageBytes?: number; capabilities?: Partial<ACPCapabilities> },
   ) {
     super()
     this.handlers = handlers
     this.cwd = options.cwd
+    this.maxMessageBytes = options.maxMessageBytes ?? 1024 * 1024
+    this.advertised = options.capabilities ?? {}
     this.writeFn = options.write ?? ((data: string) => process.stdout.write(data))
   }
 
   /** Get server capabilities */
   getCapabilities(): ACPCapabilities {
     return {
-      streaming: true,
-      tools: true,
-      multiModal: true,
-      worktrees: true,
-      interrupts: true,
+      streaming: false,
+      tools: Boolean(this.handlers.onMessage && this.advertised.tools),
+      multiModal: Boolean(this.handlers.onMessage),
+      worktrees: Boolean(this.handlers.onMessage && this.advertised.worktrees),
+      interrupts: Boolean(this.handlers.onInterrupt),
     }
   }
 
   /** Start listening on a readline interface (defaults to stdin) */
   start(input: NodeJS.ReadableStream = process.stdin): void {
-    this.rl = createInterface({ input, terminal: false })
-
-    this.rl.on('line', (line: string) => {
-      const msg = parseMessage(line)
-      if (msg) {
-        this.handleMessage(msg).catch(err => {
-          this.emit('error', err)
-        })
+    this.detachInput?.()
+    const decoder = new StringDecoder('utf8')
+    let buffer = ''
+    const failed = (error: Error): void => { this.emit('protocolError', error); this.stop() }
+    const receive = (chunk: Buffer | string): void => {
+      buffer += typeof chunk === 'string' ? chunk : decoder.write(chunk)
+      for (;;) {
+        const nl = buffer.indexOf('\n')
+        const length = Buffer.byteLength(nl < 0 ? buffer : buffer.slice(0, nl))
+        if (length > this.maxMessageBytes) { failed(new Error('ACP message byte limit exceeded')); return }
+        if (nl < 0) return
+        const line = buffer.slice(0, nl); buffer = buffer.slice(nl + 1)
+        const message = parseMessage(line)
+        if (!message) { this.send(errorResponse(undefined, -32700, 'Invalid JSON-RPC frame')); continue }
+        void this.handleMessage(message).catch(failed)
       }
-    })
-
-    this.rl.on('close', () => {
-      this.emit('close')
-    })
+    }
+    const closed = (): void => { this.stop(); this.emit('close') }
+    input.on('data', receive)
+    input.once('end', closed)
+    this.detachInput = () => { input.removeListener('data', receive); input.removeListener('end', closed); buffer = '' }
   }
 
-  /** Stop the server */
   stop(): void {
-    this.rl?.close()
-    this.rl = null
+    this.detachInput?.()
+    this.detachInput = undefined
     this.initialized = false
   }
 
   /** Send a message to the client */
   send(msg: JsonRpcMessage): void {
-    this.writeFn(serializeMessage(msg) + '\n')
+    const text = serializeMessage(msg)
+    if (Buffer.byteLength(text) > this.maxMessageBytes) {
+      this.writeFn(serializeMessage(errorResponse('id' in msg ? msg.id : undefined, -32603, 'ACP response byte limit exceeded')) + '\n')
+      return
+    }
+    this.writeFn(text + '\n')
   }
 
   /** Send a notification (no response expected) */
@@ -202,13 +217,20 @@ export class ACPServer extends EventEmitter {
     // Only handle requests and notifications (not responses from client)
     if (!('method' in msg)) return
 
-    const req = msg as JsonRpcRequest | JsonRpcNotification
-    const id = 'id' in req ? (req as JsonRpcRequest).id : undefined
+    const req = msg
+    const id = 'id' in req ? req.id : undefined
     const { method, params } = req
+    if (params !== undefined && (typeof params !== 'object' || params === null || Array.isArray(params))) { this.respondError(id, -32602, 'Invalid params'); return }
+    if (Buffer.byteLength(JSON.stringify(req)) > this.maxMessageBytes) { this.respondError(id, -32602, 'ACP request byte limit exceeded'); return }
+    if (['message', 'interrupt', 'file/read', 'file/write', 'cost'].includes(method) && !this.initialized) { this.respondError(id, -32600, 'Server not initialized'); return }
+    const exclusive = ['message', 'file/read', 'file/write'].includes(method)
+    if (exclusive && this.active) { this.respondError(id, -32000, 'Execution owner is busy'); return }
+    if (exclusive) this.active++
 
     try {
       switch (method) {
         case 'initialize':
+          if (params?.protocolVersion !== undefined && params.protocolVersion !== PROTOCOL_VERSION) { this.respondError(id, -32602, 'Unsupported protocol version'); break }
           this.initialized = true
           this.respond(id, {
             protocolVersion: PROTOCOL_VERSION,
@@ -232,16 +254,17 @@ export class ACPServer extends EventEmitter {
           break
 
         case 'interrupt':
-          this.handlers.onInterrupt?.()
+          if (!this.handlers.onInterrupt) { this.respondError(id, -32601, 'Interrupt handler is not configured'); break }
+          this.handlers.onInterrupt()
           this.respond(id, { interrupted: true })
           break
 
         case 'file/read':
-          this.handleFileRead(id, params)
+          await this.handleFileRead(id, params)
           break
 
         case 'file/write':
-          this.handleFileWrite(id, params)
+          await this.handleFileWrite(id, params)
           break
 
         case 'cost':
@@ -261,8 +284,8 @@ export class ACPServer extends EventEmitter {
       if (id !== undefined) {
         this.respondError(id, RPC_ERRORS.INTERNAL_ERROR.code, (err as Error).message)
       }
-      this.emit('error', err)
-    }
+      if (this.listenerCount('error')) this.emit('error', err)
+    } finally { if (exclusive) this.active-- }
   }
 
   private async handleMessageMethod(
@@ -279,10 +302,10 @@ export class ACPServer extends EventEmitter {
       return
     }
 
-    const text = String(params?.text ?? '')
-    const images = Array.isArray(params?.images) ? (params!.images as string[]) : undefined
+    const text = typeof params?.text === 'string' ? params.text : ''
+    const images = Array.isArray(params?.images) ? (params.images as string[]) : undefined
 
-    if (!text) {
+    if (!text || (params?.images !== undefined && (!Array.isArray(params.images) || !params.images.every(image => typeof image === 'string')))) {
       this.respondError(id, RPC_ERRORS.INVALID_PARAMS.code, 'Missing "text" param')
       return
     }
@@ -304,52 +327,20 @@ export class ACPServer extends EventEmitter {
     }
   }
 
-  private handleFileRead(id: string | number | undefined, params?: Record<string, unknown>): void {
-    if (!this.handlers.onFileRead) {
-      // Default: read from filesystem
-      const path = String(params?.path ?? '')
-      if (!path) {
-        this.respondError(id, RPC_ERRORS.INVALID_PARAMS.code, 'Missing "path"')
-        return
-      }
-      try {
-        const content = readFileSync(resolve(this.cwd, path), 'utf8')
-        this.respond(id, { path, content })
-      } catch (err) {
-        this.respondError(id, RPC_ERRORS.INTERNAL_ERROR.code, `Failed to read: ${(err as Error).message}`)
-      }
-      return
-    }
-
-    const path = String(params?.path ?? '')
-    if (!path) {
-      this.respondError(id, RPC_ERRORS.INVALID_PARAMS.code, 'Missing "path"')
-      return
-    }
-    const content = this.handlers.onFileRead(path)
+  private async handleFileRead(id: string | number | undefined, params?: Record<string, unknown>): Promise<void> {
+    const path = params?.path
+    if (typeof path !== 'string' || !path) { this.respondError(id, -32602, 'Missing "path"'); return }
+    if (!this.handlers.onFileRead) { this.respondError(id, -32601, 'File reading is not configured'); return }
+    const content = await this.handlers.onFileRead(path)
     this.respond(id, { path, content })
   }
 
-  private handleFileWrite(id: string | number | undefined, params?: Record<string, unknown>): void {
-    const path = String(params?.path ?? '')
-    const content = String(params?.content ?? '')
-
-    if (!path) {
-      this.respondError(id, RPC_ERRORS.INVALID_PARAMS.code, 'Missing "path"')
-      return
-    }
-
-    if (this.handlers.onFileWrite) {
-      this.handlers.onFileWrite(path, content)
-    } else {
-      try {
-        writeFileSync(resolve(this.cwd, path), content, 'utf8')
-      } catch (err) {
-        this.respondError(id, RPC_ERRORS.INTERNAL_ERROR.code, `Failed to write: ${(err as Error).message}`)
-        return
-      }
-    }
-
+  private async handleFileWrite(id: string | number | undefined, params?: Record<string, unknown>): Promise<void> {
+    const path = params?.path
+    const content = params?.content
+    if (typeof path !== 'string' || !path || typeof content !== 'string') { this.respondError(id, -32602, 'Valid path and content strings are required'); return }
+    if (!this.handlers.onFileWrite) { this.respondError(id, -32601, 'File writing is not configured'); return }
+    await this.handlers.onFileWrite(path, content)
     this.respond(id, { path, written: true })
   }
 

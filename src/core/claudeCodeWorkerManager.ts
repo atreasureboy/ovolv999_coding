@@ -1,7 +1,4 @@
-import { execFile as execFileCb } from 'child_process'
-import { promisify } from 'util'
-
-const execFile = promisify(execFileCb)
+import { execManaged } from './executionBackend.js'
 
 export interface TmuxResult {
   stdout: string
@@ -116,8 +113,7 @@ function delay(ms: number, signal?: AbortSignal): Promise<'done' | 'aborted'> {
 
 async function defaultTmuxRunner(args: string[]): Promise<TmuxResult> {
   try {
-    const { stdout, stderr } = await execFile('tmux', args, {
-      encoding: 'utf8',
+    const { stdout, stderr } = await execManaged('tmux', args, {
       maxBuffer: 1024 * 1024,
     })
     return { stdout, stderr }

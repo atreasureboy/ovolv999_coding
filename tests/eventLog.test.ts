@@ -212,7 +212,7 @@ describe('EventLog.append / readAll', () => {
     expect(e.id).toMatch(/^evt_/)
     expect(e.type).toBe('tool_call')
     expect(e.source).toBe('Bash')
-    expect(e.detail).toEqual({ command: 'ls' })
+    expect(e.detail).toEqual({ command: '[redacted]' })
     expect(typeof e.timestamp).toBe('string')
   })
 

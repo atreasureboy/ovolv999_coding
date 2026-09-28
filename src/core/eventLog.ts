@@ -30,9 +30,10 @@
  * that need stronger guarantees should add an explicit fsync layer.
  */
 
-import { appendFileSync, mkdirSync, existsSync, readFileSync, statSync, renameSync } from 'fs'
-import { join } from 'path'
+import { appendFileSync, mkdirSync, existsSync, statSync, renameSync, openSync, readSync, closeSync } from 'fs'
+import { join, basename } from 'path'
 import { randomUUID } from 'crypto'
+import { redactDiagnostic } from './diagnosticPolicy.js'
 
 export type EventType =
   | 'tool_call'
@@ -61,6 +62,12 @@ const EVENT_TYPES: ReadonlySet<EventType> = new Set<EventType>([
 ])
 
 export interface EventLogEntry {
+  schemaVersion?: 1
+  sessionId?: string
+  runId?: string
+  parentRunId?: string
+  operationId?: string
+  buildSha?: string
   id: string
   timestamp: string  // ISO 8601
   type: EventType
@@ -150,6 +157,9 @@ export interface ReadAllOptions {
 }
 
 export interface EventLogOptions {
+  maxEntryBytes?: number
+  maxReadBytes?: number
+  buildSha?: string
   /**
    * Soft size cap for the on-disk log, in bytes. When the file exceeds
    * this size, the NEXT append() atomically rotates it (renaming the
@@ -177,6 +187,11 @@ export const DEFAULT_EVENTLOG_ROTATE_BYTES = 10 * 1024 * 1024
 
 export class EventLog {
   private filePath: string
+  private sessionId: string
+  private maxEntryBytes: number
+  private maxReadBytes: number
+  private buildSha?: string
+  private health = { writable: true, failedWrites: 0, lastError: undefined as string | undefined, lastPersistedAt: undefined as string | undefined }
   /**
    * Auto-rotation threshold (bytes). When `> 0`, every append() checks
    * the file size and rotates the log once it crosses this cap. `<= 0`
@@ -186,9 +201,15 @@ export class EventLog {
 
   constructor(sessionDir: string, options?: EventLogOptions) {
     this.filePath = join(sessionDir, 'events.ndjson')
+    this.sessionId = basename(sessionDir)
+    this.maxEntryBytes = Math.max(512, options?.maxEntryBytes ?? 16 * 1024)
+    this.maxReadBytes = Math.max(512, options?.maxReadBytes ?? 20 * 1024 * 1024)
+    this.buildSha = options?.buildSha
     this.rotateBytes = options?.rotateBytes ?? DEFAULT_EVENTLOG_ROTATE_BYTES
     try { mkdirSync(sessionDir, { recursive: true }) } catch { /* best-effort */ }
   }
+
+  getHealth(): Readonly<typeof this.health> { return { ...this.health } }
 
   /** Append a new event (best-effort, never throws). */
   append(
@@ -198,12 +219,18 @@ export class EventLog {
     tags?: string[],
   ): EventLogEntry {
     const entry: EventLogEntry = {
+      schemaVersion: 1,
+      sessionId: this.sessionId,
+      runId: typeof detail.run_id === 'string' ? detail.run_id : undefined,
+      parentRunId: typeof detail.parent_run_id === 'string' ? detail.parent_run_id : undefined,
+      operationId: typeof detail.operation_id === 'string' ? detail.operation_id : undefined,
+      buildSha: this.buildSha,
       id: nextId(),
       timestamp: new Date().toISOString(),
       type,
-      source,
-      detail,
-      tags,
+      source: source.slice(0, 128),
+      detail: redactDiagnostic(detail) as Record<string, unknown>,
+      tags: tags?.slice(0, 32).map(tag => tag.slice(0, 128)),
     }
     // Auto-rotation: BEFORE writing, if the file already exceeds the
     // configured cap, rename it to `events.ndjson.1` and start fresh.
@@ -218,9 +245,16 @@ export class EventLog {
       }
     }
     try {
-      appendFileSync(this.filePath, JSON.stringify(entry) + '\n', 'utf8')
-    } catch {
-      // silently ignore — event log must never break the engine
+      if (Buffer.byteLength(JSON.stringify(entry) + '\n') > this.maxEntryBytes) entry.detail = { truncated: true, reason: 'Diagnostic entry byte limit exceeded' }
+      if (Buffer.byteLength(JSON.stringify(entry) + '\n') > this.maxEntryBytes) { entry.tags = undefined; entry.runId = undefined; entry.parentRunId = undefined; entry.operationId = undefined }
+      appendFileSync(this.filePath, JSON.stringify(entry) + '\n', { encoding: 'utf8', mode: 0o600 })
+      this.health.writable = true
+      this.health.lastError = undefined
+      this.health.lastPersistedAt = entry.timestamp
+    } catch (error) {
+      this.health.writable = false
+      this.health.failedWrites++
+      this.health.lastError = (error as NodeJS.ErrnoException).code ?? 'Diagnostic persistence failed'
     }
     return entry
   }
@@ -244,7 +278,12 @@ export class EventLog {
     if (!existsSync(this.filePath)) return []
     let raw: string
     try {
-      raw = readFileSync(this.filePath, 'utf8')
+      const size = statSync(this.filePath).size
+      const length = Math.min(size, this.maxReadBytes)
+      const buffer = Buffer.alloc(length)
+      const fd = openSync(this.filePath, 'r')
+      try { raw = buffer.subarray(0, readSync(fd, buffer, 0, length, size - length)).toString('utf8') } finally { closeSync(fd) }
+      if (size > length) raw = raw.slice(raw.indexOf('\n') + 1)
     } catch {
       return []
     }

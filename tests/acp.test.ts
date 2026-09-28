@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { Writable, Readable } from 'stream'
+import { Readable } from 'stream'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -134,14 +134,14 @@ describe('Response builders', () => {
 // ── ACPServer: initialize ───────────────────────────────────────────────────
 
 describe('ACPServer', () => {
-  it('getCapabilities returns all capabilities', () => {
+  it('getCapabilities reflects configured handlers', () => {
     const { server } = createServer()
     const caps = server.getCapabilities()
-    expect(caps.streaming).toBe(true)
-    expect(caps.tools).toBe(true)
-    expect(caps.multiModal).toBe(true)
-    expect(caps.worktrees).toBe(true)
-    expect(caps.interrupts).toBe(true)
+    expect(caps.streaming).toBe(false)
+    expect(caps.tools).toBe(false)
+    expect(caps.multiModal).toBe(false)
+    expect(caps.worktrees).toBe(false)
+    expect(caps.interrupts).toBe(false)
   })
 
   it('handles initialize request', async () => {
@@ -189,7 +189,7 @@ describe('ACPServer', () => {
 
 describe('ACPServer: message', () => {
   it('rejects message before initialize', async () => {
-    const { server, output } = createServer({ onMessage: async () => 'hi' })
+    const { server, output } = createServer({ onMessage: () => Promise.resolve('hi') })
     await server.handleMessage({
       jsonrpc: '2.0', id: 1, method: 'message', params: { text: 'hello' },
     })
@@ -199,7 +199,7 @@ describe('ACPServer: message', () => {
   })
 
   it('handles message after initialize', async () => {
-    const { server, output } = createServer({ onMessage: async () => 'Hello!' })
+    const { server, output } = createServer({ onMessage: () => Promise.resolve('Hello!') })
     // Initialize first
     await server.handleMessage({ jsonrpc: '2.0', id: 0, method: 'initialize' })
     output.length = 0
@@ -218,7 +218,7 @@ describe('ACPServer: message', () => {
   })
 
   it('passes images to handler', async () => {
-    const onMessage = vi.fn(async (_text: string, images?: string[]) => `got ${images?.length ?? 0} images`)
+    const onMessage = vi.fn((_text: string, images?: string[]) => Promise.resolve(`got ${images?.length ?? 0} images`))
     const { server, output } = createServer({ onMessage })
     await server.handleMessage({ jsonrpc: '2.0', id: 0, method: 'initialize' })
     output.length = 0
@@ -231,7 +231,7 @@ describe('ACPServer: message', () => {
   })
 
   it('rejects empty text', async () => {
-    const { server, output } = createServer({ onMessage: async () => 'x' })
+    const { server, output } = createServer({ onMessage: () => Promise.resolve('x') })
     await server.handleMessage({ jsonrpc: '2.0', id: 0, method: 'initialize' })
     output.length = 0
 
@@ -258,7 +258,7 @@ describe('ACPServer: message', () => {
 
   it('handles handler errors', async () => {
     const { server, output } = createServer({
-      onMessage: async () => { throw new Error('boom') },
+      onMessage: () => { return Promise.reject(new Error('boom')) },
     })
     await server.handleMessage({ jsonrpc: '2.0', id: 0, method: 'initialize' })
     output.length = 0
@@ -305,7 +305,7 @@ describe('ACPServer: interrupt', () => {
 // ── ACPServer: file operations ──────────────────────────────────────────────
 
 describe('ACPServer: file/read', () => {
-  it('reads from filesystem by default', async () => {
+  it('disables default filesystem reads', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'acp-read-'))
     const file = join(directory, 'input.txt')
     try {
@@ -317,8 +317,8 @@ describe('ACPServer: file/read', () => {
         jsonrpc: '2.0', id: 1, method: 'file/read', params: { path: file },
       })
       const responses = getResponses(output)
-      const r = responses[0] as { result: { content: string } }
-      expect(r.result.content).toBe('filesystem fixture')
+      const r = responses[0] as { error: { code: number } }
+      expect(r.error.code).toBe(-32601)
     } finally {
       rmSync(directory, { recursive: true, force: true })
     }
@@ -352,11 +352,11 @@ describe('ACPServer: file/read', () => {
 })
 
 describe('ACPServer: file/write', () => {
-  it('writes to filesystem', async () => {
+  it('writes to filesystem through an explicit handler', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'acp-write-'))
     const file = join(directory, 'output.txt')
     try {
-      const { server, output } = createServer({}, directory)
+      const { server, output } = createServer({ onFileWrite: (path, content) => writeFileSync(path, content) }, directory)
       await server.handleMessage({ jsonrpc: '2.0', id: 0, method: 'initialize' })
       output.length = 0
       await server.handleMessage({
@@ -421,7 +421,7 @@ describe('ACPServer: notifications', () => {
     const { server, output } = createServer()
     await server.handleMessage({
       jsonrpc: '2.0', method: 'initialize', params: {},
-    } as JsonRpcMessage)
+    })
     expect(output).toHaveLength(0)
   })
 
@@ -429,7 +429,7 @@ describe('ACPServer: notifications', () => {
     const { server, output } = createServer()
     await server.handleMessage({
       jsonrpc: '2.0', method: 'some/notification', params: {},
-    } as JsonRpcMessage)
+    })
     expect(output).toHaveLength(0)
   })
 })

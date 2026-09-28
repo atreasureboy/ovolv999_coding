@@ -1,6 +1,7 @@
 import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/types.js'
 import { ClaudeCodeWorkerManager } from '../core/claudeCodeWorkerManager.js'
 import { str } from '../core/strings.js'
+import { assertExecutionProfile } from '../core/executionBackend.js'
 
 function defaultSession(input: Record<string, unknown>): string {
   return str(input.session, 'ovogo-claude-worker')
@@ -95,6 +96,8 @@ Use narrow tasks with explicit file scope and required tests. ClaudeCode workers
 
   async execute(input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     try {
+      assertExecutionProfile(ctx.executionProfile)
+      if (ctx.executionProfile?.envAllowlist) throw new Error('Persistent tmux worker environment cannot be verified against an allowlist; execution refused')
       switch (String(input.action)) {
         case 'start':
           return await this.start(input, ctx)

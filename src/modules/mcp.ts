@@ -43,7 +43,7 @@ export class McpModule implements AgentModule {
   private async refresh(ctx: ModuleBootContext): Promise<ModuleBootResult> {
     if (this.disposed) throw new Error('MCP module disposed')
     ctx.abortSignal?.throwIfAborted()
-    const servers = ctx.config.mcp?.servers ?? []
+    const servers = (ctx.config.mcp?.servers ?? []).map(server => ({ ...server, executionProfile: ctx.config.executionProfile ?? server.executionProfile }))
     const configured = servers.map(server => ({ server, key: createHash('sha256').update(JSON.stringify({ ...server, env: Object.entries(server.env ?? {}).sort(([a], [b]) => a.localeCompare(b)) })).digest('hex') }))
     const keys = new Set(configured.map(value => value.key))
     for (const [key, connection] of this.connections) {

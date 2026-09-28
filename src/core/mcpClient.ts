@@ -1,3 +1,4 @@
+import { spawnManaged, type ExecutionProfile } from './executionBackend.js'
 /**
  * McpStdioClient — minimal MCP (Model Context Protocol) stdio client.
  *
@@ -14,6 +15,8 @@
 import { spawn, type ChildProcess } from 'child_process'
 
 export interface McpServerConfig {
+  executionProfile?: ExecutionProfile
+  limits?: { maxFrameBytes?: number; maxRequestBytes?: number; maxQueuedBytes?: number; maxPending?: number }
   /** Logical name; used to namespace tool names (mcp__<name>__<tool>) */
   name: string
   /** Transport type. v1 only supports 'stdio'. */
@@ -73,8 +76,17 @@ export class McpStdioClient {
   private closed = false
   private connecting?: Promise<void>
   private closing?: Promise<void>
+  private queuedBytes = 0
+  private sendTail: Promise<void> = Promise.resolve()
+  private lastError?: string
 
-  constructor(private readonly server: McpServerConfig) {}
+  getHealth(): { pending: number; queuedBytes: number; bufferedBytes: number; closed: boolean; error?: string } {
+    return { pending: this.pending.size, queuedBytes: this.queuedBytes, bufferedBytes: Buffer.byteLength(this.stdoutBuf), closed: this.closed, error: this.lastError }
+  }
+
+  constructor(private readonly server: McpServerConfig) {
+    for (const value of Object.values(server.limits ?? {})) if (!Number.isSafeInteger(value) || value < 1) throw new Error('Invalid MCP capacity limit')
+  }
 
   get isClosed(): boolean {
     return this.closed
@@ -95,10 +107,11 @@ export class McpStdioClient {
     }
 
     const env = { ...process.env, ...(this.server.env ?? {}) }
-    this.proc = spawn(this.server.command[0], this.server.command.slice(1), {
+    this.proc = spawnManaged(this.server.command[0], this.server.command.slice(1), {
       stdio: ['pipe', 'pipe', 'pipe'],
       env,
       cwd: this.server.cwd,
+      profile: this.server.executionProfile,
       detached: process.platform !== 'win32',
       windowsHide: true,
     })
@@ -123,7 +136,7 @@ export class McpStdioClient {
     this.proc.on('error', (err) => { this.closed = true; this.failAll(err) })
 
     // Initialize handshake
-    await this.request(
+    const initialized = await this.request(
       {
         jsonrpc: '2.0',
         method: 'initialize',
@@ -136,9 +149,14 @@ export class McpStdioClient {
       INITIALIZE_TIMEOUT_MS,
       signal,
     ).catch(async error => { await this.close(); throw error })
+    const negotiation = initialized as { protocolVersion?: unknown; capabilities?: unknown } | null
+    if (!negotiation || negotiation.protocolVersion !== PROTOCOL_VERSION || !negotiation.capabilities || typeof negotiation.capabilities !== 'object' || Array.isArray(negotiation.capabilities)) {
+      await this.close()
+      throw new Error(`Unsupported MCP protocol version or capabilities; expected ${PROTOCOL_VERSION}`)
+    }
 
     // Notify initialized (no id, no response expected)
-    this.notify({ jsonrpc: '2.0', method: 'notifications/initialized' })
+    await this.send({ jsonrpc: '2.0', method: 'notifications/initialized' })
   }
 
   /** List tools exposed by the server. */
@@ -291,15 +309,26 @@ export class McpStdioClient {
   // ── internals ───────────────────────────────────────────────────────────
 
   private onStdout(chunk: string): void {
+    if (this.closed) return
     this.stdoutBuf += chunk
     let nl = this.stdoutBuf.indexOf('\n')
     while (nl !== -1) {
+      if (Buffer.byteLength(this.stdoutBuf.slice(0, nl)) > (this.server.limits?.maxFrameBytes ?? 1024 * 1024)) { this.frameExceeded(); return }
       const line = this.stdoutBuf.slice(0, nl).trim()
       this.stdoutBuf = this.stdoutBuf.slice(nl + 1)
       nl = this.stdoutBuf.indexOf('\n')
       if (line.length === 0) continue
       this.handleMessage(line)
     }
+    if (Buffer.byteLength(this.stdoutBuf) > (this.server.limits?.maxFrameBytes ?? 1024 * 1024)) this.frameExceeded()
+  }
+
+  private frameExceeded(): void {
+    const error = new Error('MCP frame byte limit exceeded')
+    this.lastError = error.message
+    this.stdoutBuf = ''
+    this.failAll(error)
+    void this.close().catch(failure => { this.lastError = String(failure) })
   }
 
   private handleMessage(line: string): void {
@@ -311,6 +340,7 @@ export class McpStdioClient {
       return
     }
     // Response to a request we sent
+    if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return
     if (typeof msg.id === 'number') {
       const pending = this.pending.get(msg.id)
       if (!pending) return
@@ -318,8 +348,8 @@ export class McpStdioClient {
       pending.cleanup()
       this.pending.delete(msg.id)
       if (msg.error !== undefined) {
-        const e = msg.error as Record<string, unknown>
-        const errMsg = typeof e.message === 'string' ? e.message : JSON.stringify(msg.error)
+        const e = msg.error as Record<string, unknown> | null
+        const errMsg = e && typeof e.message === 'string' ? e.message : JSON.stringify(msg.error)
         pending.reject(new Error(`MCP error: ${errMsg}`))
       } else {
         pending.resolve(msg.result)
@@ -328,15 +358,41 @@ export class McpStdioClient {
     // Notifications / server-initiated messages: ignored in v1.
   }
 
-  private send(message: object): void {
-    if (!this.proc?.stdin || this.closed) {
-      throw new Error(`MCP server "${this.server.name}": not connected`)
-    }
-    this.proc.stdin.write(JSON.stringify(message) + '\n')
-  }
-
-  private notify(message: object): void {
-    this.send(message)
+  private send(message: object, signal?: AbortSignal, active: () => boolean = () => true): Promise<void> {
+    const data = JSON.stringify(message) + '\n'
+    const size = Buffer.byteLength(data)
+    if (size > (this.server.limits?.maxRequestBytes ?? 1024 * 1024)) return Promise.reject(new Error('MCP request byte limit exceeded'))
+    if (this.queuedBytes + size + (this.proc?.stdin?.writableLength ?? 0) > (this.server.limits?.maxQueuedBytes ?? 2 * 1024 * 1024)) return Promise.reject(new Error('MCP output queue capacity exceeded'))
+    this.queuedBytes += size
+    const sent = this.sendTail.then(async () => {
+      signal?.throwIfAborted()
+      if (!active()) throw new Error('MCP request expired before transmission')
+      const stream = this.proc?.stdin
+      if (!stream || this.closed) throw new Error(`MCP server "${this.server.name}": not connected`)
+      await new Promise<void>((resolve, reject) => {
+        let done = false
+        let written = false
+        let flushed = false
+        let needsDrain = true
+        let drained = false
+        const cleanup = (): void => { stream.removeListener('drain', drain); stream.removeListener('error', failed); stream.removeListener('close', closed); signal?.removeEventListener('abort', aborted) }
+        const finish = (error?: Error | null): void => { if (done) return; done = true; cleanup(); if (error) reject(error); else resolve() }
+        const accept = (): void => { if (written && flushed && (!needsDrain || drained)) finish() }
+        const drain = (): void => { drained = true; accept() }
+        const failed = (error: Error): void => finish(error)
+        const closed = (): void => finish(new Error('MCP stdin closed'))
+        const aborted = (): void => { finish(new Error('MCP send cancelled')); stream.destroy(); void this.close().catch(error => { this.lastError = String(error) }) }
+        stream.once('drain', drain)
+        stream.once('error', failed)
+        stream.once('close', closed)
+        signal?.addEventListener('abort', aborted, { once: true })
+        needsDrain = !stream.write(data, error => { if (error) finish(error); else { flushed = true; accept() } })
+        written = true
+        accept()
+      })
+    }).finally(() => { this.queuedBytes -= size })
+    this.sendTail = sent.catch(() => {})
+    return sent
   }
 
   private request(message: object, timeoutMs = DEFAULT_TIMEOUT_MS, signal?: AbortSignal): Promise<unknown> {
@@ -346,6 +402,7 @@ export class McpStdioClient {
         return
       }
       if (signal?.aborted) { reject(new Error('MCP request cancelled')); return }
+      if (this.pending.size >= (this.server.limits?.maxPending ?? 64)) { reject(new Error('MCP pending request capacity exceeded')); return }
       const id = this.nextId++
       const abort = () => {
         const pending = this.pending.get(id)
@@ -365,14 +422,12 @@ export class McpStdioClient {
       }, timeoutMs)
       this.pending.set(id, { resolve, reject, timer, cleanup })
       signal?.addEventListener('abort', abort, { once: true })
-      try {
-        this.send({ jsonrpc: '2.0', id, ...message })
-      } catch (err) {
+      void this.send({ jsonrpc: '2.0', id, ...message }, signal, () => this.pending.has(id)).catch(err => {
         clearTimeout(timer)
         cleanup()
         this.pending.delete(id)
         reject(err instanceof Error ? err : new Error('MCP send failed'))
-      }
+      })
     })
   }
 
