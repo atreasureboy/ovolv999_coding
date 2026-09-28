@@ -3,6 +3,8 @@ export type OutcomeStatus = 'completed' | 'failed' | 'cancelled' | 'interrupted'
 export type VerificationStatus = 'passed' | 'failed' | 'not_run' | 'not_applicable'
 
 export interface VerificationCommandResult {
+  kind?: 'compile' | 'lint' | 'unit' | 'integration' | 'task_acceptance'
+  scope?: string
   command: string
   passed: boolean
   output: string
@@ -13,6 +15,7 @@ export interface VerificationCommandResult {
 }
 
 export interface VerificationEvidence {
+  sufficientForCompletion?: boolean
   status: VerificationStatus
   workspace: string
   artifactVersion?: string

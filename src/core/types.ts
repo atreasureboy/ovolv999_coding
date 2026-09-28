@@ -1,3 +1,5 @@
+import type { ModelGatewayPolicy } from './providerAdmission.js'
+import type { ExecutionProfile } from './executionBackend.js'
 // Core types for ovolv999 execution engine
 
 import type { EventLog } from './eventLog.js'
@@ -129,6 +131,7 @@ export interface Tool {
 }
 
 export interface ToolContext {
+  executionProfile?: ExecutionProfile
   verificationExcludedPaths?: readonly string[]
   workspaceBound?: boolean
   cwd: string
@@ -268,6 +271,8 @@ export interface IHookRunner {
 }
 
 export interface EngineConfig {
+  modelGateway?: Partial<ModelGatewayPolicy>
+  executionProfile?: ExecutionProfile
   verificationExcludedPaths?: readonly string[]
   model: string
   baseURL?: string

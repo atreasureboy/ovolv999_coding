@@ -3,6 +3,10 @@ import { realpathSync } from 'fs'
 import { resolve } from 'path'
 import { FileReadState } from './fileState.js'
 import type { EngineConfig, ToolResult, TurnResult, WorkspaceBinding } from './types.js'
+import { acquireWorkspaceLease } from './workspaceLease.js'
+import { createProcessScope } from './executionBackend.js'
+import { RunStore } from './runStore.js'
+import { runtimeStateRoot } from './runtimeState.js'
 
 export interface RunContext {
   runId: string
@@ -16,6 +20,7 @@ export interface RunContext {
   toolFailures: Map<string, ToolResult>
   mutationAttempted: boolean
   result?: TurnResult
+  store?: RunStore
   detachParent: () => void
 }
 
@@ -116,6 +121,11 @@ interface Gate {
 }
 
 const gates = new Map<string, Gate>()
+const durableLeases = new Map<string, { references: number; unknown: boolean; ready: ReturnType<typeof acquireWorkspaceLease> }>()
+
+export function initializeRunStore(run: RunContext): void {
+  run.store = new RunStore(runtimeStateRoot(), { runId: run.runId, parentRunId: run.parentRunId, workspace: run.workspace.cwd })
+}
 
 export async function withWorkspaceAccess<T>(cwd: string, familyId: string, write: boolean, signal: AbortSignal, operation: () => Promise<T>): Promise<T> {
   const key = workspaceIdentity(cwd)
@@ -148,17 +158,51 @@ export async function withWorkspaceAccess<T>(cwd: string, familyId: string, writ
     signal.addEventListener('abort', onAbort, { once: true })
     attempt()
   })
+  const durableKey = key + ':' + familyId
+  let durable = durableLeases.get(durableKey)
+  if (!durable) {
+    durable = { references: 0, unknown: false, ready: acquireWorkspaceLease(cwd, { signal, reason: write ? 'workspace write' : 'workspace read' }) }
+    durableLeases.set(durableKey, durable)
+  }
+  durable.references++
+  const scope = createProcessScope()
+  let operationStarted = false
+  const release = async (): Promise<void> => {
+    try {
+      durable.references--
+      if (!durable.references) {
+        durableLeases.delete(durableKey)
+        const owned = await durable.ready
+        if (durable.unknown) owned.quarantine()
+        else owned.release()
+      }
+    } finally {
+      gate.active.delete(lease)
+      for (const waiter of [...gate.waiters]) waiter()
+      if (!gate.active.size && !gate.waiters.size) gates.delete(key)
+    }
+  }
   try {
+    const owned = await durable.ready
     signal.throwIfAborted()
     if (isWorkspaceQuarantined(cwd)) {
       const error = new Error('Workspace is quarantined by unfinished operations')
       error.name = 'WorkspaceUnavailableError'
       throw error
     }
-    return await operation()
+    owned.assertOwned()
+    operationStarted = true
+    const result = await scope.run(operation)
+    owned.assertOwned()
+    return result
+  } catch (error) {
+    if (operationStarted && write) durable.unknown = true
+    throw error
   } finally {
-    gate.active.delete(lease)
-    for (const waiter of [...gate.waiters]) waiter()
-    if (!gate.active.size && !gate.waiters.size) gates.delete(key)
+    if (scope.pending.size) {
+      const physical = Promise.all([...scope.pending]).then(release, () => new Promise<void>(() => undefined))
+      quarantineWorkspace(cwd, physical)
+      void physical.catch(() => undefined)
+    } else await release()
   }
 }
