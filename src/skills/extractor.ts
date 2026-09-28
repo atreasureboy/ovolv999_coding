@@ -28,6 +28,7 @@
 import { writeFileSync, mkdirSync, existsSync } from 'fs'
 import { join, resolve } from 'path'
 import type { OpenAIMessage } from '../core/types.js'
+import { str } from '../core/strings.js'
 
 export type { OpenAIMessage }
 
@@ -144,11 +145,11 @@ export function extractToolSequence(messages: OpenAIMessage[]): ToolCallEntry[] 
     if (msg.role !== 'assistant' || !msg.tool_calls) continue
     for (const call of msg.tool_calls) {
       const name = call.function?.name ?? 'unknown'
-      let summary = ''
+      let summary: string
 
       try {
-        const args = call.function?.arguments ? JSON.parse(call.function.arguments) : {}
-        summary = summarizeToolCall(name, args)
+        const args: unknown = call.function?.arguments ? JSON.parse(call.function.arguments) : {}
+        summary = summarizeToolCall(name, args && typeof args === 'object' && !Array.isArray(args) ? args as Record<string, unknown> : {})
       } catch {
         summary = ''
       }
@@ -163,25 +164,25 @@ export function extractToolSequence(messages: OpenAIMessage[]): ToolCallEntry[] 
 function summarizeToolCall(name: string, args: Record<string, unknown>): string {
   switch (name) {
     case 'Read':
-      return String(args.file_path ?? args.path ?? '')
+      return str(args.file_path ?? args.path ?? '')
     case 'Write':
-      return String(args.file_path ?? args.path ?? '')
+      return str(args.file_path ?? args.path ?? '')
     case 'Edit':
-      return String(args.file_path ?? args.path ?? '')
+      return str(args.file_path ?? args.path ?? '')
     case 'Bash':
-      return String(args.command ?? '').slice(0, 60)
+      return str(args.command ?? '').slice(0, 60)
     case 'Grep':
-      return String(args.pattern ?? '')
+      return str(args.pattern ?? '')
     case 'Glob':
-      return String(args.pattern ?? '')
+      return str(args.pattern ?? '')
     case 'Agent':
-      return String(args.description ?? args.prompt ?? '').slice(0, 60)
+      return str(args.description ?? args.prompt ?? '').slice(0, 60)
     case 'TodoWrite':
       return `${(args.todos as unknown[] ?? []).length} items`
     case 'WebFetch':
-      return String(args.url ?? '').slice(0, 60)
+      return str(args.url ?? '').slice(0, 60)
     case 'WebSearch':
-      return String(args.query ?? '').slice(0, 60)
+      return str(args.query ?? '').slice(0, 60)
     default:
       return ''
   }

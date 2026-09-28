@@ -1,0 +1,36 @@
+name: Release gate
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: ${{ matrix.os }} / Node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: ['22.13.0', '22.x', '24.x']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.25.0
+          run_install: false
+      - run: pnpm run release:gate
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-${{ matrix.os }}-node-${{ matrix.node }}
+          path: .artifacts/production/release-*
+          retention-days: 14

@@ -17,9 +17,9 @@
  *   syncPull({ transport: 'git', repo, passphrase }) → applies bundle
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync } from 'fs'
+import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'fs'
 import { join } from 'path'
-import { homedir } from 'os'
+import { homedir, hostname } from 'os'
 import { execSync } from 'child_process'
 import { randomBytes, createHash, createCipheriv, createDecipheriv, scryptSync } from 'crypto'
 
@@ -95,7 +95,7 @@ export function collectBundle(): SettingsBundle {
   const bundle: SettingsBundle = {
     version: 1,
     createdAt: new Date().toISOString(),
-    hostname: require('os').hostname(),
+    hostname: hostname(),
     schemaHash: '',
   }
 
@@ -231,7 +231,7 @@ export function syncPush(options: SyncPushOptions): SyncResult {
     case 'git':
       return pushToGit(payload, options, bundle)
     default:
-      return { success: false, message: `Unknown transport: ${options.transport}`, warnings: [] }
+      return { success: false, message: `Unknown transport: ${String(options.transport)}`, warnings: [] }
   }
 }
 
@@ -321,7 +321,7 @@ export function syncPull(options: SyncPullOptions): SyncResult {
       break
     }
     default:
-      return { success: false, message: `Unknown transport: ${options.transport}`, warnings: [] }
+      return { success: false, message: `Unknown transport: ${String(options.transport)}`, warnings: [] }
   }
 
   // Decrypt / parse

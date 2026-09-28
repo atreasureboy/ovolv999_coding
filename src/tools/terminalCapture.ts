@@ -55,7 +55,11 @@ export class TerminalCaptureTool implements Tool {
     return true
   }
 
-  async execute(input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+  execute(input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    return new Promise(resolve => resolve(this.executeSync(input, ctx)))
+  }
+
+  private executeSync(input: Record<string, unknown>, ctx: ToolContext): ToolResult {
     const target = (input.target as string) ?? ''
     const lines = input.lines as number | undefined
 

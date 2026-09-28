@@ -43,8 +43,8 @@ export function getCurrentVersion(): string {
   try {
     const pkgPath = join(process.cwd(), 'package.json')
     if (existsSync(pkgPath)) {
-      const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'))
-      return pkg.version ?? '0.0.0'
+      const pkg: unknown = JSON.parse(readFileSync(pkgPath, 'utf8'))
+      if (pkg && typeof pkg === 'object' && 'version' in pkg && typeof pkg.version === 'string') return pkg.version
     }
   } catch { /* ignore */ }
   return '0.0.0'
@@ -189,7 +189,7 @@ export interface InstallResult {
 export function performUpdate(channel: UpdateChannel = 'latest'): InstallResult {
   try {
     const tag = channel === 'latest' ? '' : `@${channel}`
-    const output = execSync(`npm install -g ${PACKAGE_NAME}${tag} 2>&1`, {
+    execSync(`npm install -g ${PACKAGE_NAME}${tag} 2>&1`, {
       encoding: 'utf8',
       timeout: 120000,
       stdio: ['pipe', 'pipe', 'pipe'],

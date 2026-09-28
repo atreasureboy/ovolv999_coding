@@ -1,15 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import {
-  parseGitDiff,
-  formatFileList,
-  formatFileDetail,
-  formatDiffStat,
-  formatBriefSummary,
-  getGitDiff,
-  getFullDiff,
-  getFileDiff,
-  type StructuredDiff,
-} from '../src/ui/diffBrowser.js'
+import { parseGitDiff, formatFileList, formatFileDetail, formatDiffStat, formatBriefSummary, getGitDiff, getFullDiff, getFileDiff } from '../src/ui/diffBrowser.js'
 
 describe('diffBrowser', () => {
   const sampleDiff = `diff --git a/src/foo.ts b/src/foo.ts

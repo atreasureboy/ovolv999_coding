@@ -104,8 +104,8 @@ export function getPeriodKey(period: BudgetPeriod, date = new Date()): string {
     case 'weekly': {
       // Get ISO week
       const tmp = new Date(date)
-      tmp.setHours(0, 0, 0, 0)
-      tmp.setDate(tmp.getDate() - ((tmp.getDay() + 6) % 7))
+      tmp.setUTCHours(0, 0, 0, 0)
+      tmp.setUTCDate(tmp.getUTCDate() - ((tmp.getUTCDay() + 6) % 7))
       return tmp.toISOString().slice(0, 10)
     }
     case 'monthly':
@@ -119,16 +119,16 @@ export function getPeriodStart(period: BudgetPeriod, date = new Date()): Date {
     case 'session':
       return d
     case 'daily':
-      d.setHours(0, 0, 0, 0)
+      d.setUTCHours(0, 0, 0, 0)
       return d
     case 'weekly': {
-      d.setHours(0, 0, 0, 0)
-      d.setDate(d.getDate() - ((d.getDay() + 6) % 7))
+      d.setUTCHours(0, 0, 0, 0)
+      d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7))
       return d
     }
     case 'monthly':
-      d.setDate(1)
-      d.setHours(0, 0, 0, 0)
+      d.setUTCDate(1)
+      d.setUTCHours(0, 0, 0, 0)
       return d
   }
 }
@@ -143,7 +143,7 @@ export function getPeriodEnd(period: BudgetPeriod, date = new Date()): Date {
     case 'weekly':
       return new Date(start.getTime() + 7 * 24 * 60 * 60 * 1000)
     case 'monthly':
-      return new Date(start.getFullYear(), start.getMonth() + 1, 1)
+      return new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 1))
   }
 }
 
@@ -416,18 +416,18 @@ export function formatBudgetSummary(cwd: string): string {
 
 export const BUDGET_PRESETS = {
   conservative: [
-    { name: 'daily-tokens', type: 'tokens' as BudgetType, period: 'daily' as BudgetPeriod, limit: 50_000 },
-    { name: 'daily-cost', type: 'cost' as BudgetType, period: 'daily' as BudgetPeriod, limit: 1.0 },
+    { name: 'daily-tokens', type: 'tokens', period: 'daily', limit: 50_000 },
+    { name: 'daily-cost', type: 'cost', period: 'daily', limit: 1.0 },
   ],
   moderate: [
-    { name: 'daily-tokens', type: 'tokens' as BudgetType, period: 'daily' as BudgetPeriod, limit: 200_000 },
-    { name: 'daily-cost', type: 'cost' as BudgetType, period: 'daily' as BudgetPeriod, limit: 5.0 },
-    { name: 'monthly-cost', type: 'cost' as BudgetType, period: 'monthly' as BudgetPeriod, limit: 100.0 },
+    { name: 'daily-tokens', type: 'tokens', period: 'daily', limit: 200_000 },
+    { name: 'daily-cost', type: 'cost', period: 'daily', limit: 5.0 },
+    { name: 'monthly-cost', type: 'cost', period: 'monthly', limit: 100.0 },
   ],
   heavy: [
-    { name: 'daily-tokens', type: 'tokens' as BudgetType, period: 'daily' as BudgetPeriod, limit: 1_000_000 },
-    { name: 'daily-cost', type: 'cost' as BudgetType, period: 'daily' as BudgetPeriod, limit: 25.0 },
-    { name: 'monthly-cost', type: 'cost' as BudgetType, period: 'monthly' as BudgetPeriod, limit: 500.0 },
+    { name: 'daily-tokens', type: 'tokens', period: 'daily', limit: 1_000_000 },
+    { name: 'daily-cost', type: 'cost', period: 'daily', limit: 25.0 },
+    { name: 'monthly-cost', type: 'cost', period: 'monthly', limit: 500.0 },
   ],
 } satisfies Record<string, Array<{ name: string; type: BudgetType; period: BudgetPeriod; limit: number }>>
 

@@ -61,7 +61,11 @@ Auto-detects the platform notification system (osascript on macOS, notify-send o
     return true
   }
 
-  async execute(input: Record<string, unknown>, _ctx: ToolContext): Promise<ToolResult> {
+  execute(input: Record<string, unknown>, _ctx: ToolContext): Promise<ToolResult> {
+    return new Promise(resolve => resolve(this.executeSync(input, _ctx)))
+  }
+
+  private executeSync(input: Record<string, unknown>, _ctx: ToolContext): ToolResult {
     const title = (input.title as string)?.trim()
     const message = (input.message as string)?.trim()
     const urgency = (input.urgency as Urgency) ?? 'normal'

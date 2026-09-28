@@ -296,7 +296,6 @@ function checkMultipleInstalls(): SystemCheck {
 
 function checkShell(): SystemCheck {
   const shell = process.env.SHELL ?? process.env.COMSPEC ?? 'unknown'
-  const validShells = ['/bin/bash', '/bin/zsh', '/bin/fish', '/bin/sh', 'cmd.exe', 'powershell.exe', 'pwsh.exe']
 
   if (shell === 'unknown') {
     return { id: 'shell', name: 'Shell', level: 'info', message: 'Unknown shell' }
@@ -375,7 +374,7 @@ function checkMcpConfig(): SystemCheck {
   }
 
   try {
-    const config = JSON.parse(readFileSync(configPath, 'utf8'))
+    const config = JSON.parse(readFileSync(configPath, 'utf8')) as { servers?: Record<string, unknown>; mcpServers?: Record<string, unknown> }
     const servers = Object.keys(config.servers ?? config.mcpServers ?? {})
     if (servers.length > 10) {
       return {

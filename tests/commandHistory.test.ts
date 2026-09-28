@@ -1,20 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import {
-  loadHistory,
-  saveHistory,
-  addEntry,
-  clearHistory,
-  searchHistory,
-  fuzzyMatch,
-  getUniqueTexts,
-  getHistoryStats,
-  formatHistoryResults,
-  formatHistoryStats,
-  getGlobalHistoryPath,
-  getProjectHistoryPath,
-  type HistoryStore,
-  type HistoryEntryType,
-} from '../src/core/commandHistory.js'
+import { loadHistory, saveHistory, addEntry, clearHistory, searchHistory, fuzzyMatch, getUniqueTexts, getHistoryStats, formatHistoryResults, formatHistoryStats, getGlobalHistoryPath, getProjectHistoryPath, type HistoryStore } from '../src/core/commandHistory.js'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'

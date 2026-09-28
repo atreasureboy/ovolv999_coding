@@ -1,21 +1,5 @@
 import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vitest'
-import {
-  loadManifest,
-  discoverPlugins,
-  getRegistry,
-  resetRegistry,
-  loadPlugins,
-  enablePlugin,
-  disablePlugin,
-  getPlugin,
-  listPlugins,
-  listEnabledPlugins,
-  installPlugin,
-  uninstallPlugin,
-  formatPlugin,
-  formatPluginList,
-  type PluginManifest,
-} from '../src/core/pluginManager.js'
+import { loadManifest, discoverPlugins, resetRegistry, loadPlugins, enablePlugin, disablePlugin, getPlugin, listPlugins, listEnabledPlugins, installPlugin, uninstallPlugin, formatPlugin, formatPluginList, type PluginManifest } from '../src/core/pluginManager.js'
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync, existsSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'

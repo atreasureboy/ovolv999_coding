@@ -98,7 +98,7 @@ describe('pipeMode', () => {
 
   describe('executePipe', () => {
     it('calls LLM with full prompt and returns result', async () => {
-      const mockLLM = async (prompt: string) => `Response to: ${prompt.slice(0, 20)}`
+      const mockLLM = (prompt: string) => Promise.resolve(`Response to: ${prompt.slice(0, 20)}`)
 
       const result = await executePipe(
         { cwd: '/test', prompt: 'hello' },
@@ -115,8 +115,8 @@ describe('pipeMode', () => {
     })
 
     it('propagates LLM errors', async () => {
-      const failingLLM = async () => {
-        throw new Error('API failure')
+      const failingLLM = () => {
+        return Promise.reject(new Error('API failure'))
       }
 
       await expect(
@@ -126,9 +126,9 @@ describe('pipeMode', () => {
 
     it('passes options to LLM call', async () => {
       let receivedOpts: PipeOptions | null = null
-      const mockLLM = async (_prompt: string, opts: PipeOptions) => {
+      const mockLLM = (_prompt: string, opts: PipeOptions) => {
         receivedOpts = opts
-        return 'ok'
+        return Promise.resolve('ok')
       }
 
       await executePipe(

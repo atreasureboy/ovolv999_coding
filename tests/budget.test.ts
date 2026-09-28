@@ -7,7 +7,6 @@ import {
   formatBudgetSnapshot, applyPreset, BUDGET_PRESETS,
   getPeriodKey, getPeriodStart, getPeriodEnd,
   loadBudgetStore,
-  type BudgetType, type BudgetPeriod,
 } from '../src/core/budget.js'
 import { mkdtempSync, rmSync } from 'fs'
 import { join } from 'path'
@@ -54,7 +53,7 @@ describe('Token Budget Management', () => {
     it('getPeriodStart for daily returns midnight', () => {
       const date = new Date('2025-06-15T14:30:00Z')
       const start = getPeriodStart('daily', date)
-      expect(start.getHours()).toBe(0)
+      expect(start.getUTCHours()).toBe(0)
     })
 
     it('getPeriodEnd for daily is start + 24h', () => {
@@ -67,7 +66,7 @@ describe('Token Budget Management', () => {
     it('getPeriodEnd for monthly is start of next month', () => {
       const date = new Date('2025-01-15T00:00:00Z')
       const end = getPeriodEnd('monthly', date)
-      expect(end.getMonth()).toBe(1) // February
+      expect(end.getUTCMonth()).toBe(1) // February
     })
   })
 

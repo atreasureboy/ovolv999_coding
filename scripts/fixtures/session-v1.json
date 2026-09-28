@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "schema": "ovogo.session.v1",
+  "updatedAt": "2026-07-13T10:30:45.000Z",
+  "messages": [{ "role": "user", "content": "legacy release fixture" }]
+}

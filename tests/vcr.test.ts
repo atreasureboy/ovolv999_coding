@@ -6,7 +6,7 @@ import {
   computeCallHash,
   createVCRFromEnv,
 } from '../src/utils/vcr.js'
-import { mkdtempSync, rmSync, existsSync, readdirSync } from 'fs'
+import { mkdtempSync, rmSync, existsSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 
@@ -176,14 +176,14 @@ describe('vcr', () => {
         // First record
         const recVcr = new VCR({ mode: 'record', fixtureDir: tmpDir })
         const mockTarget = {
-          create: async () => ({ result: 'real-response' }),
+          create: () => Promise.resolve(({ result: 'real-response' })),
         }
         await recVcr.intercept(mockTarget, 'create', { model: 'x' })
 
         // Now replay
         const replayVcr = new VCR({ mode: 'replay', fixtureDir: tmpDir })
         const result = await replayVcr.intercept(
-          { create: async () => ({ result: 'SHOULD-NOT-CALL' }) },
+          { create: () => Promise.resolve(({ result: 'SHOULD-NOT-CALL' })) },
           'create',
           { model: 'x' },
         )
@@ -194,7 +194,7 @@ describe('vcr', () => {
         const vcr = new VCR({ mode: 'record', fixtureDir: tmpDir })
         const callCount = { n: 0 }
         const target = {
-          create: async () => { callCount.n++; return { n: callCount.n } },
+          create: () => { callCount.n++; return Promise.resolve({ n: callCount.n }) },
         }
         const r1 = await vcr.intercept(target, 'create', { model: 'x' })
         expect(r1).toEqual({ n: 1 })
@@ -205,7 +205,7 @@ describe('vcr', () => {
         const vcr = new VCR({ mode: 'record', fixtureDir: tmpDir })
         let callCount = 0
         const target = {
-          create: async () => { callCount++; return { n: callCount } },
+          create: () => { callCount++; return Promise.resolve({ n: callCount }) },
         }
         await vcr.intercept(target, 'create', { model: 'x' })
         await vcr.intercept(target, 'create', { model: 'x' })
@@ -216,7 +216,7 @@ describe('vcr', () => {
       it('replays or records in auto mode', async () => {
         const vcr = new VCR({ mode: 'auto', fixtureDir: tmpDir })
         const target = {
-          create: async () => ({ result: 'fresh' }),
+          create: () => Promise.resolve(({ result: 'fresh' })),
         }
         const r1 = await vcr.intercept(target, 'create', { model: 'x' })
         expect(r1).toEqual({ result: 'fresh' })
@@ -224,7 +224,7 @@ describe('vcr', () => {
 
         // Second call should replay
         const r2 = await vcr.intercept(
-          { create: async () => ({ result: 'DIFFERENT' }) },
+          { create: () => Promise.resolve(({ result: 'DIFFERENT' })) },
           'create',
           { model: 'x' },
         )
@@ -235,7 +235,7 @@ describe('vcr', () => {
       it('throws on missing fixture in strict replay mode', async () => {
         const vcr = new VCR({ mode: 'replay', fixtureDir: tmpDir, strict: true })
         await expect(
-          vcr.intercept({ create: async () => ({}) }, 'create', { model: 'x' }),
+          vcr.intercept({ create: () => Promise.resolve(({})) }, 'create', { model: 'x' }),
         ).rejects.toThrow(VCRFixtureNotFoundError)
         expect(vcr.getStats().errors).toBe(1)
       })
@@ -244,14 +244,14 @@ describe('vcr', () => {
     describe('stats', () => {
       it('tracks recorded count', async () => {
         const vcr = new VCR({ mode: 'record', fixtureDir: tmpDir })
-        await vcr.intercept({ create: async () => ({}) }, 'create', { a: 1 })
-        await vcr.intercept({ create: async () => ({}) }, 'create', { a: 2 })
+        await vcr.intercept({ create: () => Promise.resolve(({})) }, 'create', { a: 1 })
+        await vcr.intercept({ create: () => Promise.resolve(({})) }, 'create', { a: 2 })
         expect(vcr.getStats().recorded).toBe(2)
       })
 
       it('resetStats clears counters', async () => {
         const vcr = new VCR({ mode: 'record', fixtureDir: tmpDir })
-        await vcr.intercept({ create: async () => ({}) }, 'create', { a: 1 })
+        await vcr.intercept({ create: () => Promise.resolve(({})) }, 'create', { a: 1 })
         vcr.resetStats()
         expect(vcr.getStats().recorded).toBe(0)
       })
@@ -271,8 +271,8 @@ describe('vcr', () => {
 
       it('lists saved fixtures', async () => {
         const vcr = new VCR({ mode: 'record', fixtureDir: tmpDir })
-        await vcr.intercept({ create: async () => ({}) }, 'create', { a: 1 })
-        await vcr.intercept({ create: async () => ({}) }, 'create', { a: 2 })
+        await vcr.intercept({ create: () => Promise.resolve(({})) }, 'create', { a: 1 })
+        await vcr.intercept({ create: () => Promise.resolve(({})) }, 'create', { a: 2 })
         const fixtures = vcr.listFixtures()
         expect(fixtures.length).toBe(2)
         expect(fixtures[0]).toContain('.json')
@@ -282,7 +282,7 @@ describe('vcr', () => {
     describe('clearFixtures', () => {
       it('removes all fixtures', async () => {
         const vcr = new VCR({ mode: 'record', fixtureDir: tmpDir })
-        await vcr.intercept({ create: async () => ({}) }, 'create', { a: 1 })
+        await vcr.intercept({ create: () => Promise.resolve(({})) }, 'create', { a: 1 })
         expect(vcr.listFixtures().length).toBe(1)
         const count = vcr.clearFixtures()
         expect(count).toBe(1)
@@ -321,7 +321,7 @@ describe('vcr', () => {
 
     it('reads VCR_MODE', () => {
       process.env.VCR_MODE = 'record'
-      const vcr = createVCRFromEnv(tmpDir)
+      void (createVCRFromEnv(tmpDir))
       expect(existsSync(tmpDir)).toBe(true)
     })
 

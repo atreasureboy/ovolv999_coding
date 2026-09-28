@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
 import { encrypt, decrypt, setSecret, getSecret, deleteSecret, listSecrets, getVaultMetadata, detectBackend } from '../src/utils/keychain.js'
-import { existsSync, rmSync } from 'fs'
+import { rmSync } from 'fs'
 import { join } from 'path'
-import { homedir } from 'os'
+
 import { tmpdir } from 'os'
 import { mkdtempSync } from 'fs'
 

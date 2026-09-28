@@ -92,7 +92,14 @@ export function loadConfig(): TelemetryConfig {
   const path = getConfigPath()
   if (!existsSync(path)) return { ...DEFAULT_CONFIG }
   try {
-    return { ...DEFAULT_CONFIG, ...JSON.parse(readFileSync(path, 'utf8')) }
+    const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'))
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { ...DEFAULT_CONFIG }
+    const config = parsed as Record<string, unknown>
+    return {
+      enabled: typeof config.enabled === 'boolean' ? config.enabled : DEFAULT_CONFIG.enabled,
+      maxEvents: typeof config.maxEvents === 'number' && Number.isSafeInteger(config.maxEvents) && config.maxEvents > 0 ? config.maxEvents : DEFAULT_CONFIG.maxEvents,
+      detailed: typeof config.detailed === 'boolean' ? config.detailed : DEFAULT_CONFIG.detailed,
+    }
   } catch {
     return { ...DEFAULT_CONFIG }
   }

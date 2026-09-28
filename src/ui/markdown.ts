@@ -5,7 +5,7 @@
  * Supports headings, bold, italic, code, lists, tables, links.
  */
 
-import { ANSI, bold as boldText, dim, underline, stripAnsi, ansiLength, padRight } from '../utils/ansi.js'
+import { ANSI, bold as boldText, dim, underline, ansiLength, padRight } from '../utils/ansi.js'
 import { getActiveTheme } from './theme.js'
 
 // ── Types ───────────────────────────────────────────────────────────────────
@@ -149,18 +149,18 @@ export function renderInline(text: string): string {
   })
 
   // Bold
-  result = result.replace(/\*\*([^*]+)\*\*/g, (_, content) => boldText(content))
-  result = result.replace(/__([^_]+)__/g, (_, content) => boldText(content))
+  result = result.replace(/\*\*([^*]+)\*\*/g, (_: string, content: string) => boldText(content))
+  result = result.replace(/__([^_]+)__/g, (_: string, content: string) => boldText(content))
 
   // Italic
-  result = result.replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, (_, content) => ANSI.ITALIC + content + ANSI.RESET)
-  result = result.replace(/(?<!_)_([^_]+)_(?!_)/g, (_, content) => ANSI.ITALIC + content + ANSI.RESET)
+  result = result.replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, (_: string, content: string) => ANSI.ITALIC + content + ANSI.RESET)
+  result = result.replace(/(?<!_)_([^_]+)_(?!_)/g, (_: string, content: string) => ANSI.ITALIC + content + ANSI.RESET)
 
   // Strikethrough
-  result = result.replace(/~~([^~]+)~~/g, (_, content) => ANSI.STRIKETHROUGH + content + ANSI.RESET)
+  result = result.replace(/~~([^~]+)~~/g, (_: string, content: string) => ANSI.STRIKETHROUGH + content + ANSI.RESET)
 
   // Links [text](url)
-  result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, text, url) => {
+  result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_: string, text: string, _url: string) => {
     return underline(ANSI.BLUE + text + ANSI.RESET)
   })
 

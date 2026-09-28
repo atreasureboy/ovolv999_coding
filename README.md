@@ -6,7 +6,7 @@
 
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript)](https://www.typescriptlang.org/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Node](https://img.shields.io/badge/Node-%3E%3D20-339933?logo=node.js)](https://nodejs.org/)
+[![Node](https://img.shields.io/badge/Node-%3E%3D22.13.0-339933?logo=node.js)](https://nodejs.org/)
 [![Tests](https://img.shields.io/badge/Tests-3424%20passed-brightgreen)]()
 [![Test Files](https://img.shields.io/badge/Test%20Files-139-blue)]()
 
@@ -31,8 +31,8 @@ ovolv999 是一个**纯 Agent 基座框架**，仿 Claude Code 架构，核心�
 - **并发调度** — 只读/安全工具并行 (Promise.all)，状态工具串行
 - **流式引擎** — Streaming LLM API，tool_call 解析 → 分区调度 → 结果注入 → 循环
 - **Plan 模式** — `EnterPlanMode` / `ExitPlanMode` / `VerifyPlanExecution` 闭环
-- **MCP 客户端** — stdio + HTTP transport，OAuth2 PKCE 授权，工具以 `mcp__<server>__<tool>` 注入
-- **沙箱执行** — 3 级安全策略（permissive/standard/strict），macOS sandbox-exec + Linux bubblewrap
+- **MCP 客户端** — 默认仅 stdio transport；HTTP/SSE 与 OAuth 未接线，工具以 `mcp__<server>__<tool>` 注入
+- **沙箱执行** — 当前支持 trusted-local；isolated-worker 在没有已验证独立执行后端时拒绝启动
 - **进程内 LSP** — tsserver / pylsp / rust-analyzer / gopls，JSON-RPC 2.0，诊断 + 符号搜索
 - **SSH 远程** — SshProfile 管理，rsync 同步，远程 agent 执行
 - **后台会话** — `--bg` 启动 detached 会话，`ps/attach/logs/stop/rm/clean` CLI 管理
@@ -53,7 +53,7 @@ ovolv999 是一个**纯 Agent 基座框架**，仿 Claude Code 架构，核心�
 - **Permission 系统** — allow/deny 规则 + glob 匹配 + 持久化
 - **命令历史 + 书签** — 跨 session 命令历史 + 位置书签
 - **文件历史 / Rewind** — 每次编辑快照，可回滚
-- **ACP 协议** — Agent Communication Protocol server
+- **ACP 协议** — stdio JSON-RPC adapter，能力由已装配 handler 决定
 - **Vim 模式** — normal/insert/visual 模式，keybinding 可定制
 - **Ink/React UI** — 可选的 `--ink` 富终端 UI
 - **零领域绑定** — 核心是 Agent 基础设施，业务逻辑通过 Module + Tool 插件注入
@@ -94,7 +94,7 @@ ovolv999 是一个**纯 Agent 基座框架**，仿 Claude Code 架构，核心�
 ║  │  │    └─ 85%: autoCompact   ← LLM 摘要压缩                        │  │   ║
 ║  │  │  callLLM() → streaming → consumeStream()                       │  │   ║
 ║  │  │  partitionToolCalls() → parallel(safe) / serial(stateful)      │  │   ║
-║  │  │  executeToolCall() → 白名单 + planMode + sandbox 执行          │  │   ║
+║  │  │  executeToolCall() → 白名单 + planMode + 执行边界检查          │  │   ║
 ║  │  │  modules.onToolCall()   ← MemoryModule 写 episodic             │  │   ║
 ║  │  │  hooks: PreToolCall / PostToolCall                             │  │   ║
 ║  │  └────────────────────────────────────────────────────────────────┘  │   ║
@@ -116,8 +116,8 @@ ovolv999 是一个**纯 Agent 基座框架**，仿 Claude Code 架构，核心�
 ║  └────────────────┘  │ Worktree/Goal        │                             ║
 ║                      │ Brief/CtxInspect     │  ┌─ Integration ─────────┐  ║
 ║  ┌─ MCP Client ───┐  │ TerminalCapture      │  │ LSP (in-process)      │  ║
-║  │ stdio + HTTP   │  │ WebBrowser           │  │ SSH Remote            │  ║
-║  │ OAuth2 PKCE    │  │ PushNotification     │  │ Sandbox (3 levels)    │  ║
+║  │ stdio only     │  │ WebBrowser           │  │ SSH Remote            │  ║
+║  │ HTTP 未接线    │  │ PushNotification     │  │ Trusted local         │  ║
 ║  │ Resources      │  │ Task*(5)/Notebook    │  │ Background Sessions   │  ║
 ║  └────────────────┘  │ ClaudeCode/Diag      │  │ MagicDocs             │  ║
 ║                      │ MCP Resources(2)     │  │ Telemetry             │  ║
@@ -347,6 +347,22 @@ export const plugin: Plugin = {
 
 通过 `.ovogo/settings.json` 的 `plugins` 字段或 `/plugins` 命令注册。
 
+## 发布与支持边界
+
+当前整改候选面向单机、可信本地用户，要求 Node ≥22.13.0 和本地文件系统。CI 目标矩阵为 Windows/Linux × Node 22.13.0、22.x、24.x；每格需保留实际通过结果，不能用本地 Windows 结果代替 Linux。NFS/SMB、跨主机共享存储、公网多租户隔离不在支持范围；进程内 Plugin/Module 必须视为可信代码。
+
+| 入口 | 实际能力与兼容边界 |
+| --- | --- |
+| CLI / `--pipe` | CLI 执行受有效权限和验收控制；原始 `--pipe` 只产生文本，不装配写入工具 |
+| MCP | 默认 stdio，初始化版本 `2024-11-05`；初始化响应必须确认同一版本及有效 capabilities，否则拒绝连接。其他版本尚未验证。tools/resources/prompts 按已连接服务提供；HTTP/SSE/OAuth 不由默认客户端装配 |
+| ACP | 仓库 stdio JSON-RPC adapter，版本 `2025-07-20`；先 initialize，拒绝不支持的版本。没有 handler 的文件读写禁用；能力字段仅描述实际装配，不承诺所有编辑器兼容 |
+| 执行隔离 | 支持 trusted-local；要求 isolated-worker 而缺少实际隔离后端时拒绝执行。沙箱策略文件存在不构成操作系统隔离证明 |
+| 构建身份 | `ovolv999 --version` 显示版本、源码 SHA 与 dirty 标志；包内 `dist/build-info.json` 提供构建输入哈希 |
+
+从 clean checkout 执行 `pnpm run release:gate`，依次做 frozen install、typecheck、完整 lint/tests、clean build、pack、全新目录冻结安装、已安装命令/协议/恢复冒烟及短时 soak。每次 pack 自动 clean build；任何检查失败都阻断候选发布。现有 lint/test 阻断必须真实修复，不能用局部通过代替整个门禁通过。
+
+详见 [支持矩阵、发布命令、短/长 soak 与回滚步骤](docs/release-support.md)、[实际工具装配](docs/architecture-capabilities.md) 和 [变更日志](CHANGELOG.md)。脚本不会 push、npm publish 或配置远程 branch protection。
+
 ## 快速开始
 
 ### 安装
@@ -416,7 +432,6 @@ ovolv999 读取多级配置（优先级从高到低）：
       "my-server": { "command": "npx", "args": ["my-mcp-server"] }
     }
   },
-  "sandbox": { "level": "standard" },
   "telemetry": { "enabled": false }
 }
 ```
@@ -444,13 +459,13 @@ ovolv999/
 │   │   ├── permissionSystem.ts      # 权限模式 + allow/deny 规则
 │   │   ├── permissionRules.ts       # glob 规则匹配
 │   │   ├── pathSecurity.ts          # 路径安全检查
-│   │   ├── sandbox.ts               # 3 级沙箱 (macOS/Linux)
+│   │   ├── sandbox.ts               # 独立策略模块；非默认 OS 隔离
 │   │   ├── lspClient.ts             # 进程内 LSP 客户端
 │   │   ├── sshRemote.ts             # SSH 远程会话
 │   │   ├── backgroundSession.ts     # detached 会话管理
 │   │   ├── backgroundTaskManager.ts # 后台任务生命周期
-│   │   ├── oauth.ts                 # MCP OAuth2 PKCE
-│   │   ├── mcpClient.ts             # MCP 客户端 (stdio + HTTP)
+│   │   ├── oauth.ts                 # 独立 OAuth helper，MCP 未接线
+│   │   ├── mcpClient.ts             # MCP 客户端 (stdio)
 │   │   ├── magicDocs.ts             # 自动文档提取 (7 种提取器)
 │   │   ├── telemetry.ts             # opt-in 本地遥测
 │   │   ├── settingsSync.ts          # 加密设置同步
@@ -556,7 +571,7 @@ ovolv999/
 │   │   ├── terminalTitle.ts / vcr.ts
 │   │   └── ansi.ts
 │   └── integrations/                # 外部协议集成
-│       ├── acp.ts                   # Agent Communication Protocol server
+│       ├── acp.ts                   # stdio JSON-RPC adapter，能力由已装配 handler 决定
 │       └── pipeMode.ts              # 管道模式
 ├── tests/                           # 139 test files · 3424 tests
 └── package.json                     # runtime: openai/glob/zod/ink/react
@@ -581,13 +596,13 @@ ovolv999/
 | Context 压缩 + 策略 | microCompact + snipCompact + autoCompact（含系统提示词 token） |
 | Tool metadata | `readOnly` / `concurrencySafe` / `mutatesState` / `longRunning` / `requiresNetwork` |
 | 权限系统 | `PermissionManager` + glob 规则 + `/permissions` 持久化 |
-| 沙箱执行 | 3 级策略：permissive / standard / strict (macOS sandbox-exec + Linux bwrap) |
+| 执行边界 | trusted-local；isolated-worker 缺少已验证后端时 fail closed |
 | 后台任务 | `TaskCreate/Get/List/Update/Stop` + Bash background |
 | 后台会话 | `--bg` + `ps/attach/logs/stop/rm/clean` CLI |
-| MCP 客户端 | stdio + HTTP + OAuth2 PKCE + Resources |
+| MCP 客户端 | 默认 stdio + tools/resources/prompts；HTTP/SSE/OAuth 未接线 |
 | 进程内 LSP | tsserver/pylsp/rust-analyzer/gopls JSON-RPC 2.0 |
 | SSH 远程 | SshProfile + rsync 同步 + remote agent |
-| API 重试 | SDK maxRetries=5 指数退避 + 120s timeout |
+| API 重试 | SDK 隐藏重试关闭；网关有界重试与流中断边界见行为测试 |
 | 模块化插件 | Plugin 接口 + `/plugins` 动态加载 |
 
 ## 技术栈
@@ -595,7 +610,7 @@ ovolv999/
 | 组件 | 技术 |
 |------|------|
 | 语言 | TypeScript 5.7 (ESM, strict) |
-| 运行时 | Node.js ≥ 20 |
+| 运行时 | Node.js ≥ 22.13.0 |
 | LLM API | OpenAI SDK (兼容 Claude/GPT/本地端点) |
 | 终端 UI | Ink + React（可选 `--ink`）/ readline REPL（默认） |
 | 测试 | Vitest (3424 tests · 139 files) |

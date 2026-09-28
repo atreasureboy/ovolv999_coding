@@ -95,8 +95,9 @@ export function loadConfig(scope: ConfigScope, cwd?: string): ConfigSchema {
   const path = getConfigPath(scope, cwd)
   if (!existsSync(path)) return mergeConfig(DEFAULT_CONFIG, {})
   try {
-    const raw = JSON.parse(readFileSync(path, 'utf8'))
-    return mergeConfig(DEFAULT_CONFIG, raw)
+    const raw: unknown = JSON.parse(readFileSync(path, 'utf8'))
+    const result = validateConfig(raw)
+    return result.valid ? result.config : mergeConfig(DEFAULT_CONFIG, {})
   } catch {
     return mergeConfig(DEFAULT_CONFIG, {})
   }

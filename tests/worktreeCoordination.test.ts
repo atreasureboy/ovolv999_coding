@@ -95,7 +95,7 @@ describe('shared repository administration', () => {
         if (creation) await creation
         if (manager) {
           for (const task of manager.listTasks()) await manager.waitForTask(task.id, 5_000)
-          manager.dispose()
+          await manager.dispose()
         }
       }
       expect(creationFinished).toBe(true)

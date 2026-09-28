@@ -269,7 +269,7 @@ export async function executeWorkflow(
 async function executeStep(
   step: WorkflowStep,
   ctx: WorkflowContext,
-  previousSteps: StepResult[],
+  _previousSteps: StepResult[],
 ): Promise<StepResult> {
   const name = step.name ?? step.type
   const start = Date.now()
@@ -289,7 +289,7 @@ async function executeStep(
       default:
         return {
           name, type: step.type, success: false, output: '',
-          durationMs: Date.now() - start, error: `Unknown step type: ${step.type}`,
+          durationMs: Date.now() - start, error: `Unknown step type: ${String(step.type)}`,
         }
     }
   } catch (err) {

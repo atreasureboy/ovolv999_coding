@@ -109,7 +109,8 @@ export function getRawConfig(scope: 'global' | 'project', cwd?: string): Record<
 
   if (!existsSync(path)) return null
   try {
-    return JSON.parse(readFileSync(path, 'utf8'))
+    const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'))
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null
   } catch {
     return null
   }
@@ -152,7 +153,7 @@ export function migrateConfig(
   let current = { ...raw }
 
   if (fromVersion >= LATEST_VERSION) {
-    const config = mergeConfig(DEFAULT_CONFIG, current as Partial<ConfigSchema>)
+    const config = mergeConfig(DEFAULT_CONFIG, current)
     return {
       migrated: false,
       fromVersion,
@@ -179,7 +180,7 @@ export function migrateConfig(
   // Save migrated config
   saveRawConfig(current, scope, cwd)
 
-  const config = mergeConfig(DEFAULT_CONFIG, current as Partial<ConfigSchema>)
+  const config = mergeConfig(DEFAULT_CONFIG, current)
 
   return {
     migrated: appliedMigrations.length > 0,

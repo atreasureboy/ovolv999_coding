@@ -123,11 +123,11 @@ function decodeEntities(s: string): string {
     out = out.replaceAll(entity, char)
   }
   // Numeric entities
-  out = out.replace(/&#(\d+);/g, (_, n) => {
+  out = out.replace(/&#(\d+);/g, (_: string, n: string) => {
     const code = parseInt(n, 10)
     return code > 0 ? String.fromCodePoint(code) : ''
   })
-  out = out.replace(/&#x([0-9a-f]+);/gi, (_, n) => {
+  out = out.replace(/&#x([0-9a-f]+);/gi, (_: string, n: string) => {
     const code = parseInt(n, 16)
     return code > 0 ? String.fromCodePoint(code) : ''
   })

@@ -84,7 +84,6 @@ function baseConfig(o: Partial<EngineConfig> = {}): EngineConfig {
   }
 }
 
-const tick = (): Promise<void> => new Promise((r) => setImmediate(r))
 
 function makeEngine(store: UIStore, tools: Tool[] = []) {
   const renderer = new InkRenderer(store)

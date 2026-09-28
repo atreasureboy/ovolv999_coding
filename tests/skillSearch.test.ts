@@ -1,14 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest'
-import {
-  loadUsageStats,
-  saveUsageStats,
-  recordSkillUsage,
-  searchSkills,
-  getRecommendedSkills,
-  getSimilarSkills,
-  formatSearchResults,
-  formatRecommendations,
-} from '../src/core/skillSearch.js'
+import { loadUsageStats, recordSkillUsage, searchSkills, getRecommendedSkills, getSimilarSkills, formatSearchResults, formatRecommendations } from '../src/core/skillSearch.js'
 import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'

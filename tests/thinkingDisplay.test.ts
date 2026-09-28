@@ -82,7 +82,7 @@ describe('thinkingDisplay', () => {
     it('applies different colors to different chars', () => {
       const result = rainbow('ab')
       // Should contain at least 2 different color codes
-      const colorCodes = result.match(/\x1b\[38;5;(\d+)m/g)
+      const colorCodes = result.match(new RegExp(String.fromCharCode(27) + '\\[38;5;(\\d+)m', 'g'))
       expect(colorCodes!.length).toBeGreaterThanOrEqual(2)
     })
 

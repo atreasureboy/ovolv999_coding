@@ -25,13 +25,13 @@ import {
   readdirSync,
   utimesSync,
   statSync,
-  chmodSync,
   symlinkSync,
   unlinkSync,
   lstatSync,
   readlinkSync,
 } from 'fs'
 import { tmpdir } from 'os'
+import { canCreateFileSymlinks, nativeFileMode } from './helpers/filesystemCapabilities.js'
 import { join } from 'path'
 import { FileReadTool } from '../src/tools/fileRead.js'
 import { FileWriteTool } from '../src/tools/fileWrite.js'
@@ -322,7 +322,7 @@ describe('atomicWrite — mode preservation (defect #5)', () => {
     const dir = newDir('mode-0755')
     const fp = join(dir, 'script.sh')
     writeFileSync(fp, '#!/bin/sh\necho hi\n', { mode: 0o755 })
-    expect(statSync(fp).mode & 0o777).toBe(0o755)
+    expect(statSync(fp).mode & 0o777).toBe(nativeFileMode(0o755))
 
     await atomicWrite(fp, '#!/bin/sh\necho bye\n')
 
@@ -330,19 +330,19 @@ describe('atomicWrite — mode preservation (defect #5)', () => {
     // Mode must survive — chmod the tmp to match the existing target's mode
     // before rename. If we just writeFile without chmod, the mode drops to
     // 0644 and the script loses +x.
-    expect(statSync(fp).mode & 0o777).toBe(0o755)
+    expect(statSync(fp).mode & 0o777).toBe(nativeFileMode(0o755))
   })
 
   it('preserves 0644 (regular file) mode', async () => {
     const dir = newDir('mode-0644')
     const fp = join(dir, 'notes.txt')
     writeFileSync(fp, 'first', { mode: 0o644 })
-    expect(statSync(fp).mode & 0o777).toBe(0o644)
+    expect(statSync(fp).mode & 0o777).toBe(nativeFileMode(0o644))
 
     await atomicWrite(fp, 'second')
 
     expect(readFileSync(fp, 'utf8')).toBe('second')
-    expect(statSync(fp).mode & 0o777).toBe(0o644)
+    expect(statSync(fp).mode & 0o777).toBe(nativeFileMode(0o644))
   })
 
   it('a NEW file (no existing target) uses the process umask default (~0644)', async () => {
@@ -792,12 +792,25 @@ describe('FileEditTool formatter process', () => {
 // ─── 12. atomicWrite — symlink behavior (write-through) ─────────────────────
 
 describe('atomicWrite — symlink write-through', () => {
+  it.runIf(process.platform === 'win32')('writes through a directory junction without replacing it', async () => {
+    const dir = newDir('junction-follow')
+    const target = join(dir, 'real')
+    const link = join(dir, 'junction')
+    mkdirSync(target)
+    writeFileSync(join(target, 'source.txt'), 'before')
+    symlinkSync(target, link, 'junction')
+    await atomicWrite(join(link, 'source.txt'), 'after')
+    expect(lstatSync(link).isSymbolicLink()).toBe(true)
+    expect(readFileSync(join(target, 'source.txt'), 'utf8')).toBe('after')
+    expect(listTmpLeftovers(target)).toEqual([])
+  })
+
   /**
    * When target IS a symlink, atomicWrite must FOLLOW it (write-through
    * semantics) — the same as `fs.writeFile` and normal editors. The
    * symlink itself stays intact; the pointee receives the new content.
    */
-  it('follows the symlink: writes to the real target and preserves the link', async () => {
+  it.skipIf(!canCreateFileSymlinks)('follows the symlink: writes to the real target and preserves the link', async () => {
     const dir = newDir('sym-follow')
     const real = join(dir, 'real.txt')
     const link = join(dir, 'link.txt')
@@ -822,19 +835,19 @@ describe('atomicWrite — symlink write-through', () => {
    * the real target's directory) inherits the real target's mode, so a
    * 0755 script keeps its executable bit after a write through `/link`.
    */
-  it('preserves the pointee mode when writing through a symlink', async () => {
+  it.skipIf(!canCreateFileSymlinks)('preserves the pointee mode when writing through a symlink', async () => {
     const dir = newDir('sym-mode-follow')
     const real = join(dir, 'real.sh')
     const link = join(dir, 'link.sh')
     writeFileSync(real, '#!/bin/sh\necho hi\n', { mode: 0o755 })
-    expect(statSync(real).mode & 0o777).toBe(0o755)
+    expect(statSync(real).mode & 0o777).toBe(nativeFileMode(0o755))
     symlinkSync(real, link)
 
     await atomicWrite(link, '#!/bin/sh\necho bye\n')
 
     // Symlink preserved, pointee updated with original mode.
     expect(lstatSync(link).isSymbolicLink()).toBe(true)
-    expect(statSync(real).mode & 0o777).toBe(0o755)
+    expect(statSync(real).mode & 0o777).toBe(nativeFileMode(0o755))
     expect(readFileSync(real, 'utf8')).toBe('#!/bin/sh\necho bye\n')
   })
 
@@ -843,7 +856,7 @@ describe('atomicWrite — symlink write-through', () => {
    * throw a clear, actionable error — and crucially we must NOT modify
    * the symlink itself (no deletion, no replacement).
    */
-  it('refuses a broken symlink with a clear error and leaves the link intact', async () => {
+  it.skipIf(!canCreateFileSymlinks)('refuses a broken symlink with a clear error and leaves the link intact', async () => {
     const dir = newDir('sym-broken')
     const ghost = join(dir, 'ghost.txt') // never created
     const link = join(dir, 'link.txt')
@@ -870,7 +883,7 @@ describe('atomicWrite — symlink write-through', () => {
     const sub = join(dir, 'sub')
     mkdirSync(sub)
     const link = join(dir, 'link-as-dir')
-    symlinkSync(sub, link)
+    symlinkSync(sub, link, process.platform === 'win32' ? 'junction' : 'dir')
     expect(lstatSync(link).isSymbolicLink()).toBe(true)
 
     await expect(atomicWrite(link, 'x')).rejects.toThrow(/symlink to a directory/i)
@@ -884,7 +897,7 @@ describe('atomicWrite — symlink write-through', () => {
    * Multi-level symlink chain: a → b → real. atomicWrite must follow all
    * the way to the real file, preserving every link in the chain.
    */
-  it('follows a multi-level symlink chain', async () => {
+  it.skipIf(!canCreateFileSymlinks)('follows a multi-level symlink chain', async () => {
     const dir = newDir('sym-chain')
     const real = join(dir, 'real.txt')
     const hop1 = join(dir, 'hop1.txt')
@@ -1022,7 +1035,7 @@ describe('FileEdit / FileWrite — symlink-at-write-path interaction', () => {
    * matches `fs.writeFile` / editor semantics — a future change that
    * started deleting the symlink would be a regression.
    */
-  it('FileWrite to a symlink path writes through to the pointee and preserves the link', async () => {
+  it.skipIf(!canCreateFileSymlinks)('FileWrite to a symlink path writes through to the pointee and preserves the link', async () => {
     const dir = newDir('write-sym')
     const real = join(dir, 'real.txt')
     const link = join(dir, 'link.txt')
@@ -1046,7 +1059,7 @@ describe('FileEdit / FileWrite — symlink-at-write-path interaction', () => {
    * the pointee's content, the replacement is written to the pointee,
    * and the link itself stays intact.
    */
-  it('FileEdit to a symlink path writes the replacement through to the pointee', async () => {
+  it.skipIf(!canCreateFileSymlinks)('FileEdit to a symlink path writes the replacement through to the pointee', async () => {
     const dir = newDir('edit-sym')
     const real = join(dir, 'real.ts')
     const link = join(dir, 'link.ts')
@@ -1072,7 +1085,7 @@ describe('FileEdit / FileWrite — symlink-at-write-path interaction', () => {
    * ENOENT (no file at the resolved path), so Edit returns a clear
    * ENOENT error without touching the symlink.
    */
-  it('FileEdit to a broken symlink fails with ENOENT and preserves the link', async () => {
+  it.skipIf(!canCreateFileSymlinks)('FileEdit to a broken symlink fails with ENOENT and preserves the link', async () => {
     const dir = newDir('edit-broken-sym')
     const ghost = join(dir, 'ghost.ts')
     const link = join(dir, 'link.ts')

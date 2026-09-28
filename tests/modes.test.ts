@@ -1,10 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import {
-  DEFAULT_MODES, getAllModes, getCurrentMode, setCurrentMode,
-  cycleMode, getVerbosityPrompt, resetModeCache, loadCustomModes,
-  type Mode,
-} from '../src/core/modes.js'
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'fs'
+import { DEFAULT_MODES, getAllModes, getCurrentMode, setCurrentMode, cycleMode, getVerbosityPrompt, resetModeCache, loadCustomModes } from '../src/core/modes.js'
+import { mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 

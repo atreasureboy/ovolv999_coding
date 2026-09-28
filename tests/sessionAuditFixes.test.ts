@@ -28,6 +28,7 @@ import {
   chmodSync,
 } from 'fs'
 import { tmpdir } from 'os'
+import { nativeFileMode } from './helpers/filesystemCapabilities.js'
 import { join } from 'path'
 import { createHash } from 'crypto'
 
@@ -1039,7 +1040,7 @@ describe('FileHistory: version cap + SHA-256 path (defect #7)', () => {
     // Establish an executable live file at the SAME mode we want
     // preserved across restore.
     writeFileSync(fp, '#!/bin/sh\necho live\n', { mode: 0o755 })
-    expect(statSync(fp).mode & 0o777).toBe(0o755)
+    expect(statSync(fp).mode & 0o777).toBe(nativeFileMode(0o755))
     history.trackEdit(fp)
 
     // Overwrite with non-executable content and back to 0755 (real
@@ -1049,7 +1050,7 @@ describe('FileHistory: version cap + SHA-256 path (defect #7)', () => {
 
     expect(history.restoreVersion(fp, 0)).toBe(true)
     // Mode bits MUST survive the tmp + chmod + rename chain.
-    expect(statSync(fp).mode & 0o777).toBe(0o755)
+    expect(statSync(fp).mode & 0o777).toBe(nativeFileMode(0o755))
     // And content is the backup.
     expect(readFileSync(fp, 'utf8')).toBe('#!/bin/sh\necho live\n')
   })
@@ -1059,13 +1060,13 @@ describe('FileHistory: version cap + SHA-256 path (defect #7)', () => {
     const history = new FileHistory(dir)
     const fp = join(dir, 'notes.txt')
     writeFileSync(fp, 'first', { mode: 0o644 })
-    expect(statSync(fp).mode & 0o777).toBe(0o644)
+    expect(statSync(fp).mode & 0o777).toBe(nativeFileMode(0o644))
     history.trackEdit(fp)
     writeFileSync(fp, 'second', 'utf8')
     chmodSync(fp, 0o644)
 
     expect(history.restoreVersion(fp, 0)).toBe(true)
-    expect(statSync(fp).mode & 0o777).toBe(0o644)
+    expect(statSync(fp).mode & 0o777).toBe(nativeFileMode(0o644))
     expect(readFileSync(fp, 'utf8')).toBe('first')
   })
 
@@ -1084,18 +1085,21 @@ describe('FileHistory: version cap + SHA-256 path (defect #7)', () => {
     const history = new FileHistory(dir)
     const fp = join(dir, 'tool.sh')
     // Live file at 0755; backup captures this state.
-    writeFileSync(fp, '#!/bin/sh\necho orig\n', { mode: 0o755 })
+    const backupMode = process.platform === 'win32' ? 0o444 : 0o755
+    writeFileSync(fp, '#!/bin/sh\necho orig\n', { mode: backupMode })
+    expect(statSync(fp).mode & 0o777).toBe(backupMode)
     history.trackEdit(fp)
     // User (or a buggy tool) overwrote with broken content AND
     // accidentally chmod'd the live file to 0644. The backup file
     // STILL records the 0755 state.
+    chmodSync(fp, 0o644)
     writeFileSync(fp, 'messed up', 'utf8')
     chmodSync(fp, 0o644)
 
     expect(history.restoreVersion(fp, 0)).toBe(true)
     // REWIND: live file goes back to 0755 (from backup), NOT 0644
     // (current). This is the corrected semantic.
-    expect(statSync(fp).mode & 0o777).toBe(0o755)
+    expect(statSync(fp).mode & 0o777).toBe(backupMode)
     expect(readFileSync(fp, 'utf8')).toBe('#!/bin/sh\necho orig\n')
   })
 })

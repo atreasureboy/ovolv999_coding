@@ -14,8 +14,8 @@
  */
 
 import { execSync, type ExecSyncOptions } from 'child_process'
-import { existsSync, readFileSync } from 'fs'
-import { join, extname, relative, dirname } from 'path'
+import { existsSync } from 'fs'
+import { join, extname, relative } from 'path'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -241,7 +241,7 @@ export function parseBiomeOutput(output: string, _cwd: string): Diagnostic[] {
         column: start.col ?? 1,
         endLine: end?.line,
         endColumn: end?.col,
-        severity: (d.severity === 'error' ? 'error' : d.severity === 'warning' ? 'warning' : 'info') as DiagnosticSeverity,
+        severity: (d.severity === 'error' ? 'error' : d.severity === 'warning' ? 'warning' : 'info'),
         message: d.description ?? '',
         code: d.category,
         source: 'biome',

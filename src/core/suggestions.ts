@@ -17,7 +17,7 @@
 
 import { execSync } from 'child_process'
 import { existsSync, readFileSync } from 'fs'
-import { join, resolve, extname } from 'path'
+import { join, resolve } from 'path'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -145,10 +145,6 @@ export function getGitState(cwd: string): GitState {
 // ── TODO Scanner ────────────────────────────────────────────────────────────
 
 export function scanForTODOs(cwd: string, maxFiles = 50): { count: number; files: string[] } {
-  const codeExtensions = new Set([
-    '.ts', '.tsx', '.js', '.jsx', '.py', '.rb', '.go', '.rs', '.java',
-    '.c', '.cpp', '.h', '.hpp', '.cs', '.php', '.swift', '.kt',
-  ])
   const files: string[] = []
   let count = 0
 
@@ -193,8 +189,8 @@ export function detectTestSetup(cwd: string): { hasTests: boolean; framework: st
       const pkgPath = join(resolve(cwd), 'package.json')
       if (existsSync(pkgPath)) {
         try {
-          const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'))
-          if (pkg.devDependencies?.[framework] || pkg.dependencies?.[framework]) {
+          const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { devDependencies?: Record<string, unknown>; dependencies?: Record<string, unknown> } | null
+          if (pkg?.devDependencies?.[framework] || pkg?.dependencies?.[framework]) {
             return { hasTests: true, framework }
           }
         } catch { /* skip */ }

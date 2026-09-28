@@ -2,26 +2,16 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import {
-  parseWorkflow,
-  validateWorkflow,
-  validateStep,
-  loadWorkflows,
-  loadWorkflow,
-  executeWorkflow,
-  writeSampleWorkflow,
-  type Workflow,
-  type WorkflowContext,
-} from '../src/core/workflow.js'
+import { parseWorkflow, validateStep, loadWorkflows, loadWorkflow, executeWorkflow, writeSampleWorkflow, type Workflow, type WorkflowContext } from '../src/core/workflow.js'
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 function makeCtx(overrides: Partial<WorkflowContext> = {}): WorkflowContext {
   return {
     cwd: process.cwd(),
-    runSlash: async (cmd: string) => `slash result for: ${cmd}`,
-    promptUser: async (msg: string, def?: string) => def ?? 'user-input',
-    runAgent: async (prompt: string) => `agent result for: ${prompt}`,
+    runSlash: (cmd: string) => Promise.resolve(`slash result for: ${cmd}`),
+    promptUser: (msg: string, def?: string) => Promise.resolve(def ?? 'user-input'),
+    runAgent: (prompt: string) => Promise.resolve(`agent result for: ${prompt}`),
     ...overrides,
   }
 }
@@ -374,7 +364,7 @@ describe('writeSampleWorkflow', () => {
   })
 
   it('creates a sample workflow file', () => {
-    const path = writeSampleWorkflow(dir, 'my-sample')
+    void (writeSampleWorkflow(dir, 'my-sample'))
     const wf = loadWorkflow(dir, 'my-sample')
     expect(wf).not.toBeNull()
     expect(wf!.name).toBe('my-sample')

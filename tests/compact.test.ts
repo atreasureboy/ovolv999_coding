@@ -1,28 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
-import {
-  estimateTokens,
-  estimateTextTokens,
-  estimateToolDefinitionTokens,
-  calculateContextState,
-  getCompressionStrategy,
-  microCompact,
-  maybeTimeBasedMicroCompact,
-  resolveContextWindow,
-  KNOWN_MODEL_CONTEXT_WINDOWS,
-  MODEL_MAX_CONTEXT_TOKENS,
-  UNKNOWN_MODEL_CONTEXT_TOKENS,
-  CONTEXT_MICROCOMPACT_PCT,
-  CONTEXT_WARN_PCT,
-  CONTEXT_COMPACT_PCT,
-  MAX_OUTPUT_TOKENS_DEFAULT,
-  clampMaxOutputTokens,
-  effectiveInputBudget,
-  isFinitePositiveInteger,
-  maybeCompact,
-  isAbort,
-} from '../src/core/compact.js'
+import { estimateTokens, estimateTextTokens, estimateToolDefinitionTokens, calculateContextState, getCompressionStrategy, microCompact, maybeTimeBasedMicroCompact, resolveContextWindow, KNOWN_MODEL_CONTEXT_WINDOWS, UNKNOWN_MODEL_CONTEXT_TOKENS, CONTEXT_MICROCOMPACT_PCT, CONTEXT_WARN_PCT, CONTEXT_COMPACT_PCT, MAX_OUTPUT_TOKENS_DEFAULT, clampMaxOutputTokens, effectiveInputBudget, isFinitePositiveInteger, maybeCompact, isAbort } from '../src/core/compact.js'
 import type { OpenAIMessage } from '../src/core/types.js'
 
 // ── compact split logic (tool_call/result pair preservation) ─────────────────

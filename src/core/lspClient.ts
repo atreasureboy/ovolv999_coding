@@ -17,7 +17,7 @@
  * — usually the Diagnostics tool — falls back to a tsc shellout.
  */
 
-import { spawn, type ChildProcess } from 'child_process'
+import { spawn, execFileSync, type ChildProcess } from 'child_process'
 import { EventEmitter } from 'events'
 import { resolve } from 'path'
 import { existsSync } from 'fs'
@@ -121,8 +121,7 @@ export function detectServer(languageId: LanguageId = 'typescript'): ServerSpec 
 
   for (const spec of specs) {
     try {
-      const { execSync } = require('child_process')
-      execSync(`which ${spec.command} 2>/dev/null`, { stdio: 'pipe', timeout: 2000 })
+      execFileSync(process.platform === 'win32' ? 'where.exe' : 'which', [spec.command], { stdio: 'pipe', timeout: 2000, windowsHide: true })
       return spec
     } catch { /* not found */ }
   }
@@ -227,9 +226,8 @@ export class LspClient extends EventEmitter {
 
   // ── Document Sync ─────────────────────────────────────────────────────
 
-  async openDocument(uri: string, text: string, languageId?: string): Promise<void> {
-    if (!this.isRunning()) return
-    this.notify('textDocument/didOpen', {
+  openDocument(uri: string, text: string, languageId?: string): Promise<void> {
+    return this.notifyDocument('textDocument/didOpen', {
       textDocument: {
         uri,
         languageId: languageId ?? this.options.languageId ?? 'typescript',
@@ -239,25 +237,29 @@ export class LspClient extends EventEmitter {
     })
   }
 
-  async changeDocument(uri: string, text: string, version: number): Promise<void> {
-    if (!this.isRunning()) return
-    this.notify('textDocument/didChange', {
+  changeDocument(uri: string, text: string, version: number): Promise<void> {
+    return this.notifyDocument('textDocument/didChange', {
       textDocument: { uri, version },
       contentChanges: [{ text }],
     })
   }
 
-  async saveDocument(uri: string, text?: string): Promise<void> {
-    if (!this.isRunning()) return
-    this.notify('textDocument/didSave', {
+  saveDocument(uri: string, text?: string): Promise<void> {
+    return this.notifyDocument('textDocument/didSave', {
       textDocument: { uri },
       text,
     })
   }
 
-  async closeDocument(uri: string): Promise<void> {
-    if (!this.isRunning()) return
-    this.notify('textDocument/didClose', { textDocument: { uri } })
+  closeDocument(uri: string): Promise<void> {
+    return this.notifyDocument('textDocument/didClose', { textDocument: { uri } })
+  }
+
+  private notifyDocument(method: string, params: unknown): Promise<void> {
+    return new Promise(resolve => {
+      if (this.isRunning()) this.notify(method, params)
+      resolve()
+    })
   }
 
   // ── Diagnostics ───────────────────────────────────────────────────────

@@ -16,6 +16,17 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'fs'
 import { join, resolve, extname, basename, relative } from 'path'
 import { execSync } from 'child_process'
+import { z } from 'zod'
+
+const packageMetadataSchema = z.object({
+  name: z.string().optional(),
+  version: z.string().optional(),
+  description: z.string().optional(),
+  scripts: z.record(z.string()).optional(),
+  dependencies: z.record(z.string()).optional(),
+  devDependencies: z.record(z.string()).optional(),
+})
+type PackageMetadata = z.infer<typeof packageMetadataSchema>
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -132,11 +143,11 @@ export function analyzeProject(rootDir: string): ProjectOverview {
 
 // ── Package.json ────────────────────────────────────────────────────────────
 
-function readPackageJson(root: string): any {
+function readPackageJson(root: string): PackageMetadata | null {
   const path = join(root, 'package.json')
   if (!existsSync(path)) return null
   try {
-    return JSON.parse(readFileSync(path, 'utf8'))
+    return packageMetadataSchema.parse(JSON.parse(readFileSync(path, 'utf8')))
   } catch {
     return null
   }
@@ -237,7 +248,7 @@ function analyzeDependencies(root: string): DependencyInfo {
 
 // ── Test Setup ──────────────────────────────────────────────────────────────
 
-function analyzeTestSetup(root: string, pkg: any): TestSetup {
+function analyzeTestSetup(root: string, pkg: PackageMetadata | null): TestSetup {
   // Check for test frameworks in package.json
   if (pkg) {
     const allDeps = { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) }
@@ -404,7 +415,7 @@ function detectPrimaryLanguage(stats: CodeStats): string {
   return map[ext] ?? 'Unknown'
 }
 
-function detectFramework(pkg: any, deps: DependencyInfo): string | null {
+function detectFramework(pkg: PackageMetadata | null, deps: DependencyInfo): string | null {
   if (!pkg) return null
   const all = { ...deps.production, ...deps.development }
   if (all.react) return 'React'
@@ -417,7 +428,7 @@ function detectFramework(pkg: any, deps: DependencyInfo): string | null {
   return null
 }
 
-function detectConventions(root: string, pkg: any): string[] {
+function detectConventions(root: string, pkg: PackageMetadata | null): string[] {
   const conventions: string[] = []
 
   if (existsSync(join(root, '.editorconfig'))) conventions.push('EditorConfig defined')
@@ -447,7 +458,7 @@ function findKeyFiles(root: string): string[] {
   return keyFiles.filter(f => existsSync(join(root, f)))
 }
 
-function detectBuildSystem(root: string, pkg: any): string | null {
+function detectBuildSystem(root: string, pkg: PackageMetadata | null): string | null {
   if (pkg?.scripts?.build) return 'npm build'
   if (existsSync(join(root, 'Makefile'))) return 'make'
   if (existsSync(join(root, 'webpack.config.js'))) return 'webpack'

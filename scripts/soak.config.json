@@ -1,0 +1,4 @@
+{
+  "short": { "durationMs": 10000, "sampleIntervalMs": 250, "batchSize": 4, "payloadBytes": 4096, "maxRssGrowthBytes": 67108864, "maxRssBytes": 268435456, "maxResourcesGrowth": 8 },
+  "long": { "durationMs": 14400000, "sampleIntervalMs": 1000, "batchSize": 8, "payloadBytes": 16384, "maxRssGrowthBytes": 100663296, "maxRssBytes": 536870912, "maxResourcesGrowth": 8 }
+}

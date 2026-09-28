@@ -17,6 +17,7 @@
 import { existsSync, readFileSync, readdirSync, statSync, mkdirSync, writeFileSync } from 'fs'
 import { join, resolve } from 'path'
 import { homedir } from 'os'
+import { z } from 'zod'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -41,6 +42,21 @@ export interface PluginManifest {
   /** Required ovolv999 version */
   requires?: string
 }
+
+const pluginManifestSchema = z.object({
+  name: z.string().min(1),
+  version: z.string().default('0.0.0'),
+  description: z.string().optional(),
+  author: z.string().optional(),
+  homepage: z.string().optional(),
+  main: z.string().optional(),
+  tools: z.array(z.string()).optional(),
+  commands: z.array(z.string()).optional(),
+  mcpServers: z.array(z.object({ name: z.string(), command: z.array(z.string()) })).optional(),
+  skills: z.array(z.string()).optional(),
+  hooks: z.record(z.unknown()).optional(),
+  requires: z.string().optional(),
+})
 
 export type PluginStatus = 'enabled' | 'disabled' | 'error' | 'loading'
 
@@ -80,7 +96,7 @@ export function discoverPlugins(): Plugin[] {
     return plugins
   }
 
-  let entries: string[] = []
+  let entries: string[]
   try {
     entries = readdirSync(dir)
   } catch { return plugins }
@@ -110,7 +126,7 @@ export function loadManifest(pluginPath: string): PluginManifest | null {
   const manifestPath = join(pluginPath, 'plugin.json')
   if (existsSync(manifestPath)) {
     try {
-      return JSON.parse(readFileSync(manifestPath, 'utf8')) as PluginManifest
+      return pluginManifestSchema.parse(JSON.parse(readFileSync(manifestPath, 'utf8')))
     } catch { /* invalid JSON */ }
   }
 
@@ -118,11 +134,13 @@ export function loadManifest(pluginPath: string): PluginManifest | null {
   const pkgPath = join(pluginPath, 'package.json')
   if (existsSync(pkgPath)) {
     try {
-      const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'))
+      const parsed: unknown = JSON.parse(readFileSync(pkgPath, 'utf8'))
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+      const pkg = parsed as Record<string, unknown>
       // Only treat as plugin if it has ovolv999 field or name starts with ovolv999-plugin-
       const pluginField = pkg.ovolv999 ?? pkg.plugin
-      if (pluginField) {
-        return {
+      if (pluginField && typeof pluginField === 'object' && !Array.isArray(pluginField)) {
+        return pluginManifestSchema.parse({
           name: pkg.name,
           version: pkg.version ?? '0.0.0',
           description: pkg.description,
@@ -130,15 +148,15 @@ export function loadManifest(pluginPath: string): PluginManifest | null {
           homepage: pkg.homepage,
           main: pkg.main,
           ...pluginField,
-        } as PluginManifest
+        })
       }
       if (typeof pkg.name === 'string' && pkg.name.startsWith('ovolv999-plugin-')) {
-        return {
+        return pluginManifestSchema.parse({
           name: pkg.name,
           version: pkg.version ?? '0.0.0',
           description: pkg.description,
           main: pkg.main,
-        } as PluginManifest
+        })
       }
     } catch { /* invalid */ }
   }
@@ -288,7 +306,7 @@ export function installPlugin(opts: InstallOptions): InstallResult {
     }
   }
 
-  return { success: false, message: `Unknown install source: ${opts.from}` }
+  return { success: false, message: `Unknown install source: ${String(opts.from)}` }
 }
 
 export function uninstallPlugin(name: string): InstallResult {

@@ -15,7 +15,7 @@ import {
   CATEGORY_ICONS,
   type KnowledgeCategory,
 } from '../src/core/knowledgeBase.js'
-import { mkdtempSync, rmSync } from 'fs'
+import { mkdtempSync, rmSync, existsSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 
@@ -49,7 +49,7 @@ describe('knowledgeBase', () => {
 
     it('creates .ovolv999 directory', () => {
       saveKnowledge(tmpDir, { entries: [] })
-      const { existsSync } = require('fs')
+
       expect(existsSync(join(tmpDir, '.ovolv999'))).toBe(true)
     })
   })

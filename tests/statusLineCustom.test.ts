@@ -1,3 +1,4 @@
+import { stripAnsi } from '../src/utils/ansi.js'
 /**
  * Tests for src/ui/statusLineCustom.ts
  */
@@ -134,7 +135,7 @@ describe('statusLineCustom', () => {
         { type: 'cwd', maxWidth: 5 },
       ])
       // truncate adds '...' when maxWidth > 3
-      const stripped = out.replace(/\x1b\[[0-9;]*m/g, '')
+      const stripped = stripAnsi(out)
       expect(stripped.length).toBeLessThanOrEqual(20) // accounting for color codes stripped
     })
   })

@@ -1,13 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import {
-  loadConfig, saveConfig, mergeConfig, mergeAllConfigs,
-  validateConfig, updateConfig, resetConfig, formatConfig,
-  DEFAULT_CONFIG, getConfigPath, type ConfigSchema,
-} from '../src/core/config.js'
-import {
-  migrateConfig, needsMigration, MIGRATIONS, LATEST_VERSION,
-  formatMigrationResult, getRawConfig, saveRawConfig,
-} from '../src/core/migrations.js'
+import { loadConfig, saveConfig, mergeConfig, validateConfig, updateConfig, resetConfig, formatConfig, DEFAULT_CONFIG } from '../src/core/config.js'
+import { migrateConfig, needsMigration, MIGRATIONS, LATEST_VERSION, formatMigrationResult, saveRawConfig } from '../src/core/migrations.js'
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'

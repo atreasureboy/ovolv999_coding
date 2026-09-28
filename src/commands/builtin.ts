@@ -14,12 +14,14 @@ import { saveProjectSettings } from '../config/settings.js'
 import { estimateTokens, calculateContextState, microCompact } from '../core/compact.js'
 import type { OpenAIMessage } from '../core/types.js'
 import { existsSync, writeFileSync } from 'fs'
-import { join } from 'path'
+import { join, resolve } from 'path'
 import { execSync, execFileSync } from 'child_process'
 import { homedir } from 'os'
 import { ClaudeCodeWorkerManager } from '../core/claudeCodeWorkerManager.js'
 import { copyToClipboard } from '../utils/clipboard.js'
 import type { EditedFileInfo } from '../core/fileHistory.js'
+import type { KnowledgeCategory } from '../core/knowledgeBase.js'
+import type { BudgetType, BudgetPeriod } from '../core/budget.js'
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -777,7 +779,7 @@ registerCommand({
   name: 'export',
   description: 'Export conversation transcript to a file',
   usage: '/export [format: text|json|markdown] (default: markdown)',
-  handler: (args, ctx) => {
+  handler: async (args, ctx) => {
     if (ctx.history.length === 0) {
       return text('No conversation to export.')
     }
@@ -816,7 +818,7 @@ registerCommand({
     try {
       // Scan for secrets before writing
       const { maskSecrets, formatScanSummary } =
-        require('../utils/secretScanner.js') as typeof import('../utils/secretScanner.js')
+        await import('../utils/secretScanner.js')
       const scan = maskSecrets(content)
       const finalContent = scan.masked
       writeFileSync(exportPath, finalContent, 'utf8')
@@ -1061,11 +1063,11 @@ registerCommand({
   name: 'keybindings',
   aliases: ['keys', 'kb'],
   description: 'Show or reset keyboard shortcuts. Usage: /keybindings [reset]',
-  handler: (args, ctx) => {
+  handler: async (args, ctx) => {
     const trimmed = args.trim().toLowerCase()
     // Lazy import to avoid circular dependency in UI layer
     const { loadKeybindings, writeDefaultConfig, DEFAULT_BINDINGS, ACTION_DESCRIPTIONS, ALL_KEY_ACTIONS } =
-      require('../ui/keybindings.js') as typeof import('../ui/keybindings.js')
+      await import('../ui/keybindings.js')
 
     if (trimmed === 'reset' || trimmed === 'default') {
       const path = writeDefaultConfig(ctx.cwd)
@@ -1121,7 +1123,7 @@ registerCommand({
     const parts = args.trim().split(/\s+/)
     const subcommand = parts[0] ?? 'list'
     const { loadWorkflows, loadWorkflow, executeWorkflow, writeSampleWorkflow } =
-      require('../core/workflow.js') as typeof import('../core/workflow.js')
+      await import('../core/workflow.js')
 
     if (subcommand === 'list' || subcommand === '' || !subcommand) {
       const workflows = loadWorkflows(ctx.cwd)
@@ -1204,9 +1206,9 @@ registerCommand({
   name: 'models',
   aliases: ['providers'],
   description: 'List known LLM providers and models. Usage: /models [provider]',
-  handler: (args) => {
+  handler: async (args) => {
     const { MODELS, PROVIDERS, listProviders, detectProviderFromModel, getModelInfo } =
-      require('../core/providers.js') as typeof import('../core/providers.js')
+      await import('../core/providers.js')
 
     const trimmed = args.trim().toLowerCase()
 
@@ -1263,7 +1265,7 @@ registerCommand({
 registerCommand({
   name: 'skill-save',
   description: 'Extract a reusable skill from the current session. Usage: /skill-save <name> [description]',
-  handler: (args, ctx) => {
+  handler: async (args, ctx) => {
     const parts = args.trim().split(/\s+/)
     const name = parts[0]
     const description = parts.slice(1).join(' ')
@@ -1273,7 +1275,7 @@ registerCommand({
     }
 
     const { extractSkill, saveSkill, skillExists } =
-      require('../skills/extractor.js') as typeof import('../skills/extractor.js')
+      await import('../skills/extractor.js')
 
     if (skillExists(ctx.cwd, name)) {
       return text(`⚠ Skill "${name}" already exists. Use a different name or delete the file first.`)
@@ -1308,9 +1310,9 @@ registerCommand({
   name: 'style',
   aliases: ['output-style'],
   description: 'Set or show output style. Usage: /style [concise|verbose|structured|socratic|code-focused|teaching|default]',
-  handler: (args, ctx) => {
+  handler: async (args, ctx) => {
     const { loadOutputStyles, setActiveStyle } =
-      require('../core/outputStyles.js') as typeof import('../core/outputStyles.js')
+      await import('../core/outputStyles.js')
 
     const trimmed = args.trim().toLowerCase()
 
@@ -1347,7 +1349,7 @@ registerCommand({
 registerCommand({
   name: 'export',
   description: 'Export conversation. Usage: /export [md|json|text|transcript] [filename]',
-  handler: (args, ctx) => {
+  handler: async (args, ctx) => {
     if (ctx.history.length === 0) {
       return text('No conversation to export.')
     }
@@ -1355,7 +1357,7 @@ registerCommand({
     const parts = args.trim().split(/\s+/)
     const formatArg = parts[0]?.toLowerCase()
     const { exportSession, exportSessionToFile, defaultFilename } =
-      require('../utils/sessionExport.js') as typeof import('../utils/sessionExport.js')
+      await import('../utils/sessionExport.js')
 
     const validFormats = ['md', 'markdown', 'json', 'text', 'transcript']
     let format: 'markdown' | 'json' | 'text' | 'transcript'
@@ -1390,9 +1392,9 @@ registerCommand({
 registerCommand({
   name: 'audit',
   description: 'Validate all .ovolv999/ configuration files (keybindings, styles, workflows, skills)',
-  handler: (_args, ctx) => {
+  handler: async (_args, ctx) => {
     const { runDoctorChecks, formatDoctorReport } =
-      require('../utils/doctor.js') as typeof import('../utils/doctor.js')
+      await import('../utils/doctor.js')
     const report = runDoctorChecks(ctx.cwd)
     return text(formatDoctorReport(report))
   },
@@ -1402,15 +1404,15 @@ registerCommand({
   name: 'plugins',
   aliases: ['plugin'],
   description: 'Manage plugins. Usage: /plugins [list|enable <id>|disable <id>|init <name>]',
-  handler: (args, ctx) => {
+  handler: async (args, ctx) => {
     const parts = args.trim().split(/\s+/)
     const subcommand = parts[0] ?? 'list'
     const {
       loadPlugins, formatPluginList, enablePlugin, disablePlugin, createPluginScaffold,
-    } = require('../core/plugins.js') as typeof import('../core/plugins.js')
+    } = await import('../core/plugins.js')
 
     if (subcommand === 'list' || subcommand === '' || !subcommand) {
-      const home = require('os').homedir() as string
+      const home = homedir()
       const registry = loadPlugins(ctx.cwd, home)
       return text(formatPluginList(registry))
     }
@@ -1451,10 +1453,10 @@ registerCommand({
   name: 'suggest',
   aliases: ['suggestions'],
   description: 'Show proactive suggestions based on current context',
-  handler: (_args, ctx) => {
+  handler: async (_args, ctx) => {
     const {
       generateSuggestions, enrichContext, formatSuggestionList,
-    } = require('../core/suggestions.js') as typeof import('../core/suggestions.js')
+    } = await import('../core/suggestions.js')
 
     const enriched = enrichContext({
       conversationLength: ctx.history.length,
@@ -1479,12 +1481,12 @@ registerCommand({
 registerCommand({
   name: 'scan',
   description: 'Scan conversation history for secrets/API keys',
-  handler: (_args, ctx) => {
+  handler: async (_args, ctx) => {
     if (ctx.history.length === 0) {
       return text('No conversation to scan.')
     }
     const { maskSecrets, formatScanSummary } =
-      require('../utils/secretScanner.js') as typeof import('../utils/secretScanner.js')
+      await import('../utils/secretScanner.js')
     const allText = ctx.history.map(m => {
       if (typeof m.content === 'string') return m.content
       return JSON.stringify(m.tool_calls ?? '')
@@ -1500,14 +1502,14 @@ registerCommand({
 registerCommand({
   name: 'share',
   description: 'Export conversation (masked) and show the path for sharing',
-  handler: (args, ctx) => {
+  handler: async (args, ctx) => {
     if (ctx.history.length === 0) {
       return text('No conversation to share.')
     }
     const { maskSecrets } =
-      require('../utils/secretScanner.js') as typeof import('../utils/secretScanner.js')
+      await import('../utils/secretScanner.js')
     const { exportSessionToFile, defaultFilename } =
-      require('../utils/sessionExport.js') as typeof import('../utils/sessionExport.js')
+      await import('../utils/sessionExport.js')
 
     const format = args.trim() || 'markdown'
     const maskedHistory = ctx.history.map(msg => {
@@ -1537,8 +1539,8 @@ registerCommand({
 registerCommand({
   name: 'notify',
   description: 'Test desktop notification. Usage: /notify [title] [body]',
-  handler: (args) => {
-    const { notify } = require('../utils/notifier.js') as typeof import('../utils/notifier.js')
+  handler: async (args) => {
+    const { notify } = await import('../utils/notifier.js')
     const parts = args.trim().split(/\s+/)
     const title = parts[0] ?? 'ovolv999'
     const body = parts.slice(1).join(' ') || 'Notification test'
@@ -1627,14 +1629,14 @@ registerCommand({
   name: 'schedule',
   aliases: ['cron'],
   description: 'Manage scheduled tasks. Usage: /schedule [list|create <cron> <prompt>|remove <id>|enable <id>|disable <id>]',
-  handler: (args, ctx) => {
+  handler: async (args, ctx) => {
     const parts = args.trim().split(/\s+/)
     const subcommand = parts[0] ?? 'list'
 
     const {
       loadSchedules, addTask, removeTask, enableTask, disableTask,
       createTask, formatTaskList, parseCron, parseEveryDuration,
-    } = require('../core/cron.js') as typeof import('../core/cron.js')
+    } = await import('../core/cron.js')
 
     if (subcommand === 'list' || !subcommand) {
       const store = loadSchedules(ctx.cwd)
@@ -1649,7 +1651,7 @@ registerCommand({
       if (!cronMatch) {
         return text('Usage: /schedule create <cron> <prompt>\nExample: /schedule create "0 9 * * 1-5" "run tests"')
       }
-      let cronExpr = cronMatch[1].replace(/^"(.*)"$/, '$1')
+      const cronExpr = cronMatch[1].replace(/^"(.*)"$/, '$1')
       const prompt = cronMatch[2].replace(/^["'](.*)["']$/, '$1')
 
       // Validate cron
@@ -1697,9 +1699,9 @@ registerCommand({
 registerCommand({
   name: 'stats',
   description: 'Show comprehensive session statistics (messages, tokens, tools, files)',
-  handler: (_args, ctx) => {
+  handler: async (_args, ctx) => {
     const { analyzeSession, formatSessionStats } =
-      require('../core/sessionStats.js') as typeof import('../core/sessionStats.js')
+      await import('../core/sessionStats.js')
     const stats = analyzeSession(ctx.history)
     return text(formatSessionStats(stats))
   },
@@ -1709,9 +1711,9 @@ registerCommand({
   name: 'diff-browser',
   aliases: ['difftree'],
   description: 'Browse changes as a structured file list. Usage: /diff-browser [n]',
-  handler: (args, ctx) => {
+  handler: async (args, ctx) => {
     const { getGitDiff, parseGitDiff, formatFileList, formatFileDetail } =
-      require('../ui/diffBrowser.js') as typeof import('../ui/diffBrowser.js')
+      await import('../ui/diffBrowser.js')
 
     const n = parseInt(args.trim(), 10)
     const diffOutput = getGitDiff(ctx.cwd)
@@ -1728,15 +1730,15 @@ registerCommand({
   name: 'knowledge',
   aliases: ['kb'],
   description: 'Project knowledge base. Usage: /knowledge [add <cat> <key> <val> | search <q> | remove <key> | list | stats]',
-  handler: (args, ctx) => {
+  handler: async (args, ctx) => {
     const parts = args.trim().split(/\s+/)
     const sub = parts[0] ?? 'list'
 
     const {
       loadKnowledge, addEntry, removeEntry, searchKnowledge,
       formatKnowledgeList, formatSearchResults, formatStats,
-      extractKnowledgeFromText,
-    } = require('../core/knowledgeBase.js') as typeof import('../core/knowledgeBase.js')
+      extractKnowledgeFromText, CATEGORY_ICONS,
+    } = await import('../core/knowledgeBase.js')
 
     if (sub === 'list' || !sub) {
       const store = loadKnowledge(ctx.cwd)
@@ -1749,13 +1751,13 @@ registerCommand({
     }
 
     if (sub === 'add') {
-      const category = parts[1] as any
+      const category = parts[1]
       const key = parts[2]
       const value = parts.slice(3).join(' ')
-      if (!category || !key || !value) {
+      if (!category || !Object.hasOwn(CATEGORY_ICONS, category) || !key || !value) {
         return text('Usage: /knowledge add <category> <key> <value>\nCategories: file, pattern, decision, gotcha, dependency, convention, architecture, general')
       }
-      const entry = addEntry(ctx.cwd, category, key, value)
+      const entry = addEntry(ctx.cwd, category as KnowledgeCategory, key, value)
       return text(`✓ ${entry.category} entry saved: ${entry.key}`)
     }
 
@@ -1792,9 +1794,9 @@ registerCommand({
   name: 'onboard',
   aliases: ['overview', 'project-info'],
   description: 'Generate a comprehensive project overview (structure, deps, tests, stats)',
-  handler: (_args, ctx) => {
+  handler: async (_args, ctx) => {
     const { analyzeProject, formatOverview } =
-      require('../core/onboarding.js') as typeof import('../core/onboarding.js')
+      await import('../core/onboarding.js')
     const overview = analyzeProject(ctx.cwd)
     return text(formatOverview(overview))
   },
@@ -1804,11 +1806,11 @@ registerCommand({
   name: 'cmd-history',
   aliases: ['hist', 'cmdhist'],
   description: 'Search past commands/prompts. Usage: /cmd-history [search <query> | stats | clear]',
-  handler: (args, ctx) => {
+  handler: async (args, ctx) => {
     const {
       getProjectHistoryPath, loadHistory, searchHistory,
       getHistoryStats, formatHistoryResults, formatHistoryStats, clearHistory,
-    } = require('../core/commandHistory.js') as typeof import('../core/commandHistory.js')
+    } = await import('../core/commandHistory.js')
 
     const path = getProjectHistoryPath(ctx.cwd)
     const parts = args.trim().split(/\s+/)
@@ -1845,13 +1847,13 @@ registerCommand({
   name: 'bookmark',
   aliases: ['bm', 'mark'],
   description: 'Manage file/line bookmarks. Usage: /bookmark [add|list|search|remove|visit|stats|recent|file <path>]',
-  handler: (args, ctx) => {
+  handler: async (args, ctx) => {
     const {
-      addBookmark, removeBookmark, getBookmark, visitBookmark,
+      addBookmark, removeBookmark, visitBookmark,
       getBookmarksByFile, searchBookmarks, getRecentBookmarks,
       formatBookmarkList, formatBookmarkDetail, formatBookmarkStats,
       loadBookmarks,
-    } = require('../core/bookmarks.js') as typeof import('../core/bookmarks.js')
+    } = await import('../core/bookmarks.js')
 
     const parts = args.trim().split(/\s+/)
     const sub = parts[0] ?? 'list'
@@ -1927,13 +1929,13 @@ registerCommand({
 registerCommand({
   name: 'budget',
   description: 'Manage token/cost budgets. Usage: /budget [set|list|remove|reset|check|preset <name>|record]',
-  handler: (args, ctx) => {
+  handler: async (args, ctx) => {
     const {
-      setBudget, removeBudget, listBudgets, recordUsage, getUsage,
+      setBudget, removeBudget, listBudgets, recordUsage,
       checkBudget, checkAllBudgets, resetUsage, getBudgetSnapshot,
       formatBudgetUsage, formatBudgetSummary, formatBudgetSnapshot,
       applyPreset, BUDGET_PRESETS,
-    } = require('../core/budget.js') as typeof import('../core/budget.js')
+    } = await import('../core/budget.js')
 
     const parts = args.trim().split(/\s+/)
     const sub = parts[0] ?? 'list'
@@ -1950,7 +1952,7 @@ registerCommand({
       const validPeriods = ['session', 'daily', 'weekly', 'monthly']
       if (!validTypes.includes(type)) return text(`Type must be one of: ${validTypes.join(', ')}`)
       if (!validPeriods.includes(period)) return text(`Period must be one of: ${validPeriods.join(', ')}`)
-      const bm = setBudget(ctx.cwd, { name, type: type as any, period: period as any, limit })
+      const bm = setBudget(ctx.cwd, { name, type: type as BudgetType, period: period as BudgetPeriod, limit })
       return text(`✓ Budget set: ${bm.name} (${bm.type}/${bm.period}) limit=${bm.limit}`)
     }
 
@@ -2025,12 +2027,12 @@ registerCommand({
   name: 'timer',
   aliases: ['timers', 'tm'],
   description: 'Track task time. Usage: /timer [start <name> | stop <id> | pause <id> | resume <id> | list | stats | remove <id>]',
-  handler: (args, ctx) => {
+  handler: async (args, ctx) => {
     const {
       startTimer, stopTimer, pauseTimer, resumeTimer, removeTimer,
       getAllTimers, getRunningTimers, getTimerStats,
       formatTimer, formatTimerList, formatTimerStats,
-    } = require('../core/taskTimer.js') as typeof import('../core/taskTimer.js')
+    } = await import('../core/taskTimer.js')
 
     const parts = args.trim().split(/\s+/)
     const sub = parts[0] ?? 'list'
@@ -2095,12 +2097,12 @@ registerCommand({
   name: 'snapshot',
   aliases: ['snap', 'ws'],
   description: 'Manage workspace snapshots. Usage: /snapshot [save|list|show|remove|add-file|add-todo|diff]',
-  handler: (args, ctx) => {
+  handler: async (args, ctx) => {
     const {
       createSnapshot, removeSnapshot, getSnapshot, listSnapshots,
-      updateSnapshot, addFileToSnapshot, addTodoToSnapshot, toggleTodoInSnapshot,
+      addFileToSnapshot, addTodoToSnapshot, toggleTodoInSnapshot,
       diffSnapshots, formatSnapshot, formatSnapshotList, formatSnapshotDiff,
-    } = require('../core/workspace.js') as typeof import('../core/workspace.js')
+    } = await import('../core/workspace.js')
 
     const parts = args.trim().split(/\s+/)
     const sub = parts[0] ?? 'list'
@@ -2174,13 +2176,13 @@ registerCommand({
   name: 'snippet',
   aliases: ['snip', 'code'],
   description: 'Manage code snippets. Usage: /snippet [add|list|use|search|show|remove|fav|stats]',
-  handler: (args, ctx) => {
+  handler: async (args, ctx) => {
     const {
       addSnippet, removeSnippet, getSnippet, listSnippets,
       useSnippet, toggleFavorite, searchSnippets,
       getCategories, getSnippetStats,
       formatSnippet, formatSnippetList, formatSnippetStats,
-    } = require('../core/snippets.js') as typeof import('../core/snippets.js')
+    } = await import('../core/snippets.js')
 
     const parts = args.trim().split(/\s+/)
     const sub = parts[0] ?? 'list'
@@ -2247,7 +2249,7 @@ registerCommand({
     }
 
     if (sub === 'list' || !sub) {
-      const filter: any = {}
+      const filter: { favoriteOnly?: boolean } = {}
       if (parts[1] === '--fav' || parts[1] === '-f') filter.favoriteOnly = true
       return text(formatSnippetList(listSnippets(ctx.cwd, filter)))
     }
@@ -2260,14 +2262,14 @@ registerCommand({
   name: 'profile',
   aliases: ['profiles', 'prof'],
   description: 'Manage config profiles. Usage: /profile [create|list|switch|show|remove|clone|export|import|config]',
-  handler: (args, ctx) => {
+  handler: async (args, ctx) => {
     const {
       createProfile, removeProfile, getProfile, getActiveProfile,
       setActiveProfile, listProfiles, cloneProfile,
       exportProfile, importProfile, getEffectiveConfig,
       initializeBuiltinProfiles,
       formatProfile, formatProfileList, formatEffectiveConfig,
-    } = require('../core/profiles.js') as typeof import('../core/profiles.js')
+    } = await import('../core/profiles.js')
 
     const parts = args.trim().split(/\s+/)
     const sub = parts[0] ?? 'list'
@@ -2334,7 +2336,7 @@ registerCommand({
     }
 
     if (sub === 'list' || !sub) {
-      const store = loadProfilesRaw(ctx.cwd)
+      const store = await loadProfilesRaw(ctx.cwd)
       return text(formatProfileList(listProfiles(ctx.cwd), store.activeProfile))
     }
 
@@ -2346,12 +2348,12 @@ registerCommand({
   name: 'metrics',
   aliases: ['complexity', 'health'],
   description: 'Analyze code metrics and health. Usage: /metrics [file <path> | project <paths...> | health <path>]',
-  handler: (args, ctx) => {
+  handler: async (args, ctx) => {
     const {
       analyzeFile, analyzeProjectFiles,
       formatFileMetrics, formatProjectMetrics,
       assessHealth, formatHealthAssessment,
-    } = require('../core/codeMetrics.js') as typeof import('../core/codeMetrics.js')
+    } = await import('../core/codeMetrics.js')
 
     const parts = args.trim().split(/\s+/)
     const sub = parts[0] ?? 'help'
@@ -2359,7 +2361,7 @@ registerCommand({
     if (sub === 'file') {
       const filePath = parts[1]
       if (!filePath) return text('Usage: /metrics file <path>')
-      const resolved = require('path').resolve(ctx.cwd, filePath)
+      const resolved = resolve(ctx.cwd, filePath)
       const m = analyzeFile(resolved)
       if (!m) return text('File not found')
       return text(formatFileMetrics(m))
@@ -2368,14 +2370,14 @@ registerCommand({
     if (sub === 'health') {
       const filePath = parts[1]
       if (!filePath) return text('Usage: /metrics health <path>')
-      const resolved = require('path').resolve(ctx.cwd, filePath)
+      const resolved = resolve(ctx.cwd, filePath)
       const m = analyzeFile(resolved)
       if (!m) return text('File not found')
       return text(formatHealthAssessment(assessHealth(m)))
     }
 
     if (sub === 'project') {
-      const paths = parts.slice(1).map((p: string) => require('path').resolve(ctx.cwd, p))
+      const paths = parts.slice(1).map((p: string) => resolve(ctx.cwd, p))
       if (paths.length === 0) return text('Usage: /metrics project <file1> [file2...]')
       const metrics = analyzeProjectFiles(paths)
       return text(formatProjectMetrics(metrics))
@@ -2390,8 +2392,8 @@ registerCommand({
 registerCommand({
   name: 'hooks',
   description: 'Manage lifecycle hooks. Usage: /hooks [list | add <event> <matcher> <command> | remove <event> <index> | clear <event> | test <event> <tool>]',
-  handler: (args, ctx) => {
-    const hooksModule = require('../core/hooks.js') as typeof import('../core/hooks.js')
+  handler: async (args, ctx) => {
+    const hooksModule = await import('../core/hooks.js')
     const { loadHooksConfig, saveHooksConfig, formatHooksConfig, runHook } = hooksModule
 
     const parts = args.trim().split(/\s+/)
@@ -2451,10 +2453,10 @@ registerCommand({
   name: 'diagnostics',
   aliases: ['diag', 'lint', 'typecheck'],
   description: 'Run code diagnostics (tsc/ESLint/Biome/Ruff). Usage: /diagnostics [checker] [file <path>] [--clear]',
-  handler: (args, ctx) => {
+  handler: async (args, ctx) => {
     const {
       runDiagnostics, filterDiagnostics, formatDiagnosticsResult, clearCache,
-    } = require('../core/diagnostics.js') as typeof import('../core/diagnostics.js')
+    } = await import('../core/diagnostics.js')
 
     const parts = args.trim().split(/\s+/)
     const clearFlag = parts.includes('--clear') || parts.includes('--fresh')
@@ -2488,11 +2490,11 @@ registerCommand({
   name: 'goal',
   aliases: ['goals'],
   description: 'Manage autonomous goals. Usage: /goal [list | create <objective> | show <id> | complete <id> | fail <id> <reason>]',
-  handler: (args, ctx) => {
+  handler: async (args, _ctx) => {
     const {
       createGoal, getGoal, listGoals, startGoal, completeGoal, failGoal, pauseGoal, resumeGoal,
       addSubtask, updateSubtask, getProgress, formatGoal, formatGoalList, deleteGoal,
-    } = require('../core/goals.js') as typeof import('../core/goals.js')
+    } = await import('../core/goals.js')
 
     const parts = args.trim().split(/\s+/)
     const sub = parts[0] ?? 'list'
@@ -2583,9 +2585,9 @@ registerCommand({
   name: 'transcript',
   aliases: ['export-session'],
   description: 'Export session transcript. Usage: /transcript [markdown|json|text] [stats]',
-  handler: (args, ctx) => {
-    const transcriptModule = require('../core/sessionTranscript.js') as typeof import('../core/sessionTranscript.js')
-    const { buildTranscript, formatTranscript, exportTranscript, getTranscriptStats, formatStats } = transcriptModule
+  handler: async (args, ctx) => {
+    const transcriptModule = await import('../core/sessionTranscript.js')
+    const { buildTranscript, exportTranscript, getTranscriptStats, formatStats } = transcriptModule
 
     const parts = args.trim().split(/\s+/)
     const formatArg = parts[0] ?? 'markdown'
@@ -2624,10 +2626,10 @@ registerCommand({
   name: 'effort',
   aliases: ['thinking'],
   description: 'Set reasoning effort level. Usage: /effort [minimal|low|medium|high|maximum]',
-  handler: (args) => {
+  handler: async (args) => {
     const {
-      setEffort, cycleEffort, getCurrentEffort, getEffortPrompt, formatEffort, formatEffortList,
-    } = require('../core/effort.js') as typeof import('../core/effort.js')
+      setEffort, cycleEffort, getEffortPrompt, formatEffort, formatEffortList,
+    } = await import('../core/effort.js')
 
     const parts = args.trim().split(/\s+/)
     const level = parts[0]
@@ -2637,7 +2639,7 @@ registerCommand({
     }
 
     if (level === 'cycle' || level === 'next') {
-      const next = cycleEffort()
+      cycleEffort()
       return text(`Effort: ${formatEffort()}\n\nPrompt: ${getEffortPrompt()}`)
     }
 
@@ -2657,8 +2659,8 @@ registerCommand({
   name: 'team-memory',
   aliases: ['teammem'],
   description: 'Manage team memory sync. Usage: /team-memory [init <url> | status | sync | files | add <file> | enable-auto | disable-auto]',
-  handler: (args, ctx) => {
-    const teamMemModule = require('../core/teamMemory.js') as typeof import('../core/teamMemory.js')
+  handler: async (args, ctx) => {
+    const teamMemModule = await import('../core/teamMemory.js')
     const {
       loadTeamConfig, saveTeamConfig, syncTeamMemory,
       findMemoryFiles, formatSyncResult, formatTeamMemoryStatus,
@@ -2694,7 +2696,7 @@ registerCommand({
       const file = parts[1]
       if (!file) return text('Usage: /team-memory add <file-path>')
       const config = loadTeamConfig() ?? { remoteUrl: '', files: [] }
-      const resolved = require('path').resolve(ctx.cwd, file)
+      const resolved = resolve(ctx.cwd, file)
       if (!config.files.includes(resolved)) {
         config.files.push(resolved)
         saveTeamConfig(config)
@@ -2712,8 +2714,8 @@ registerCommand({
   name: 'vault',
   aliases: ['secrets', 'keychain'],
   description: 'Manage local vault. Usage: /vault [status | set <key> | get <key> | delete <key> | list]',
-  handler: (args) => {
-    const keychainModule = require('../utils/keychain.js') as typeof import('../utils/keychain.js')
+  handler: async (args) => {
+    const keychainModule = await import('../utils/keychain.js')
     const { setSecret, getSecret, deleteSecret, listSecrets, getVaultMetadata, formatVaultStatus, getPassphraseFromEnv } = keychainModule
 
     const parts = args.trim().split(/\s+/)
@@ -2730,7 +2732,11 @@ registerCommand({
       const pass = getPassphraseFromEnv()
       process.stdout.write(`Enter value for ${key}: `)
       try {
-        const value = require('readline-sync').question('', { hideEchoBack: true }) as string
+        const moduleName = 'readline-sync'
+        const inputModule = await import(moduleName) as { question?: (prompt: string, options: { hideEchoBack: boolean }) => unknown }
+        if (typeof inputModule.question !== 'function') throw new Error('Secret input unavailable')
+        const value = inputModule.question('', { hideEchoBack: true })
+        if (typeof value !== 'string') throw new Error('Secret input must be text')
         setSecret(key, value, pass ?? undefined)
         return text(`Stored: ${key}`)
       } catch {
@@ -2769,11 +2775,11 @@ registerCommand({
 registerCommand({
   name: 'daemon',
   description: 'Manage daemon mode. Usage: /daemon [status | start | stop | workers]',
-  handler: () => {
-    const daemonModule = require('../core/daemon.js') as typeof import('../core/daemon.js')
-    const { isDaemonRunning, DaemonClient, getDaemonSocketPath, formatDaemonInfo } = daemonModule
+  handler: async () => {
+    const daemonModule = await import('../core/daemon.js')
+    const { isDaemonRunning, getDaemonSocketPath } = daemonModule
 
-    return text('Daemon control requires running ovolv999 --daemon. Socket: ' + getDaemonSocketPath() + '\nRunning: ' + isDaemonRunning())
+    return text('Daemon control requires running ovolv999 --daemon. Socket: ' + getDaemonSocketPath() + '\nRunning: ' + await isDaemonRunning())
   },
 })
 
@@ -2783,8 +2789,8 @@ registerCommand({
   name: 'plugins',
   aliases: ['plugin'],
   description: 'Manage plugins. Usage: /plugins [list | enable <name> | disable <name> | info <name> | install <source> | uninstall <name> | rescan]',
-  handler: (args) => {
-    const pluginMod = require('../core/pluginManager.js') as typeof import('../core/pluginManager.js')
+  handler: async (args) => {
+    const pluginMod = await import('../core/pluginManager.js')
     const {
       loadPlugins, enablePlugin, disablePlugin, getPlugin,
       listPlugins, installPlugin, uninstallPlugin,
@@ -2848,10 +2854,10 @@ registerCommand({
   name: 'dream',
   aliases: ['learn', 'patterns'],
   description: 'Auto-dream and skill learning. Usage: /dream [stats | patterns | log | knowledge | skills | insight <text>]',
-  handler: (args) => {
-    const dreamMod = require('../core/autoDream.js') as typeof import('../core/autoDream.js')
+  handler: async (args) => {
+    const dreamMod = await import('../core/autoDream.js')
     const {
-      getPatterns, getTopPatterns, getDreamLog, getKnowledge, getExtractedSkills,
+      getTopPatterns, getDreamLog, getKnowledge, getExtractedSkills,
       dream, formatPatterns, formatDreamLog, formatDreamStats,
     } = dreamMod
 
@@ -2901,8 +2907,8 @@ registerCommand({
   name: 'messages',
   aliases: ['msg'],
   description: 'Inter-agent messaging. Usage: /messages [agents | send <to> <msg> | list | stats]',
-  handler: (args) => {
-    const msgMod = require('../core/messageBus.js') as typeof import('../core/messageBus.js')
+  handler: async (args) => {
+    const msgMod = await import('../core/messageBus.js')
     const { getMessageBus, formatAgentList, formatMessageList, formatBusStats } = msgMod
 
     const parts = args.trim().split(/\s+/)
@@ -2925,8 +2931,9 @@ registerCommand({
   },
 })
 
-function loadProfilesRaw(cwd: string) {
-  return require('../core/profiles.js').loadProfiles(cwd)
+async function loadProfilesRaw(cwd: string) {
+  const { loadProfiles } = await import('../core/profiles.js')
+  return loadProfiles(cwd)
 }
 
 // ── /sandbox ────────────────────────────────────────────────────────────────
@@ -2934,8 +2941,8 @@ function loadProfilesRaw(cwd: string) {
 registerCommand({
   name: 'sandbox',
   description: 'Sandbox configuration. Usage: /sandbox [status | on | off | strict | standard | add-writable <path> | deny <path>]',
-  handler: (args) => {
-    const sandbox = require('../core/sandbox.js') as typeof import('../core/sandbox.js')
+  handler: async (args) => {
+    const sandbox = await import('../core/sandbox.js')
     const parts = args.trim().split(/\s+/)
     const sub = parts[0] ?? 'status'
 
@@ -2950,7 +2957,7 @@ registerCommand({
     }
 
     if (sub === 'off' || sub === 'disable') {
-      const cfg = sandbox.updateConfig({ enabled: false })
+      sandbox.updateConfig({ enabled: false })
       sandbox.invalidateProfileCache()
       return text('Sandbox disabled.')
     }
@@ -2996,8 +3003,8 @@ registerCommand({
 registerCommand({
   name: 'sync',
   description: 'Settings sync. Usage: /sync [status | push-file <path> | pull-file <path> [passphrase] | push-git <repo> | pull-git <repo> [passphrase]]',
-  handler: (args) => {
-    const sync = require('../core/settingsSync.js') as typeof import('../core/settingsSync.js')
+  handler: async (args) => {
+    const sync = await import('../core/settingsSync.js')
     const parts = args.trim().split(/\s+/)
     const sub = parts[0] ?? 'status'
 
@@ -3046,8 +3053,8 @@ registerCommand({
 registerCommand({
   name: 'telemetry',
   description: 'Usage analytics. Usage: /telemetry [stats | on | off | export | clear]',
-  handler: (args) => {
-    const tel = require('../core/telemetry.js') as typeof import('../core/telemetry.js')
+  handler: async (args) => {
+    const tel = await import('../core/telemetry.js')
     const parts = args.trim().split(/\s+/)
     const sub = parts[0] ?? 'stats'
 
@@ -3085,8 +3092,8 @@ registerCommand({
   name: 'magic-docs',
   aliases: ['mdocs'],
   description: 'Extract project documentation. Usage: /magic-docs [write | <section>]',
-  handler: (args) => {
-    const md = require('../core/magicDocs.js') as typeof import('../core/magicDocs.js')
+  handler: async (args) => {
+    const md = await import('../core/magicDocs.js')
     const parts = args.trim().split(/\s+/)
     const sub = parts[0] ?? 'preview'
 
@@ -3117,8 +3124,8 @@ registerCommand({
 registerCommand({
   name: 'ssh',
   description: 'SSH remote profiles. Usage: /ssh [list | add <name> <host> [user] [port] | remove <name> | test <name> | run <name> <command>]',
-  handler: (args) => {
-    const ssh = require('../core/sshRemote.js') as typeof import('../core/sshRemote.js')
+  handler: async (args) => {
+    const ssh = await import('../core/sshRemote.js')
     const parts = args.trim().split(/\s+/)
     const sub = parts[0] ?? 'list'
 
@@ -3175,7 +3182,7 @@ registerCommand({
   name: 'lsp',
   description: 'Language server status. Usage: /lsp [status | symbols <query>]',
   handler: async (args) => {
-    const lsp = require('../core/lspClient.js') as typeof import('../core/lspClient.js')
+    const lsp = await import('../core/lspClient.js')
     const parts = args.trim().split(/\s+/)
     const sub = parts[0] ?? 'status'
 
@@ -3213,8 +3220,8 @@ registerCommand({
 registerCommand({
   name: 'update',
   description: 'Check for ovolv999 updates. Usage: /update [check | ignore <version> | install [beta]]',
-  handler: (args) => {
-    const upd = require('../utils/autoUpdater.js') as typeof import('../utils/autoUpdater.js')
+  handler: async (args) => {
+    const upd = await import('../utils/autoUpdater.js')
     const parts = args.trim().split(/\s+/)
     const sub = parts[0] ?? 'check'
 
@@ -3248,8 +3255,8 @@ registerCommand({
 registerCommand({
   name: 'cache',
   description: 'Prompt cache statistics. Usage: /cache [stats | reset | health]',
-  handler: (args) => {
-    const cs = require('../utils/cacheStats.js') as typeof import('../utils/cacheStats.js')
+  handler: async (args) => {
+    const cs = await import('../utils/cacheStats.js')
     const parts = args.trim().split(/\s+/)
     const sub = parts[0] ?? 'stats'
 
@@ -3277,8 +3284,8 @@ registerCommand({
 registerCommand({
   name: 'health',
   description: 'System health checks. Usage: /health',
-  handler: () => {
-    const sh = require('../utils/systemHealth.js') as typeof import('../utils/systemHealth.js')
+  handler: async () => {
+    const sh = await import('../utils/systemHealth.js')
     const report = sh.runSystemHealthChecks()
     return text(sh.formatSystemHealth(report))
   },
@@ -3289,8 +3296,8 @@ registerCommand({
 registerCommand({
   name: 'ide',
   description: 'IDE detection info. Usage: /ide',
-  handler: () => {
-    const ide = require('../utils/ide.js') as typeof import('../utils/ide.js')
+  handler: async () => {
+    const ide = await import('../utils/ide.js')
     const info = ide.detectIDE()
     if (!info) return text('No IDE detected (running in a plain terminal).')
     const lines = [ide.formatIDEInfo(info), '']

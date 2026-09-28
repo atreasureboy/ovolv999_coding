@@ -3,15 +3,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import {
-  detectIDE,
-  convertPathForIDE,
-  getExtensionRecommendations,
-  formatIDEInfo,
-  listAllKnownIDEs,
-  readVSCodeLockfile,
-  type IDEType,
-} from '../src/utils/ide.js'
+import { detectIDE, convertPathForIDE, getExtensionRecommendations, formatIDEInfo, listAllKnownIDEs, readVSCodeLockfile } from '../src/utils/ide.js'
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'

@@ -7,8 +7,7 @@
  */
 
 import type { OpenAIMessage, ToolCall } from '../core/types.js'
-import { existsSync, readFileSync } from 'fs'
-import { join, extname } from 'path'
+import { extname } from 'path'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -84,7 +83,8 @@ function getMessageContent(msg: OpenAIMessage): string {
 
 function tryParseToolArgs(args: string): Record<string, unknown> {
   try {
-    return JSON.parse(args)
+    const parsed: unknown = JSON.parse(args)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {}
   } catch {
     return {}
   }

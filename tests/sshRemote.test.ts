@@ -7,14 +7,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest'
-import {
-  loadProfiles, saveProfiles, getProfile, addProfile, removeProfile,
-  buildSshArgs, testConnection,
-  formatProfile, formatProfileList, formatConnectionTest, formatExecResult,
-  type SshProfile,
-  type SshExecResult,
-  type SshConnectionTest,
-} from '../src/core/sshRemote.js'
+import { loadProfiles, getProfile, addProfile, removeProfile, buildSshArgs, testConnection, formatProfile, formatProfileList, formatConnectionTest, formatExecResult, type SshProfile, type SshExecResult, type SshConnectionTest } from '../src/core/sshRemote.js'
 import { existsSync, rmSync, mkdtempSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'

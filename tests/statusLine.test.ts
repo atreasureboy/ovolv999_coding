@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { stripAnsi } from '../src/utils/ansi.js'
+import { describe, it, expect } from 'vitest'
 import {
   renderStatusLine, renderMinimalStatusLine, renderFullStatusLine,
   formatTokens, formatDuration,
@@ -107,7 +108,7 @@ describe('StatusLine', () => {
         maxWidth: 20,
       })
       // Should be truncated to fit
-      const stripped = result.replace(/\x1b\[[0-9;]*m/g, '')
+      const stripped = stripAnsi(result)
       expect(stripped.length).toBeLessThanOrEqual(100) // Allow some slack for ANSI
     })
 

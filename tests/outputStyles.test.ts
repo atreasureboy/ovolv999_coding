@@ -2,17 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import {
-  BUILT_IN_STYLES,
-  loadOutputStyles,
-  validateStyle,
-  getActiveStyle,
-  setActiveStyle,
-  getStyleById,
-  listStyleIds,
-  getDirective,
-  type OutputStyle,
-} from '../src/core/outputStyles.js'
+import { BUILT_IN_STYLES, loadOutputStyles, validateStyle, getActiveStyle, setActiveStyle, getStyleById, listStyleIds, getDirective } from '../src/core/outputStyles.js'
 
 describe('BUILT_IN_STYLES', () => {
   it('has default style', () => {

@@ -20,8 +20,8 @@
  */
 
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'fs'
-import { join, relative, extname, basename, dirname } from 'path'
-import { execSync } from 'child_process'
+import { join, relative, extname, basename, dirname, isAbsolute } from 'path'
+import { globSync } from 'glob'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -71,29 +71,16 @@ const DEFAULT_EXCLUDE = [
 ]
 
 export function discoverFiles(rootDir: string, include?: string[], maxFiles = 5000): string[] {
-  const patterns = include ?? DEFAULT_INCLUDE
-  const files: string[] = []
-  try {
-    const excludeArg = DEFAULT_EXCLUDE.map((d) => `--not-path '${d}/**'`).join(' ')
-    for (const pattern of patterns) {
-      try {
-        const ext = pattern.replace('**/*.', '')
-        const out = execSync(
-          `find ${shellQuote(rootDir)} -type f -name '*.${ext}' 2>/dev/null | head -n ${maxFiles}`,
-          { encoding: 'utf8', timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'] },
-        )
-        for (const line of out.trim().split('\n')) {
-          if (line && !DEFAULT_EXCLUDE.some((exc) => line.includes(`/${exc}/`))) {
-            files.push(line)
-          }
-        }
-      } catch { /* find failed for this pattern */ }
-    }
-  } catch { /* fall back to empty */ }
-
-  // Deduplicate + sort
-  const unique = [...new Set(files)].sort()
-  return unique.slice(0, maxFiles)
+  if (maxFiles <= 0) return []
+  const files = globSync(include ?? DEFAULT_INCLUDE, {
+    cwd: rootDir,
+    absolute: true,
+    nodir: true,
+    follow: false,
+    dot: true,
+    ignore: DEFAULT_EXCLUDE.map(directory => `**/${directory}/**`),
+  })
+  return [...new Set(files)].sort().slice(0, maxFiles)
 }
 
 // ── Extractors ──────────────────────────────────────────────────────────────
@@ -108,7 +95,7 @@ function readFiles(rootDir: string, files: string[]): FileContent[] {
   const contents: FileContent[] = []
   for (const file of files) {
     try {
-      const full = file.startsWith('/') ? file : join(rootDir, file)
+      const full = isAbsolute(file) ? file : join(rootDir, file)
       const content = readFileSync(full, 'utf8')
       contents.push({ path: relative(rootDir, full), content, lines: content.split('\n').length })
     } catch { /* skip unreadable */ }
@@ -376,7 +363,7 @@ function extractPatterns(files: FileContent[]): DocSection {
 
 // ── Dependencies Extractor ──────────────────────────────────────────────────
 
-function extractDependencies(files: FileContent[], rootDir: string): DocSection {
+function extractDependencies(files: FileContent[], _rootDir: string): DocSection {
   const importMap: Record<string, Set<string>> = {}
 
   for (const file of files) {
@@ -541,10 +528,4 @@ export function formatResult(result: MagicDocsResult): string {
 
 export function formatSection(section: DocSection): string {
   return `### ${section.title}\n${section.content}`
-}
-
-function shellQuote(s: string): string {
-  if (s === '') return "''"
-  if (/^[A-Za-z0-9_:.@/=-]+$/.test(s)) return s
-  return `'${s.replace(/'/g, "'\\''")}'`
 }

@@ -8,7 +8,7 @@
  * .ovolv999/command-history.json (project-level).
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { join, resolve } from 'path'
 import { homedir } from 'os'
 
@@ -156,7 +156,7 @@ export function searchHistory(store: HistoryStore, query: string, options: Searc
 
     const text = options.caseSensitive ? entry.text : entry.text.toLowerCase()
 
-    let score = 0
+    let score: number
 
     if (options.exact) {
       if (text === lowerQuery) score = 100

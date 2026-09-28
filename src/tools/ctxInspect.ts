@@ -11,7 +11,7 @@
 
 import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/types.js'
 import type { OpenAIMessage } from '../core/types.js'
-import { estimateTokens, estimateTextTokens } from '../core/compact.js'
+import { estimateTokens } from '../core/compact.js'
 import { estimateSnipSavings, snipCompact } from '../core/snipCompact.js'
 
 const TOP_N_DEFAULT = 10
@@ -54,7 +54,11 @@ Token breakdown by message role, top-N largest messages, and projected savings f
     return true
   }
 
-  async execute(input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+  execute(input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    return new Promise(resolve => resolve(this.executeSync(input, ctx)))
+  }
+
+  private executeSync(input: Record<string, unknown>, ctx: ToolContext): ToolResult {
     const action = (input.action as string) ?? 'summary'
     const topN = (input.top_n as number) ?? TOP_N_DEFAULT
     const messages = ctx.getMessages?.() ?? []

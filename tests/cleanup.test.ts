@@ -42,18 +42,18 @@ describe('registerCleanup', () => {
     exitSpy.mockRestore()
   })
 
-  it('calls onCleanup when cleanup function is invoked', () => {
+  it('calls onCleanup when cleanup function is invoked', async () => {
     const onCleanup = vi.fn()
     const cleanup = registerCleanup({ onCleanup })
-    cleanup()
+    await cleanup()
     expect(onCleanup).toHaveBeenCalledTimes(1)
   })
 
-  it('is idempotent — calling cleanup twice does not call onCleanup twice', () => {
+  it('is idempotent — calling cleanup twice does not call onCleanup twice', async () => {
     const onCleanup = vi.fn()
     const cleanup = registerCleanup({ onCleanup })
-    cleanup()
-    cleanup()
+    await cleanup()
+    await cleanup()
     expect(onCleanup).toHaveBeenCalledTimes(1)
   })
 
@@ -108,9 +108,9 @@ describe('registerCleanup', () => {
     expect(onCleanup).toHaveBeenCalledTimes(1)
   })
 
-  it('unregisters all handlers when cleanup function is called', () => {
+  it('unregisters all handlers when cleanup function is called', async () => {
     const cleanup = registerCleanup()
-    cleanup()
+    await cleanup()
     // After cleanup, handlers should be removed
     expect(registeredHandlers.has('SIGTERM')).toBe(false)
     expect(registeredHandlers.has('SIGHUP')).toBe(false)
@@ -132,21 +132,21 @@ describe('registerCleanup', () => {
     stderr.mockRestore()
   })
 
-  it('disables raw mode during cleanup', () => {
+  it('disables raw mode during cleanup', async () => {
     Object.defineProperty(process.stdin, 'isTTY', { value: true, writable: true })
     const setRawSpy = vi.fn()
     Object.defineProperty(process.stdin, 'setRawMode', { value: setRawSpy, writable: true, configurable: true })
     const cleanup = registerCleanup()
-    cleanup()
+    await cleanup()
     expect(setRawSpy).toHaveBeenCalledWith(false)
   })
 
-  it('does not call setRawMode when not TTY', () => {
+  it('does not call setRawMode when not TTY', async () => {
     Object.defineProperty(process.stdin, 'isTTY', { value: false, writable: true })
     const setRawSpy = vi.fn()
     Object.defineProperty(process.stdin, 'setRawMode', { value: setRawSpy, writable: true, configurable: true })
     const cleanup = registerCleanup()
-    cleanup()
+    await cleanup()
     expect(setRawSpy).not.toHaveBeenCalled()
   })
 })
