@@ -1,9 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { Daemon, DaemonClient, getDaemonSocketPath, getDaemonLogPath, formatDaemonInfo, formatWorkers, type WorkerEntry } from '../src/core/daemon.js'
+import { Daemon, DaemonClient, formatDaemonInfo, formatWorkers, resolveDaemonSocketPath, type WorkerEntry } from '../src/core/daemon.js'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { existsSync, unlinkSync } from 'fs'
 
 let testDir: string
 let socketPath: string
@@ -12,7 +11,7 @@ let daemon: Daemon
 
 beforeEach(async () => {
   testDir = mkdtempSync(join(tmpdir(), 'ovolv999-daemon-'))
-  socketPath = join(testDir, 'daemon.sock')
+  socketPath = resolveDaemonSocketPath(join(testDir, 'daemon.sock'))
   logPath = join(testDir, 'daemon.log')
   daemon = new Daemon(socketPath, logPath)
   await daemon.start()
@@ -25,8 +24,8 @@ afterEach(async () => {
 
 describe('daemon', () => {
   describe('Daemon', () => {
-    it('starts and creates socket', () => {
-      expect(existsSync(socketPath)).toBe(true)
+    it('starts and accepts its native socket or named pipe', async () => {
+      expect(await new DaemonClient(socketPath).ping()).toBe(true)
     })
 
     it('reports running status', () => {

@@ -19,11 +19,14 @@
  * persisted to sessionDir for large outputs.
  */
 
-import { spawn, type ChildProcess } from 'child_process'
+import { type ChildProcess } from 'child_process'
 import { randomUUID } from 'crypto'
 import { writeFileSync, mkdirSync, appendFileSync, renameSync } from 'fs'
 import { join } from 'path'
-import { execFileSync } from 'child_process'
+import { registerPhysicalResource, spawnManaged, type ExecutionProfile } from './executionBackend.js'
+import { captureProcessIdentity, inspectProcessIdentity, type ProcessIdentity } from './processIdentity.js'
+import { captureOwnedProcessTree, stopOwnedProcessTree, type OwnedProcessTree } from './processTree.js'
+import { StringDecoder } from 'string_decoder'
 
 function getShellInvocation(command: string): { shell: string; args: string[] } {
   if (process.platform === 'win32') {
@@ -32,27 +35,9 @@ function getShellInvocation(command: string): { shell: string; args: string[] } 
   return { shell: process.env.SHELL || '/bin/bash', args: ['-lc', command] }
 }
 
-function extractNodeEval(command: string): string | null {
-  const match = command.match(/^node\s+-e\s+(['"])([\s\S]*)\1\s*$/)
-  if (!match) return null
-  return match[2]
-}
-
-function emulateSimpleNodeEval(script: string): string | null {
-  const repeatMatch = script.match(/^process\.stdout\.write\((['"])([\s\S]?)\1\.repeat\((\d+)\)\)$/)
-  if (repeatMatch) {
-    return repeatMatch[2].repeat(Number(repeatMatch[3]))
-  }
-  const literalMatch = script.match(/^process\.stdout\.write\((['"])([\s\S]*)\1\)$/)
-  if (literalMatch) {
-    return literalMatch[2]
-  }
-  return null
-}
-
 // ── Types ───────────────────────────────────────────────────────────────────
 
-export type TaskStatus = 'running' | 'completed' | 'failed' | 'stopped'
+export type TaskStatus = 'running' | 'stopping' | 'stop_failed' | 'completed' | 'failed' | 'stopped'
 
 /** Public task info — safe to return to tools (no internal process handle). */
 export interface TaskInfo {
@@ -97,6 +82,9 @@ interface InternalTask {
    * the same timer slot rather than scheduling a new one.
    */
   killTimer: NodeJS.Timeout | null
+  identity: Promise<ProcessIdentity | null>
+  stopPromise?: Promise<void>
+  onSettled: () => void
 }
 
 // ── Constants ───────────────────────────────────────────────────────────────
@@ -123,101 +111,35 @@ const DEFAULT_SIGKILL_GRACE_MS = 3000     // grace period before SIGKILL escalat
  * the escalation timer should fire — they must check the InternalTask's
  * `killTimer` slot and clear it from the close/error handler.
  */
-function killProcessTree(pid: number | undefined, signal: NodeJS.Signals): void {
-  if (pid === undefined || pid === null) return
-  if (process.platform === 'win32') {
-    // taskkill /T = terminate tree, /F = force, /PID = target pid.
-    // It always forces regardless of signal — Windows has no graceful
-    // kill primitive in this path. We still accept SIGTERM/SIGKILL for
-    // API symmetry with the POSIX branch.
-    try {
-      execFileSync('taskkill', ['/T', '/F', '/PID', String(pid)], {
-        stdio: 'ignore',
-        timeout: 2000,
-      })
-    } catch {
-      /* process already gone or taskkill unavailable */
-    }
-    return
-  }
-  try {
-    process.kill(-pid, signal)
-    return
-  } catch {
-    /* group may already be gone — fall through to single-PID kill */
-  }
-  try {
-    process.kill(pid, signal)
-  } catch {
-    /* already dead */
-  }
-}
-
-/**
- * Unified stop path used by both `stopTask()` and `dispose()`.
- *
- * State machine invariants:
- *  - `task.stopped` is set true BEFORE we signal — close/error handlers
- *    use it to decide whether to override status.
- *  - `task.process` stays pointing at `proc` for the duration of the
- *    grace window. The escalation callback uses `task.process === proc`
- *    to detect "same task, same process, still alive" and avoid hitting
- *    a reused PID after the original process has exited and been reaped.
- *  - The close/error handler is the only place that nulls `task.process`
- *    and clears `task.killTimer`. Once nulled, the escalation callback
- *    sees `task.process !== proc` and refuses to re-signal.
- *  - At most ONE escalation timer per task; a duplicate stop while a
- *    timer is armed is a no-op for the timer path.
- *
- * Returns true if a stop signal was actually sent (task was running
- * with a live process at entry). Duplicate calls return false.
- */
 function stopInternal(task: InternalTask, graceMs: number): boolean {
   const proc = task.process
-  if (!proc) return false
-  // Idempotency guard (FIRST): any phase of stop is a no-op once the
-  // task has been marked stopped. This covers:
-  //   - a previous stop() is still arming its escalation (killTimer set)
-  //   - the escalation timer has fired but the close handler hasn't run
-  //     yet (killTimer nulled, but task.process === proc && proc.exitCode
-  //     === null, so the process is mid-shutdown)
-  //   - the close handler is racing the user (killTimer nulled and
-  //     task.process is in the middle of being nulled)
-  // Without this, a second stop() can re-signal SIGTERM/SIGKILL after
-  // the timer fired — harmless for the original PID, dangerous if the
-  // PID has been recycled to an unrelated process.
-  if (task.stopped) return false
-  // Mark stopped first so any close/error event arriving during/after
-  // the signal doesn't override the status to 'failed'.
+  if (!proc || task.stopped) return false
   task.stopped = true
-  const pid = proc.pid
-  killProcessTree(pid, 'SIGTERM')
-  // Arm escalation. We deliberately DO NOT null `task.process` here —
-  // the close handler will null it (and clear this timer) when the
-  // process actually exits. Until then, the escalation callback can
-  // observe "still the same process, still alive" via task.process ===
-  // proc && proc.exitCode === null.
-  task.killTimer = setTimeout(() => {
-    // Clear the slot first so a late close/error can't try to clear
-    // an already-fired timer (and so we can detect re-entry below).
-    task.killTimer = null
-    // Only escalate if the task still owns the SAME process handle AND
-    // the process hasn't been observed to exit. proc.exitCode is set
-    // by Node when 'close' has fired — we can't rely on proc.killed
-    // (it only flips for ChildProcess.kill calls, not process.kill).
-    if (task.process !== proc) return
-    if (proc.exitCode !== null) return
-    killProcessTree(pid, 'SIGKILL')
-  }, graceMs)
-  task.killTimer.unref()
-  task.info.status = 'stopped'
-  task.info.endTime = Date.now()
-  task.info.durationMs = task.info.endTime - task.info.startTime
-  // NOTE: we intentionally leave task.process pointing at `proc` until
-  // the close handler runs. See state-machine invariants above.
+  task.info.status = 'stopping'
+  task.stopPromise = (async () => {
+    try {
+      const identity = await task.identity
+      if (!identity) {
+        if (proc.exitCode === null && proc.signalCode === null) throw new Error('Process birth identity unavailable; termination cannot be verified')
+      } else {
+        let tree: OwnedProcessTree
+        if (await inspectProcessIdentity(identity) === 'matching') tree = await captureOwnedProcessTree(identity)
+        else throw new Error('Task root exited before descendant discovery; resources require recovery')
+        const result = await stopOwnedProcessTree(tree, graceMs)
+        if (!result.stopped) throw new Error(result.reason ?? 'Process tree stop failed')
+      }
+      task.info.status = 'stopped'
+      task.info.exitCode = proc.exitCode
+      task.info.endTime = Date.now()
+      task.info.durationMs = task.info.endTime - task.info.startTime
+      task.onSettled()
+    } catch (error) {
+      task.info.status = 'stop_failed'
+      task.info.metadata.stopError = error instanceof Error ? error.message : String(error)
+    }
+  })()
   return true
 }
-
 // ── Manager ─────────────────────────────────────────────────────────────────
 
 /** Manager-level configuration knobs. Tests use these to make timing
@@ -283,12 +205,16 @@ export class BackgroundTaskManager {
       metadata?: Record<string, unknown>
       signal?: AbortSignal
       onSettled?: () => void
+      profile?: ExecutionProfile
     },
   ): string {
+    let releasePhysical!: () => void
+    const physical = new Promise<void>(resolve => { releasePhysical = resolve })
     let settled = false
     const onSettled = (): void => {
       if (settled) return
       settled = true
+      releasePhysical()
       options?.onSettled?.()
     }
     const id = `task_${randomUUID().slice(0, 8)}`
@@ -321,7 +247,8 @@ export class BackgroundTaskManager {
       }
     }
 
-    const task: InternalTask = { info, process: null, output: '', outputFile, stopped: false, totalOutputBytes: 0, currentFileBytes: 0, killTimer: null }
+    if (this.tasks.size >= 256) throw new Error('Background task capacity exceeded; clear completed tasks before starting more')
+    const task: InternalTask = { info, process: null, output: '', outputFile, stopped: false, totalOutputBytes: 0, currentFileBytes: 0, killTimer: null, identity: Promise.resolve(null), onSettled }
 
     /** Rotate the on-disk log: rename current → .log.1, recreate empty log.
      *  Only resets currentFileBytes if the rename actually succeeded —
@@ -393,31 +320,6 @@ export class BackgroundTaskManager {
       }
     }
 
-    const runNodeEvalFallback = (nodeEval: string): boolean => {
-      const output = emulateSimpleNodeEval(nodeEval)
-      if (output !== null) {
-        appendOutput(output)
-        info.exitCode = 0
-        info.status = 'completed'
-      } else {
-        appendOutput('\n[Node eval fallback error: unsupported node -e script in restricted spawn environment]\n')
-        info.exitCode = -1
-        info.status = 'failed'
-      }
-      info.endTime = Date.now()
-      info.durationMs = info.endTime - info.startTime
-      task.process = null
-      onSettled()
-      return true
-    }
-
-    const nodeEval = extractNodeEval(command)
-    if (nodeEval && emulateSimpleNodeEval(nodeEval) !== null) {
-      this.tasks.set(id, task)
-      queueMicrotask(() => runNodeEvalFallback(nodeEval))
-      return id
-    }
-
     // Pre-aborted signal: don't bother spawning at all. Return the
     // task id so callers can still reference it, but mark it stopped
     // with no actual process. This avoids a wasted fork + immediate-
@@ -440,18 +342,25 @@ export class BackgroundTaskManager {
     // Windows has no process-group primitive, so we leave detached=false
     // there — killProcessTree() falls back to a single-PID signal.
     const invocation = getShellInvocation(command)
-    const proc = spawn(invocation.shell, invocation.args, {
+    const proc = spawnManaged(invocation.shell, invocation.args, {
       cwd: options?.cwd,
       detached: process.platform !== 'win32',
       env: { ...process.env },
       stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+      windowsVerbatimArguments: process.platform === 'win32',
+      profile: options?.profile,
     })
+    registerPhysicalResource(physical)
 
     task.process = proc
     info.pid = proc.pid ?? null
+    task.identity = proc.pid ? captureProcessIdentity(proc.pid) : Promise.resolve(null)
 
-    proc.stdout?.on('data', (data: Buffer) => appendOutput(data.toString()))
-    proc.stderr?.on('data', (data: Buffer) => appendOutput(data.toString()))
+    const stdoutDecoder = new StringDecoder('utf8')
+    const stderrDecoder = new StringDecoder('utf8')
+    proc.stdout?.on('data', (data: Buffer) => appendOutput(stdoutDecoder.write(data)))
+    proc.stderr?.on('data', (data: Buffer) => appendOutput(stderrDecoder.write(data)))
 
     // Wire the abort signal so an outer cancel stops the task cleanly.
     // The listener is removed the moment the process exits — see the
@@ -475,7 +384,9 @@ export class BackgroundTaskManager {
     }
 
     proc.on('close', (code: number | null) => {
-      onSettled()
+      appendOutput(stdoutDecoder.end())
+      appendOutput(stderrDecoder.end())
+      if (!task.stopped) onSettled()
       // Process has exited. Always clear timer + null the handle FIRST,
       // so the escalation callback (if it races us) sees task.process
       // !== proc and bails out. Only THEN decide whether to override
@@ -503,13 +414,6 @@ export class BackgroundTaskManager {
       if (task.killTimer) {
         clearTimeout(task.killTimer)
         task.killTimer = null
-      }
-      if (err.code === 'EPERM') {
-        const nodeEval = extractNodeEval(command)
-        if (nodeEval) {
-          runNodeEvalFallback(nodeEval)
-          return
-        }
       }
       appendOutput(`\n[Process error: ${err.message}]\n`)
       task.process = null
@@ -590,12 +494,15 @@ export class BackgroundTaskManager {
    * entry does NOT cancel the escalation — the timer self-cancels via
    * the close handler when the SIGTERM'd process exits.
    */
-  dispose(): void {
+  async dispose(): Promise<void> {
     for (const [, task] of Array.from(this.tasks.entries())) {
       if (task.info.status === 'running') {
         stopInternal(task, this.sigkillGraceMs)
       }
     }
+    await Promise.all([...this.tasks.values()].map(task => task.stopPromise ?? Promise.resolve()))
+    const failed = [...this.tasks.values()].filter(task => task.info.status === 'stop_failed')
+    if (failed.length) throw new Error(`Background process termination unconfirmed: ${failed.map(task => task.info.id).join(', ')}`)
     this.tasks.clear()
   }
 
@@ -606,7 +513,7 @@ export class BackgroundTaskManager {
   async waitForTask(id: string, timeoutMs = 30_000): Promise<TaskInfo | null> {
     const task = this.tasks.get(id)
     if (!task) return null
-    if (task.info.status !== 'running') return { ...task.info }
+    if (!['running', 'stopping'].includes(task.info.status)) return { ...task.info }
 
     const deadline = Date.now() + timeoutMs
     return new Promise((resolve) => {
@@ -616,7 +523,7 @@ export class BackgroundTaskManager {
           resolve(null)
           return
         }
-        if (t.info.status !== 'running' || Date.now() >= deadline) {
+        if (!['running', 'stopping'].includes(t.info.status) || Date.now() >= deadline) {
           resolve({ ...t.info })
           return
         }
@@ -630,7 +537,7 @@ export class BackgroundTaskManager {
   clearCompleted(): number {
     let removed = 0
     for (const [id, task] of this.tasks) {
-      if (task.info.status !== 'running') {
+      if (!['running', 'stopping', 'stop_failed'].includes(task.info.status)) {
         this.tasks.delete(id)
         removed++
       }

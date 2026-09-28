@@ -7,17 +7,17 @@ import { getExitPath, refreshSessionStatus, saveMetadata, stopSession, loadMetad
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks() })
 
 describe('background terminal outcomes', () => {
-  it('retains running state until a requested stop actually terminates the process', async () => {
+  it('refuses to signal a legacy live PID without verified process identity', async () => {
     const home = mkdtempSync(join(tmpdir(), 'ovogo-bg-outcome-'))
     vi.stubEnv('HOME', home)
     vi.stubEnv('USERPROFILE', home)
     const kill = vi.spyOn(process, 'kill').mockReturnValue(true)
     saveMetadata({ id: 'cancel', task: 'task', cwd: home, pid: 424242, startedAt: new Date().toISOString(), status: 'running', logPath: join(home, 'log') })
-    expect(stopSession('cancel', 5)).toBe(true)
+    expect(await stopSession('cancel', 5)).toMatchObject({ accepted: false, status: 'failed' })
     expect(loadMetadata('cancel')?.status).toBe('running')
     expect(existsSync(getExitPath('cancel'))).toBe(false)
     await new Promise(resolve => setTimeout(resolve, 15))
-    expect(kill).toHaveBeenCalledWith(424242, 'SIGKILL')
+    expect(kill).not.toHaveBeenCalledWith(424242, 'SIGKILL')
     expect(loadMetadata('cancel')?.status).toBe('running')
   })
   it('does not treat an exit code alone as an accepted task', () => {

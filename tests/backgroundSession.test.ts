@@ -11,7 +11,7 @@ import {
   getSessionsDir, getMetadataPath, getLogPath, getExitPath,
   generateSessionId, saveMetadata, loadMetadata, updateMetadata,
   isPidAlive, refreshSessionStatus,
-  startBackgroundSession, stopSession, listSessions, getSession,
+  startBackgroundSession, stopSession, listSessions,
   readSessionLogs, getLogSize, attachToSession,
   removeSession, cleanStaleSessions,
   formatSessionList, formatSessionDetail,
@@ -20,7 +20,6 @@ import {
 import { existsSync, rmSync, mkdirSync, writeFileSync, mkdtempSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { homedir } from 'os'
 
 let testHome: string
 
@@ -230,13 +229,13 @@ describe('backgroundSession', () => {
   })
 
   describe('stopSession', () => {
-    it('returns false for unknown session', () => {
-      expect(stopSession('nope')).toBe(false)
+    it('reports unknown session', async () => {
+      expect(await stopSession('nope')).toMatchObject({ accepted: false, status: 'not_found' })
     })
 
-    it('marks a dead session as stopped', () => {
+    it('marks a dead legacy session as stopped', async () => {
       saveMetadata(makeMeta({ id: 's1', pid: 999_999, status: 'running' }))
-      expect(stopSession('s1', 10)).toBe(true)
+      expect(await stopSession('s1', 10)).toMatchObject({ accepted: true, status: 'stopped' })
       const meta = loadMetadata('s1')
       expect(meta!.status).toBe('stopped')
     })
@@ -263,10 +262,10 @@ describe('backgroundSession', () => {
       expect(existsSync(getMetadataPath('rm2'))).toBe(true)
     })
 
-    it('force removes running session', () => {
+    it('preserves live session evidence even with force', () => {
       saveMetadata(makeMeta({ id: 'rm3', pid: process.pid, status: 'running' }))
-      expect(removeSession('rm3', true)).toBe(true)
-      expect(existsSync(getMetadataPath('rm3'))).toBe(false)
+      expect(removeSession('rm3', true)).toBe(false)
+      expect(existsSync(getMetadataPath('rm3'))).toBe(true)
     })
   })
 
@@ -324,17 +323,10 @@ describe('backgroundSession', () => {
   })
 
   describe('startBackgroundSession (integration)', () => {
-    it('creates metadata and log files', () => {
-      // Use a trivial task with a fake bin to avoid actually launching ovolv999
-      process.env.OVOGV999_BIN = '/dev/null'
+    it('refuses to declare an unavailable worker ready', async () => {
+      process.env.OVOGV999_BIN = join(testHome, 'missing-entrypoint.js')
       try {
-        const result = startBackgroundSession({ task: 'noop' })
-        expect(result.sessionId).toMatch(/^sess-/)
-        expect(existsSync(getMetadataPath(result.sessionId))).toBe(true)
-        expect(existsSync(getLogPath(result.sessionId))).toBe(true)
-        const meta = loadMetadata(result.sessionId)
-        expect(meta!.task).toBe('noop')
-        expect(meta!.status).toBe('running')
+        await expect(startBackgroundSession({ task: 'noop', readyTimeoutMs: 3000 })).rejects.toThrow(/exited|identity|ready/i)
       } finally {
         delete process.env.OVOGV999_BIN
       }

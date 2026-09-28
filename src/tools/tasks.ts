@@ -352,8 +352,8 @@ Use this when a background command is no longer needed or is stuck.`,
 
     if (task.status !== 'running') {
       return Promise.resolve({
-        content: `Task ${taskId} is not running (status: ${task.status})`,
-        isError: false,
+        content: `Task ${taskId} status: ${task.status}${task.status === 'stopping' || task.status === 'stop_failed' ? '; physical termination is not confirmed' : ''}`,
+        isError: task.status === 'stop_failed',
       })
     }
 
@@ -366,7 +366,7 @@ Use this when a background command is no longer needed or is stuck.`,
     }
 
     return Promise.resolve({
-      content: `Stopped task ${taskId}: ${task.description}`,
+      content: `Stop requested for task ${taskId}: ${task.description}. Status: stopping; use TaskOutput to confirm physical termination.`,
       isError: false,
     })
   }

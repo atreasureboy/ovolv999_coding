@@ -18,21 +18,28 @@
  *   <id>.exit   — written on process exit, contains the exit code
  */
 
-import { spawn, type ChildProcess } from 'child_process'
+import type { ChildProcess } from 'child_process'
 import {
   existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync,
-  readdirSync, statSync, appendFileSync,
+  readdirSync, statSync, appendFileSync, openSync, closeSync, readSync, renameSync, fsyncSync,
 } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import { randomBytes } from 'crypto'
+import { fileURLToPath } from 'url'
+import { StringDecoder } from 'string_decoder'
 import type { OutcomeStatus, VerificationEvidence } from './outcome.js'
+import { withPersistenceLock, withPersistenceLockAsync } from './persistenceLock.js'
+import { inspectProcessIdentity, type ProcessIdentity } from './processIdentity.js'
+import { spawnManaged } from './executionBackend.js'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
-export type SessionStatus = 'running' | 'stopped' | 'unknown' | OutcomeStatus
+export type SessionStatus = 'starting' | 'running' | 'stopping' | 'stop_failed' | 'stopped' | 'unknown' | OutcomeStatus
 
 export interface SessionMetadata {
+  schemaVersion?: number
+  revision?: number
   id: string
   task: string
   cwd: string
@@ -47,6 +54,11 @@ export interface SessionMetadata {
   verification?: VerificationEvidence
   /** Extra args passed to the spawned ovolv999 */
   args?: string[]
+  processIdentity?: ProcessIdentity
+  supervisorIdentity?: ProcessIdentity
+  stopRequestedAt?: string
+  stopGraceMs?: number
+  diagnostic?: string
 }
 
 export interface StartSessionOptions {
@@ -57,6 +69,8 @@ export interface StartSessionOptions {
   extraArgs?: string[]
   /** Environment override (defaults to process.env) */
   env?: NodeJS.ProcessEnv
+  readyTimeoutMs?: number
+  executable?: string
 }
 
 export interface StartSessionResult {
@@ -70,6 +84,13 @@ export interface LogReadOptions {
   tailLines?: number
   /** Start byte offset (alternative to tailLines) */
   startOffset?: number
+  maxBytes?: number
+}
+
+export interface StopSessionResult {
+  accepted: boolean
+  status: 'stopped' | 'stopping' | 'failed' | 'not_found'
+  reason?: string
 }
 
 export interface AttachResult {
@@ -88,14 +109,17 @@ export function getSessionsDir(): string {
 }
 
 export function getMetadataPath(id: string): string {
+  validateId(id)
   return join(getSessionsDir(), `${id}.json`)
 }
 
 export function getLogPath(id: string): string {
+  validateId(id)
   return join(getSessionsDir(), `${id}.log`)
 }
 
 export function getExitPath(id: string): string {
+  validateId(id)
   return join(getSessionsDir(), `${id}.exit`)
 }
 
@@ -114,27 +138,68 @@ export function generateSessionId(): string {
 
 // ── Metadata I/O ────────────────────────────────────────────────────────────
 
+function validateId(id: string): void {
+  if (!/^[A-Za-z0-9_-]{1,160}$/.test(id)) throw new Error('Invalid background session ID')
+}
+
+function validateMetadata(value: unknown, id: string): SessionMetadata {
+  if (!value || typeof value !== 'object') throw new Error(`Invalid background metadata: ${id}`)
+  const meta = value as SessionMetadata
+  if (meta.schemaVersion !== undefined && meta.schemaVersion !== 1) throw new Error(`Unsupported background metadata version: ${meta.schemaVersion}`)
+  if (meta.id !== id || typeof meta.task !== 'string' || typeof meta.cwd !== 'string' || typeof meta.logPath !== 'string' || !Number.isFinite(Date.parse(meta.startedAt)) || !Object.hasOwn(STATUS_ICON, meta.status) || (meta.pid !== null && (!Number.isInteger(meta.pid) || meta.pid <= 0))) throw new Error(`Invalid background metadata: ${id}`)
+  if (meta.revision !== undefined && (!Number.isSafeInteger(meta.revision) || meta.revision < 1)) throw new Error(`Invalid background metadata revision: ${id}`)
+  if (meta.exitCode !== undefined && !Number.isInteger(meta.exitCode)) throw new Error(`Invalid background exit code: ${id}`)
+  return meta
+}
+
+function writeMetadata(meta: SessionMetadata): void {
+  validateMetadata(meta, meta.id)
+  const path = getMetadataPath(meta.id)
+  const temporary = `${path}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`
+  const fd = openSync(temporary, 'wx', 0o600)
+  try {
+    writeFileSync(fd, JSON.stringify(meta, null, 2))
+    fsyncSync(fd)
+  } finally { closeSync(fd) }
+  try { renameSync(temporary, path) } finally { if (existsSync(temporary)) unlinkSync(temporary) }
+}
+
 export function saveMetadata(meta: SessionMetadata): void {
   ensureSessionsDir()
-  writeFileSync(getMetadataPath(meta.id), JSON.stringify(meta, null, 2))
+  withPersistenceLock(getMetadataPath(meta.id), () => {
+    const current = loadMetadata(meta.id)
+    if (current && meta.revision !== current.revision) throw new Error(`Background metadata revision conflict: ${meta.id}`)
+    const updated = { ...meta, schemaVersion: 1, revision: (current?.revision ?? 0) + 1 }
+    writeMetadata(updated)
+    Object.assign(meta, updated)
+  })
 }
 
 export function loadMetadata(id: string): SessionMetadata | null {
   const path = getMetadataPath(id)
   if (!existsSync(path)) return null
-  try {
-    return JSON.parse(readFileSync(path, 'utf8')) as SessionMetadata
-  } catch {
-    return null
-  }
+  if (statSync(path).size > 1024 * 1024) throw new Error(`Background metadata exceeds byte limit: ${id}`)
+  return validateMetadata(JSON.parse(readFileSync(path, 'utf8')), id)
 }
 
 export function updateMetadata(id: string, patch: Partial<SessionMetadata>): SessionMetadata | null {
+  ensureSessionsDir()
+  return withPersistenceLock(getMetadataPath(id), () => patchMetadata(id, patch))
+}
+
+function patchMetadata(id: string, patch: Partial<SessionMetadata>): SessionMetadata | null {
   const current = loadMetadata(id)
   if (!current) return null
-  const updated = { ...current, ...patch }
-  saveMetadata(updated)
+  if (patch.id !== undefined && patch.id !== id) throw new Error('Background session identity is immutable')
+  if (patch.revision !== undefined && patch.revision !== current.revision) throw new Error(`Background metadata revision conflict: ${id}`)
+  const updated = { ...current, ...patch, id, schemaVersion: 1, revision: (current.revision ?? 0) + 1 }
+  writeMetadata(updated)
   return updated
+}
+
+export async function updateMetadataAsync(id: string, patch: Partial<SessionMetadata>): Promise<SessionMetadata | null> {
+  ensureSessionsDir()
+  return withPersistenceLockAsync(getMetadataPath(id), () => patchMetadata(id, patch))
 }
 
 export function recordBackgroundOutcome(outcome: OutcomeStatus, verification?: VerificationEvidence): void {
@@ -167,7 +232,11 @@ export function isPidAlive(pid: number | null): boolean {
 export function refreshSessionStatus(id: string): SessionMetadata | null {
   const meta = loadMetadata(id)
   if (!meta) return null
-  if (meta.status !== 'running') return meta
+  if (!['starting', 'running', 'stopping'].includes(meta.status)) return meta
+  if (meta.supervisorIdentity) {
+    if (isPidAlive(meta.supervisorIdentity.pid)) return meta
+    return updateMetadata(id, { status: 'unknown', diagnostic: 'Supervisor exited; process resources require recovery' })
+  }
 
   // Check exit code file first (written by wrapper or reaper)
   const exitPath = getExitPath(id)
@@ -179,7 +248,7 @@ export function refreshSessionStatus(id: string): SessionMetadata | null {
   }
 
   const alive = isPidAlive(meta.pid)
-  if (alive && exitCode === undefined) return meta
+  if (alive) return meta
 
   // Process ended
   const newStatus: SessionStatus =
@@ -210,109 +279,88 @@ function resolveOvogogogoBin(): string {
   return 'ovolv999'
 }
 
-export function startBackgroundSession(options: StartSessionOptions): StartSessionResult {
+export async function startBackgroundSession(options: StartSessionOptions): Promise<StartSessionResult> {
   ensureSessionsDir()
   const id = generateSessionId()
   const logPath = getLogPath(id)
   const cwd = options.cwd ?? process.cwd()
-
-  // Build args: <task> [--model X] [...extraArgs]
-  const spawnArgs: string[] = [options.task]
-  if (options.model) {
-    spawnArgs.push('--model', options.model)
-  }
-  if (options.extraArgs) {
-    spawnArgs.push(...options.extraArgs)
-  }
-
-  // Write an empty log file so the path exists before we open the fd
-  writeFileSync(logPath, '')
-
-  const bin = resolveOvogogogoBin()
-  const env = { ...process.env, ...options.env, OVOGV999_SESSION_ID: id }
-
-  let proc: ChildProcess
+  const spawnArgs = [options.task, '--cwd', cwd]
+  if (options.model) spawnArgs.push('--model', options.model)
+  if (options.extraArgs) spawnArgs.push(...options.extraArgs)
+  writeFileSync(logPath, '', { flag: 'wx', mode: 0o600 })
+  saveMetadata({ id, task: options.task, cwd, model: options.model, pid: null, startedAt: new Date().toISOString(), status: 'starting', logPath, args: spawnArgs })
+  const extension = import.meta.url.endsWith('.ts') ? 'ts' : 'js'
+  const diagnosticFd = openSync(logPath, 'a')
+  let supervisor: ChildProcess
   try {
-    proc = spawn(process.execPath, [bin, ...spawnArgs], {
+    supervisor = spawnManaged(process.execPath, [...(extension === 'ts' ? ['--import', import.meta.resolve('tsx')] : []), fileURLToPath(new URL(`./backgroundSupervisor.${extension}`, import.meta.url))], {
       cwd,
       detached: true,
-      stdio: ['ignore', 'ignore', 'ignore'],
-      env,
+      windowsHide: true,
+      stdio: ['ignore', diagnosticFd, diagnosticFd, 'ipc'],
+      env: { ...process.env, ...options.env },
     })
-  } catch {
-    // Fallback: try invoking the bin directly (non-node)
-    try {
-      proc = spawn(bin, spawnArgs, {
-        cwd,
-        detached: true,
-        stdio: ['ignore', 'ignore', 'ignore'],
-        env,
-      })
-    } catch {
-      throw new Error(`Failed to spawn background session: ${bin}`)
+  } finally { closeSync(diagnosticFd) }
+  const timeoutMs = options.readyTimeoutMs ?? 30_000
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const finish = (error?: Error, pid?: number): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      if (supervisor.connected) supervisor.disconnect()
+      supervisor.unref()
+      if (error) reject(error)
+      else resolve({ sessionId: id, pid: pid ?? null, logPath })
     }
-  }
-
-  // Redirect child stdout+stderr to the log file via a re-open in append mode.
-  // We can't pass an fd directly with detached + ignore, so we spawn a tiny
-  // log-writer loop in the parent that drains proc.stdout — BUT since we
-  // set stdio to 'ignore', there's nothing to drain. Instead the child must
-  // redirect its own output. We pass the log path via env so the child can
-  // open it. For now, mark this as a known limitation: logs are populated
-  // by the child process itself when it detects OVOGV999_SESSION_ID.
-  const pid = proc.pid ?? null
-
-  // Unref so the parent can exit independently
-  try { proc.unref() } catch { /* ignore */ }
-
-  const meta: SessionMetadata = {
-    id,
-    task: options.task,
-    cwd,
-    model: options.model,
-    pid,
-    startedAt: new Date().toISOString(),
-    status: 'running',
-    logPath,
-    args: spawnArgs,
-  }
-  saveMetadata(meta)
-
-  return { sessionId: id, pid, logPath }
+    const timer = setTimeout(() => {
+      void updateMetadataAsync(id, { stopRequestedAt: new Date().toISOString(), stopGraceMs: 0 }).then(() => finish(new Error(`Background session ready handshake timed out: ${id}`)), (error: unknown) => finish(error instanceof Error ? error : new Error(String(error))))
+    }, timeoutMs + 2000)
+    supervisor.once('error', error => {
+      void updateMetadataAsync(id, { status: 'failed', diagnostic: error.message }).finally(() => finish(error))
+    })
+    supervisor.once('exit', (code) => {
+      if (settled) return
+      const error = new Error(`Background supervisor exited before ready (exit ${code}): ${id}; inspect ${logPath}`)
+      void updateMetadataAsync(id, { status: 'failed', diagnostic: error.message }).then(() => finish(error), () => finish(error))
+    })
+    supervisor.on('message', (message: unknown) => {
+      const response = message as { type?: string; pid?: number; error?: string }
+      if (response.type === 'ready') finish(undefined, response.pid)
+      if (response.type === 'error') finish(new Error(response.error ?? 'Background start failed'))
+    })
+    supervisor.send({ id, executable: options.executable ?? process.execPath, args: [resolveOvogogogoBin(), ...spawnArgs], cwd, timeoutMs }, error => { if (error) finish(error) })
+  })
 }
 
-// ── Stop Session ────────────────────────────────────────────────────────────
-
-export function stopSession(id: string, graceMs = 5000): boolean {
+export async function stopSession(id: string, graceMs = 5000): Promise<StopSessionResult> {
   const meta = loadMetadata(id)
-  if (!meta) return false
-  if (!meta.pid) return false
-
-  if (!isPidAlive(meta.pid)) {
-    updateMetadata(id, { status: 'stopped', endedAt: new Date().toISOString() })
-    return true
-  }
-
-  // Send SIGTERM (graceful), escalate to SIGKILL after grace period
-  try {
-    process.kill(meta.pid, 'SIGTERM')
-  } catch {
-    return false
-  }
-
-  // Check after grace period — caller can await this
-  const checkLiveness = (): void => {
-    if (isPidAlive(meta.pid)) {
-      // Still alive — escalate
-      try { process.kill(meta.pid!, 'SIGKILL') } catch { /* ignore */ }
+  if (!meta) return { accepted: false, status: 'not_found' }
+  if (!meta.pid || !isPidAlive(meta.pid)) {
+    if (meta.supervisorIdentity && await inspectProcessIdentity(meta.supervisorIdentity) === 'matching') {
+      await updateMetadataAsync(id, { stopRequestedAt: new Date().toISOString(), stopGraceMs: graceMs })
+    } else if (meta.processIdentity || meta.supervisorIdentity || meta.status === 'unknown') {
+      return { accepted: false, status: 'failed', reason: 'Supervisor unavailable; retained resources require recovery' }
+    } else {
+      await updateMetadataAsync(id, { status: 'stopped', endedAt: new Date().toISOString() })
+      return { accepted: true, status: 'stopped' }
     }
-    if (!isPidAlive(meta.pid)) updateMetadata(id, { status: 'cancelled', outcome: 'cancelled', endedAt: new Date().toISOString() })
+  } else {
+    if (!meta.processIdentity || await inspectProcessIdentity(meta.processIdentity) !== 'matching') return { accepted: false, status: 'failed', reason: 'Process identity is missing or does not match; refusing to signal' }
+    if (!meta.supervisorIdentity || await inspectProcessIdentity(meta.supervisorIdentity) !== 'matching') return { accepted: false, status: 'failed', reason: 'Supervisor unavailable; retained resources require recovery' }
+    await updateMetadataAsync(id, { status: 'stopping', stopRequestedAt: new Date().toISOString(), stopGraceMs: graceMs })
   }
-  setTimeout(checkLiveness, graceMs).unref()
-  updateMetadata(id, { outcome: 'cancelled' })
-  return true
+  const deadline = Date.now() + Math.max(0, graceMs) + 10_000
+  while (Date.now() < deadline) {
+    const fresh = loadMetadata(id)
+    if (!fresh) return { accepted: true, status: 'failed', reason: 'Session metadata disappeared during stop' }
+    if (fresh.status === 'stopped' || fresh.status === 'cancelled') return { accepted: true, status: 'stopped' }
+    if (fresh.status === 'stop_failed' || fresh.status === 'unknown') return { accepted: true, status: 'failed', reason: fresh.diagnostic }
+    if (fresh.supervisorIdentity && !isPidAlive(fresh.supervisorIdentity.pid)) return { accepted: true, status: 'failed', reason: 'Supervisor exited before physical stop confirmation' }
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+  return { accepted: true, status: 'stopping', reason: 'Stop request accepted; physical termination remains unconfirmed' }
 }
-
 // ── List / Get ──────────────────────────────────────────────────────────────
 
 export function listSessions(): SessionMetadata[] {
@@ -338,131 +386,183 @@ export function getSession(id: string): SessionMetadata | null {
 
 // ── Logs ────────────────────────────────────────────────────────────────────
 
+const MAX_LOG_READ_BYTES = 1024 * 1024
+const LOG_CHUNK_BYTES = 64 * 1024
+
+function readRange(path: string, offset: number, length: number): Buffer {
+  const fd = openSync(path, 'r')
+  try {
+    const buffer = Buffer.alloc(length)
+    const size = readSync(fd, buffer, 0, length, offset)
+    return buffer.subarray(0, size)
+  } finally { closeSync(fd) }
+}
+
 export function readSessionLogs(id: string, opts: LogReadOptions = {}): string {
-  const logPath = getLogPath(id)
-  if (!existsSync(logPath)) return ''
-
-  if (opts.startOffset !== undefined) {
-    try {
-      const fd = readFileSync(logPath)
-      if (opts.startOffset >= fd.length) return ''
-      return fd.slice(opts.startOffset).toString('utf8')
-    } catch {
-      return ''
+  const path = getLogPath(id)
+  if (!existsSync(path)) return ''
+  const size = statSync(path).size
+  const limit = opts.maxBytes ?? MAX_LOG_READ_BYTES
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 16 * 1024 * 1024) throw new Error('Invalid log byte limit')
+  if (opts.tailLines !== undefined) {
+    if (!Number.isSafeInteger(opts.tailLines) || opts.tailLines < 0) throw new Error('Invalid tail line count')
+    if (opts.tailLines === 0) return ''
+    let offset = size
+    let data = Buffer.alloc(0)
+    while (offset > 0) {
+      const length = Math.min(LOG_CHUNK_BYTES, offset, limit - data.length)
+      if (length <= 0) throw new Error(`Log tail exceeds ${limit} bytes; request fewer lines`)
+      offset -= length
+      data = Buffer.concat([readRange(path, offset, length), data])
+      const lines = data.toString('utf8').split('\n')
+      if (lines[lines.length - 1] === '') lines.pop()
+      if (lines.length > opts.tailLines || offset === 0) return lines.slice(-opts.tailLines).join('\n')
     }
+    return ''
   }
-
-  const content = readFileSync(logPath, 'utf8')
-  if (opts.tailLines === undefined) return content
-
-  const lines = content.split('\n')
-  // Drop a single trailing empty element from a final newline so
-  // `tail -n 2` of "a\nb\nc\nd\ne\n" returns "d\ne" (matching `tail -n2`).
-  if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop()
-  const tail = lines.slice(-opts.tailLines)
-  return tail.join('\n')
+  const offset = opts.startOffset ?? 0
+  if (!Number.isSafeInteger(offset) || offset < 0) throw new Error('Invalid log byte offset')
+  const length = Math.max(0, size - offset)
+  if (length > limit) throw new Error(`Log read exceeds ${limit} bytes; use --tail or a later offset`)
+  return readRange(path, offset, length).toString('utf8')
 }
 
 export function getLogSize(id: string): number {
-  const logPath = getLogPath(id)
-  if (!existsSync(logPath)) return 0
-  try {
-    return statSync(logPath).size
-  } catch {
-    return 0
-  }
+  try { return statSync(getLogPath(id)).size } catch { return 0 }
 }
 
-/**
- * Watch a session's log for new lines. Returns an async iterable that
- * yields each new line as it's appended. Polls the file every
- * `pollMs` (default 500ms) since fs.watch is unreliable across
- * platforms and over network filesystems.
- */
-export function attachToSession(id: string, pollMs = 500): AttachResult | null {
+export interface AttachOptions {
+  maxQueueBytes?: number
+  maxQueueLines?: number
+  maxLineBytes?: number
+}
+
+export function attachToSession(id: string, pollMs = 500, options: AttachOptions = {}): AttachResult | null {
   const meta = getSession(id)
   if (!meta) return null
-
+  const path = getLogPath(id)
+  const maxBytes = options.maxQueueBytes ?? 512 * 1024
+  const maxLines = options.maxQueueLines ?? 4096
+  const maxLine = options.maxLineBytes ?? 256 * 1024
+  for (const limit of [maxBytes, maxLines, maxLine]) if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('Invalid attachment capacity')
   let offset = getLogSize(id)
+  let identity = existsSync(path) ? `${statSync(path).dev}:${statSync(path).ino}` : ''
+  let decoder = new StringDecoder('utf8')
+  let partial = ''
   let stopped = false
-  let timer: ReturnType<typeof setTimeout> | null = null
-
+  let failure: Error | undefined
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let queueBytes = 0
   const queue: string[] = []
-  let resolveNext: ((value: IteratorResult<string>) => void) | null = null
-
+  let pending: { resolve: (value: IteratorResult<string>) => void; reject: (error: Error) => void } | undefined
+  const finish = (error?: Error, clear = false): void => {
+    stopped = true
+    failure = error
+    if (timer) clearTimeout(timer)
+    timer = undefined
+    if (clear || error) { queue.length = 0; queueBytes = 0; partial = '' }
+    if (pending) {
+      const waiter = pending
+      pending = undefined
+      if (error) waiter.reject(error)
+      else waiter.resolve({ value: undefined, done: true })
+    }
+  }
+  const emit = (line: string): void => {
+    const bytes = Buffer.byteLength(line)
+    if (bytes > maxLine) throw new Error('Attachment line byte limit exceeded; inspect retained log files')
+    if (pending) {
+      const waiter = pending
+      pending = undefined
+      waiter.resolve({ value: line, done: false })
+    } else {
+      if (queue.length >= maxLines || queueBytes + bytes > maxBytes) throw new Error('Attachment queue limit exceeded; consumer is too slow, inspect retained log files')
+      queue.push(line)
+      queueBytes += bytes
+    }
+  }
+  const ingest = (text: string): void => {
+    partial += text
+    let newline: number
+    while ((newline = partial.indexOf('\n')) >= 0) {
+      const line = partial.slice(0, newline).replace(/\r$/, '')
+      partial = partial.slice(newline + 1)
+      emit(line)
+    }
+    if (Buffer.byteLength(partial) > maxLine) throw new Error('Attachment line byte limit exceeded; inspect retained log files')
+  }
   const poll = (): void => {
     if (stopped) return
     try {
-      const size = getLogSize(id)
-      if (size > offset) {
-        const chunk = readSessionLogs(id, { startOffset: offset })
-        offset = size
-        for (const line of chunk.split('\n')) {
-          if (line.length === 0) continue
-          if (resolveNext) {
-            resolveNext({ value: line, done: false })
-            resolveNext = null
-          } else {
-            queue.push(line)
+      if (existsSync(path)) {
+        const stat = statSync(path)
+        const freshIdentity = `${stat.dev}:${stat.ino}`
+        if (freshIdentity !== identity) {
+          if (identity) {
+            const previousPath = `${path}.1`
+            const previous = existsSync(previousPath) ? statSync(previousPath) : undefined
+            if (!previous || `${previous.dev}:${previous.ino}` !== identity) throw new Error('Log rotation exceeded retained history; unread output may be missing')
+            while (offset < previous.size) {
+              const data = readRange(previousPath, offset, Math.min(LOG_CHUNK_BYTES, previous.size - offset))
+              if (!data.length) throw new Error('Rotated log changed while reading; unread output may be missing')
+              offset += data.length
+              ingest(decoder.write(data))
+            }
           }
+          offset = 0
+          identity = freshIdentity
+        } else if (stat.size < offset) {
+          partial = ''
+          decoder = new StringDecoder('utf8')
+          offset = 0
+        }
+        if (stat.size > offset) {
+          const data = readRange(path, offset, Math.min(LOG_CHUNK_BYTES, stat.size - offset))
+          offset += data.length
+          ingest(decoder.write(data))
         }
       }
-      // Also detect process exit
       const fresh = getSession(id)
-      if (fresh && fresh.status !== 'running' && queue.length === 0 && !resolveNext) {
-        // Drain complete
+      if ((!fresh || (!['starting', 'running', 'stopping'].includes(fresh.status) && !isPidAlive(fresh.pid))) && offset >= getLogSize(id)) {
+        ingest(decoder.end())
+        if (partial) { emit(partial); partial = '' }
+        finish()
+        return
       }
-    } catch { /* ignore */ }
-
-    if (!stopped) {
-      timer = setTimeout(poll, pollMs)
+    } catch (error) {
+      finish(error instanceof Error ? error : new Error(String(error)), true)
+      return
     }
+    timer = setTimeout(poll, pollMs)
   }
-  timer = setTimeout(poll, pollMs)
-
-  const stream: AsyncIterable<string> = {
-    [Symbol.asyncIterator]() {
-      return {
-        next(): Promise<IteratorResult<string>> {
-          if (queue.length > 0) {
-            return Promise.resolve({ value: queue.shift()!, done: false })
-          }
-          if (stopped) {
-            return Promise.resolve({ value: undefined, done: true })
-          }
-          return new Promise((resolve) => {
-            resolveNext = resolve
-          })
-        },
-        return(): Promise<IteratorResult<string>> {
-          stopped = true
-          if (timer) clearTimeout(timer)
-          return Promise.resolve({ value: undefined, done: true })
-        },
+  timer = setTimeout(poll, 0)
+  const iterator: AsyncIterator<string> = {
+    next(): Promise<IteratorResult<string>> {
+      if (failure) return Promise.reject(failure)
+      if (queue.length) {
+        const line = queue.shift()!
+        queueBytes -= Buffer.byteLength(line)
+        return Promise.resolve({ value: line, done: false })
       }
+      if (stopped) return Promise.resolve({ value: undefined, done: true })
+      if (pending) return Promise.reject(new Error('Only one pending attachment read is supported'))
+      return new Promise((resolve, reject) => { pending = { resolve, reject } })
+    },
+    return(): Promise<IteratorResult<string>> {
+      finish(undefined, true)
+      return Promise.resolve({ value: undefined, done: true })
     },
   }
-
-  const stop = (): void => {
-    stopped = true
-    if (timer) clearTimeout(timer)
-    if (resolveNext) {
-      resolveNext({ value: undefined, done: true })
-      resolveNext = null
-    }
-  }
-
-  return { stream, stop, metadata: meta }
+  return { stream: { [Symbol.asyncIterator]: () => iterator }, stop: () => finish(undefined, true), metadata: meta }
 }
-
 // ── Remove / Clean ──────────────────────────────────────────────────────────
 
-export function removeSession(id: string, force = false): boolean {
+export function removeSession(id: string, _force = false): boolean {
   const meta = loadMetadata(id)
   if (!meta) return false
 
   // Don't remove running sessions unless forced
-  if (!force && meta.status === 'running' && isPidAlive(meta.pid)) {
+  if (meta.status === 'unknown' || meta.status === 'stop_failed' || isPidAlive(meta.pid) || (meta.supervisorIdentity && isPidAlive(meta.supervisorIdentity.pid))) {
     return false
   }
 
@@ -479,7 +579,7 @@ export function cleanStaleSessions(maxAge = 7 * 24 * 60 * 60 * 1000): number {
   const cutoff = Date.now() - maxAge
   let removed = 0
   for (const s of sessions) {
-    if (s.status === 'running') continue
+    if (['starting', 'running', 'stopping', 'stop_failed', 'unknown'].includes(s.status)) continue
     const started = new Date(s.startedAt).getTime()
     if (started < cutoff) {
       if (removeSession(s.id, true)) removed++
@@ -498,6 +598,7 @@ export function cleanStaleSessions(maxAge = 7 * 24 * 60 * 60 * 1000): number {
 export function initChildLogCapture(): string | null {
   const sessionId = process.env.OVOGV999_SESSION_ID
   if (!sessionId) return null
+  if (process.env.OVOGV999_SUPERVISED === '1') return sessionId
 
   const logPath = getLogPath(sessionId)
   ensureSessionsDir()
@@ -532,6 +633,10 @@ export function initChildLogCapture(): string | null {
   return sessionId
 }
 
+export function markBackgroundReady(): void {
+  if (process.env.OVOGV999_SUPERVISED === '1' && process.connected) process.send?.({ type: 'ovogo:ready' }, () => {})
+}
+
 // ── Formatting ──────────────────────────────────────────────────────────────
 
 export function formatSessionList(sessions: SessionMetadata[]): string {
@@ -562,6 +667,9 @@ export function formatSessionDetail(meta: SessionMetadata): string {
 }
 
 const STATUS_ICON: Record<SessionStatus, string> = {
+  starting: '○',
+  stopping: '◌',
+  stop_failed: '!',
   running: '●',
   completed: '✓',
   failed: '✗',

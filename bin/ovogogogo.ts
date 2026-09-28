@@ -99,6 +99,8 @@ import {
   AmbiguousSessionError,
   SessionNotFoundError,
   createSessionDir,
+  claimSessionOwnership,
+  releaseSessionOwnership,
   findLatestSession,
   listSessions,
   loadSession,
@@ -108,6 +110,16 @@ import {
 import type { AgentChildEngineFactory } from '../src/core/types.js'
 
 const VERSION = '0.1.0'
+
+function buildVersion(): string {
+  try {
+    const identity = JSON.parse(readFileSync(new URL('../build-info.json', import.meta.url), 'utf8')) as { version?: unknown; gitCommit?: unknown; sourceDirty?: unknown }
+    if (typeof identity.version === 'string' && typeof identity.gitCommit === 'string' && /^[a-f0-9]{40}$/.test(identity.gitCommit)) {
+      return `${identity.version} (ovolv999) ${identity.gitCommit}${identity.sourceDirty ? ' dirty' : ''}`
+    }
+  } catch (error) { void error }
+  return `${VERSION} (ovolv999) source-checkout`
+}
 
 // ─────────────────────────────────────────────────────────────
 // Shared prompt router — single source of truth for stdin reads.
@@ -504,6 +516,10 @@ OPTIONS
   --ink                     Launch with Ink/React UI (full component tree, live autocomplete)
   --pipe                    Pipe mode: read stdin as context, output to stdout (no UI)
   --format <text|json>      Output format for pipe mode (default: text)
+  --runtime-status [path]  Inspect retained runs and workspace recovery state
+  --recover-workspace <path> --epoch <id> --decision <keep|cancel|continue>
+                           Record a recovery decision; stopping confirmation is required
+  --confirm-physical-stop  Confirm owned processes have stopped before recovery
   -v, --version             Print version and exit
   -h, --help                Show this help
 
@@ -716,7 +732,9 @@ async function runRepl(
   const loadSessionByRef = (ref: string): OpenAIMessage[] | null => {
     try {
       const dir = resolveSessionPath(cwd, ref)
+      claimSessionOwnership(dir)
       const msgs = loadSession(dir)
+      if (currentSessionDir && currentSessionDir !== dir) releaseSessionOwnership(currentSessionDir)
       currentSessionDir = dir
       return msgs
     } catch (err: unknown) {
@@ -1287,13 +1305,13 @@ async function handleSessionSubcommand(cmd: string, args: string[]): Promise<voi
         process.stderr.write('Usage: ovolv999 stop <session-id>\n')
         process.exit(1)
       }
-      const ok = stopSession(id)
-      if (!ok) {
-        process.stderr.write(`Error: could not stop session "${id}"\n`)
+      const result = await stopSession(id)
+      if (result.status === 'failed' || result.status === 'not_found') {
+        process.stderr.write(`Error: could not stop session "${id}": ${result.reason ?? result.status}\n`)
         process.exit(1)
       }
-      process.stdout.write(`Stopped session ${id}\n`)
-      process.exit(0)
+      process.stdout.write(`${result.status === 'stopped' ? 'Stopped' : 'Stopping'} session ${id}\n`)
+      process.exit(result.status === 'stopped' ? 0 : 2)
       break
     }
     case 'rm': {
@@ -1328,6 +1346,8 @@ async function handleSessionSubcommand(cmd: string, args: string[]): Promise<voi
 // Main
 // ─────────────────────────────────────────────────────────────
 async function main(): Promise<void> {
+  const { handleRuntimeCommand } = await import('../src/core/runtimeRecovery.js')
+  if (await handleRuntimeCommand(process.argv.slice(2))) return
   // ── Background session subcommands (ps / attach / logs / stop / rm) ──────
   // Routed before parseArgs because bare subcommands would otherwise be
   // swallowed as the task argument.
@@ -1370,7 +1390,7 @@ async function main(): Promise<void> {
   const skills = loadSkills(cwd)
 
   if (version) {
-    process.stdout.write(`${VERSION} (ovolv999)\n`)
+    process.stdout.write(`${buildVersion()}\n`)
     process.exit(0)
   }
 
@@ -1411,7 +1431,8 @@ async function main(): Promise<void> {
     }
 
     const OpenAI = (await import('openai')).default
-    const client = new OpenAI({ apiKey, baseURL: apiEnvironment.baseURL })
+    const { createModelGateway } = await import('../src/core/modelGateway.js')
+    const client = createModelGateway(new OpenAI({ apiKey, baseURL: apiEnvironment.baseURL, maxRetries: 0 }), { model, apiKey, baseURL: apiEnvironment.baseURL, cwd, permissionMode: 'deny', maxIterations: 1 }, () => null)
 
     const llmCall = async (prompt: string): Promise<string> => {
       try {
@@ -1456,7 +1477,7 @@ async function main(): Promise<void> {
       process.exit(1)
     }
     const { startBackgroundSession, formatSessionDetail, loadMetadata } = await import('../src/core/backgroundSession.js')
-    const result = startBackgroundSession({ task, cwd, model })
+    const result = await startBackgroundSession({ task, cwd, model })
     const meta = loadMetadata(result.sessionId)
     if (meta) {
       process.stdout.write(formatSessionDetail(meta) + '\n')
@@ -1543,12 +1564,14 @@ async function main(): Promise<void> {
       }
       throw err
     }
+    claimSessionOwnership(sessionDir)
     resumedHistory = loadSession(sessionDir)
     renderer.info(`Resumed session: ${sessionDir} (${resumedHistory.length} messages)`)
   } else if (continueSession) {
     const latest = findLatestSession(cwd)
     if (latest) {
       sessionDir = latest
+      claimSessionOwnership(sessionDir)
       resumedHistory = loadSession(sessionDir)
       renderer.info(`Continued session: ${sessionDir} (${resumedHistory.length} messages)`)
     } else {
@@ -1740,6 +1763,8 @@ async function main(): Promise<void> {
   const engine = new ExecutionEngine(config, inkRendererInstance
     ? (inkRendererInstance as unknown as Renderer)
     : renderer)
+  const { markBackgroundReady } = await import('../src/core/backgroundSession.js')
+  markBackgroundReady()
 
   // Cleanup on any exit path — must be IDEMPOTENT (signal handlers may fire
   // alongside the natural `exit` event). Order matters: save session first

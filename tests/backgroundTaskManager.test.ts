@@ -1,8 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { existsSync, readFileSync, statSync, rmSync, writeFileSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { BackgroundTaskManager, formatTaskList, formatTaskDetail } from '../src/core/backgroundTaskManager.js'
+
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 })
 
 // Helper: wait for a task to reach a non-running state
 async function waitForDone(manager: BackgroundTaskManager, id: string, timeoutMs = 5000): Promise<void> {
@@ -43,7 +45,7 @@ describe('BackgroundTaskManager', () => {
   let manager: BackgroundTaskManager
 
   beforeEach(() => {
-    manager = new BackgroundTaskManager()
+    manager = new BackgroundTaskManager({ sigkillGraceMs: 50 })
   })
 
   // ── createTask ────────────────────────────────────────────────────────────
@@ -160,6 +162,8 @@ describe('BackgroundTaskManager', () => {
       const stopped = manager.stopTask(id)
       expect(stopped).toBe(true)
 
+      expect(manager.getTask(id)!.status).toBe('stopping')
+      await manager.waitForTask(id, 15_000)
       const task = manager.getTask(id)!
       expect(task.status).toBe('stopped')
       expect(task.endTime).not.toBeNull()
@@ -181,10 +185,10 @@ describe('BackgroundTaskManager', () => {
       await new Promise((r) => setTimeout(r, 200)) // let it start
 
       manager.stopTask(id)
-      expect(manager.getTask(id)!.status).toBe('stopped')
+      expect(manager.getTask(id)!.status).toBe('stopping')
 
       // Wait for the SIGTERM'd process to fully exit
-      await new Promise((r) => setTimeout(r, 500))
+      await manager.waitForTask(id, 15_000)
 
       // Status should STILL be 'stopped', not overridden to 'failed'
       const finalInfo = manager.getTask(id)!
@@ -315,10 +319,10 @@ describe('BackgroundTaskManager', () => {
 
         const stopped = manager.stopTask(id)
         expect(stopped).toBe(true)
-        expect(manager.getTask(id)!.status).toBe('stopped')
+        expect(manager.getTask(id)!.status).toBe('stopping')
 
         // Give the kernel time to reap.
-        await new Promise((r) => setTimeout(r, 500))
+        await manager.waitForTask(id, 15_000)
 
         // /proc/<pid>/stat state field: 'Z' = zombie, anything else alive.
         // If the grandchild process group survived SIGTERM to the shell,
@@ -354,16 +358,17 @@ describe('BackgroundTaskManager', () => {
   // ── Constructor option validation ──────────────────────────────────────────
 
   describe('constructor options', () => {
-    it('accepts finite non-negative integer sigkillGraceMs (including 0)', () => {
+    it('accepts finite non-negative integer sigkillGraceMs (including 0)', async () => {
       const m = new BackgroundTaskManager({ sigkillGraceMs: 0 })
       // 0 means immediate SIGKILL — verify it doesn't throw and the
       // manager can still spawn/stop tasks.
       const id = m.createTask(ECHO)
       expect(m.getTask(id)).toBeDefined()
-      m.dispose()
+      await m.waitForTask(id, 5000)
+      await m.dispose()
     })
 
-    it('falls back to default for invalid sigkillGraceMs (NaN/Infinity/-1/float/string)', () => {
+    it('falls back to default for invalid sigkillGraceMs (NaN/Infinity/-1/float/string)', async () => {
       const cases: unknown[] = [NaN, Infinity, -Infinity, -1, 1.5, '3000', null, undefined, true]
       for (const v of cases) {
         // Constructor must not throw.
@@ -372,28 +377,31 @@ describe('BackgroundTaskManager', () => {
         const m = new BackgroundTaskManager({ sigkillGraceMs: v as number })
         const id = m.createTask(ECHO)
         expect(m.getTask(id)).toBeDefined()
-        m.dispose()
+        await m.waitForTask(id, 5000)
+      await m.dispose()
       }
     })
 
-    it('falls back to default for invalid maxOutputFileBytes (NaN/Infinity/0/negative/float/string)', () => {
+    it('falls back to default for invalid maxOutputFileBytes (NaN/Infinity/0/negative/float/string)', async () => {
       const cases: unknown[] = [NaN, Infinity, -Infinity, 0, -100, 1024.5, '1024', null, undefined]
       for (const v of cases) {
         expect(() => new BackgroundTaskManager({ maxOutputFileBytes: v as number })).not.toThrow()
         const m = new BackgroundTaskManager({ maxOutputFileBytes: v as number })
         const id = m.createTask(ECHO, { sessionDir: tmpdir() })
         expect(m.getTask(id)).toBeDefined()
-        m.dispose()
+        await m.waitForTask(id, 5000)
+      await m.dispose()
       }
     })
 
-    it('default values apply when options is empty or omitted', () => {
+    it('default values apply when options is empty or omitted', async () => {
       expect(() => new BackgroundTaskManager()).not.toThrow()
       expect(() => new BackgroundTaskManager({})).not.toThrow()
       const m = new BackgroundTaskManager()
       const id = m.createTask(ECHO)
       expect(m.getTask(id)).toBeDefined()
-      m.dispose()
+      await m.waitForTask(id, 5000)
+      await m.dispose()
     })
   })
 
@@ -425,9 +433,10 @@ describe('BackgroundTaskManager', () => {
       // And again.
       expect(m.stopTask(id)).toBe(false)
       // Status remains 'stopped'.
-      expect(m.getTask(id)!.status).toBe('stopped')
+      expect(m.getTask(id)!.status).toBe('stopping')
       // Cleanup.
-      m.dispose()
+      await m.waitForTask(id, 5000)
+      await m.dispose()
     })
   })
 
@@ -440,7 +449,7 @@ describe('BackgroundTaskManager', () => {
       expect(manager.stopTask(id)).toBe(true)
       expect(manager.stopTask(id)).toBe(false)
       expect(manager.stopTask(id)).toBe(false)
-      expect(manager.getTask(id)!.status).toBe('stopped')
+      expect(manager.getTask(id)!.status).toBe('stopping')
     })
 
     it('duplicate stop does not re-arm the SIGKILL escalation timer', async () => {
@@ -489,13 +498,13 @@ describe('BackgroundTaskManager', () => {
       // can prove the invariant indirectly: the stop succeeds, the
       // status stays 'stopped', and a fresh task created afterward is
       // unaffected.
-      const id = manager.createTask(SLEEP, { description: 'race' })
+      const id = manager.createTask(LONG_SLEEP, { description: 'race' })
       // Let it start, then stop it (SIGTERM). The shell will exit, the
       // close handler clears the timer. The escalation never fires.
       await new Promise((r) => setTimeout(r, 100))
       expect(manager.stopTask(id)).toBe(true)
       // Wait past the grace window + close propagation.
-      await new Promise((r) => setTimeout(r, 3500))
+      await manager.waitForTask(id, 15_000)
       const info = manager.getTask(id)!
       expect(info.status).toBe('stopped')
       // No leftover timer keeping the loop alive: the close handler
@@ -583,7 +592,7 @@ describe('BackgroundTaskManager', () => {
       const id2 = manager.createTask(LONG_SLEEP, { description: 'b' })
       await new Promise((r) => setTimeout(r, 200))
 
-      manager.dispose()
+      await manager.dispose()
 
       // Internal state cleared — getTask returns undefined.
       expect(manager.getTask(id1)).toBeUndefined()
@@ -591,9 +600,9 @@ describe('BackgroundTaskManager', () => {
       expect(manager.listTasks()).toHaveLength(0)
     })
 
-    it('is idempotent and safe to call when idle', () => {
-      manager.dispose()
-      manager.dispose()
+    it('is idempotent and safe to call when idle', async () => {
+      await manager.dispose()
+      await manager.dispose()
       expect(manager.listTasks()).toHaveLength(0)
     })
 
@@ -607,9 +616,9 @@ describe('BackgroundTaskManager', () => {
       await new Promise((r) => setTimeout(r, 300))
       const pid = manager.getTask(id)!.pid
 
-      manager.dispose()
+      await manager.dispose()
 
-      await new Promise((r) => setTimeout(r, 500))
+      await manager.waitForTask(id, 15_000)
 
       // Verify the whole process group is gone.
       const { execSync } = await import('child_process')

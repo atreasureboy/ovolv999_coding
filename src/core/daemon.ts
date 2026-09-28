@@ -11,9 +11,11 @@
  */
 
 import { createServer, type Server, Socket } from 'net'
-import { existsSync, unlinkSync, writeFileSync, readFileSync, mkdirSync } from 'fs'
+import { existsSync, unlinkSync, mkdirSync, appendFileSync, renameSync, statSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
+import { createHash } from 'crypto'
+import { StringDecoder } from 'string_decoder'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -51,6 +53,19 @@ interface WorkerEntry {
 
 export type { WorkerEntry }
 
+export interface DaemonOptions {
+  drainTimeoutMs?: number
+  maxLogBytes?: number
+  maxConnections?: number
+  maxFrameBytes?: number
+  maxWorkers?: number
+}
+
+export function resolveDaemonSocketPath(path: string): string {
+  if (process.platform !== 'win32' || path.startsWith('\\\\.\\pipe\\')) return path
+  return `\\\\.\\pipe\\ovolv999-${createHash('sha256').update(path).digest('hex').slice(0, 24)}`
+}
+
 // ── Daemon ──────────────────────────────────────────────────────────────────
 
 export class Daemon {
@@ -58,21 +73,29 @@ export class Daemon {
   private startTime: number = 0
   private workers = new Map<string, WorkerEntry>()
   private status: DaemonStatus = 'stopped'
+  private readonly connections = new Set<Socket>()
+  private stopPromise?: Promise<void>
+  private logHealthy = true
+  private ownsEndpoint = false
+  private readonly socketPath: string
+  private readonly options: Required<DaemonOptions>
 
   constructor(
-    private readonly socketPath: string,
+    socketPath: string,
     private readonly logPath: string,
-  ) {}
+    options: DaemonOptions = {},
+  ) {
+    this.socketPath = resolveDaemonSocketPath(socketPath)
+    this.options = { drainTimeoutMs: 500, maxLogBytes: 1024 * 1024, maxConnections: 64, maxFrameBytes: 64 * 1024, maxWorkers: 64, ...options }
+    for (const value of Object.values(this.options)) if (!Number.isSafeInteger(value) || value < 1) throw new Error('Invalid daemon capacity')
+  }
 
   async start(): Promise<void> {
     if (this.status === 'running') return
 
     this.status = 'starting'
 
-    // Clean up stale socket
-    if (existsSync(this.socketPath)) {
-      try { unlinkSync(this.socketPath) } catch { /* ignore */ }
-    }
+    this.stopPromise = undefined
 
     // Ensure log dir exists
     const logDir = join(this.logPath, '..')
@@ -80,6 +103,10 @@ export class Daemon {
 
     return new Promise((resolve, reject) => {
       this.server = createServer((socket: Socket) => {
+        if (this.connections.size >= this.options.maxConnections) { socket.destroy(); return }
+        this.connections.add(socket)
+        socket.once('close', () => this.connections.delete(socket))
+        socket.on('error', () => socket.destroy())
         this.handleConnection(socket)
       })
 
@@ -90,6 +117,7 @@ export class Daemon {
       })
 
       this.server.listen(this.socketPath, () => {
+        this.ownsEndpoint = true
         this.status = 'running'
         this.startTime = Date.now()
         this.log(`Daemon started (pid=${process.pid}, socket=${this.socketPath})`)
@@ -99,17 +127,23 @@ export class Daemon {
   }
 
   async stop(): Promise<void> {
+    if (this.stopPromise) return this.stopPromise
     this.status = 'stopped'
-    if (this.server) {
-      await new Promise<void>((resolve) => {
-        this.server!.close(() => resolve())
-      })
-      this.server = null
-    }
-    if (existsSync(this.socketPath)) {
-      try { unlinkSync(this.socketPath) } catch { /* ignore */ }
-    }
-    this.log('Daemon stopped')
+    this.stopPromise = (async () => {
+      if (this.server) {
+        const server = this.server
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(() => { for (const socket of this.connections) socket.destroy() }, this.options.drainTimeoutMs)
+          server.close(() => { clearTimeout(timer); resolve() })
+          for (const socket of this.connections) socket.end()
+        })
+        this.server = null
+      }
+      if (this.ownsEndpoint && process.platform !== 'win32' && existsSync(this.socketPath)) unlinkSync(this.socketPath)
+      this.ownsEndpoint = false
+      this.log('Daemon stopped')
+    })()
+    return this.stopPromise
   }
 
   getInfo(): DaemonInfo {
@@ -125,6 +159,7 @@ export class Daemon {
   }
 
   addWorker(name: string, command?: string): WorkerEntry {
+    if (this.workers.size >= this.options.maxWorkers) throw new Error('Daemon worker capacity exceeded')
     const id = `worker-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
     const worker: WorkerEntry = {
       id,
@@ -158,8 +193,10 @@ export class Daemon {
 
   private handleConnection(socket: Socket): void {
     let buffer = ''
+    const decoder = new StringDecoder('utf8')
     socket.on('data', (data: Buffer) => {
-      buffer += data.toString()
+      if (Buffer.byteLength(buffer) + data.length > this.options.maxFrameBytes) { socket.end(JSON.stringify({ ok: false, error: 'Daemon frame byte limit exceeded' }) + '\n'); return }
+      buffer += decoder.write(data)
       let nl = buffer.indexOf('\n')
       while (nl !== -1) {
         const line = buffer.slice(0, nl).trim()
@@ -168,8 +205,10 @@ export class Daemon {
         if (!line) continue
         try {
           const cmd = JSON.parse(line) as DaemonCommand
+          if (!cmd || typeof cmd.action !== 'string') throw new Error('Invalid daemon command')
           const response = this.handleCommand(cmd)
-          socket.write(JSON.stringify(response) + '\n')
+          if (!socket.write(JSON.stringify(response) + '\n')) { socket.pause(); socket.once('drain', () => socket.resume()) }
+          if (socket.writableLength > 1024 * 1024) { socket.destroy(); return }
         } catch (err) {
           const response: DaemonResponse = { ok: false, error: err instanceof Error ? err.message : String(err) }
           socket.write(JSON.stringify(response) + '\n')
@@ -192,10 +231,12 @@ export class Daemon {
             uptime: Date.now() - this.startTime,
             workers: this.workers.size,
             memoryMB: Math.round(process.memoryUsage().rss / 1024 / 1024),
+            logHealthy: this.logHealthy,
+            connections: this.connections.size,
           },
         }
       case 'stop':
-        this.stop().catch(() => {})
+        setImmediate(() => { void this.stop() })
         return { ok: true, data: 'stopping' }
       case 'list-workers':
         return { ok: true, data: this.listWorkers() }
@@ -207,24 +248,25 @@ export class Daemon {
   private log(message: string): void {
     try {
       const timestamp = new Date().toISOString()
-      const line = `[${timestamp}] ${message}\n`
-      if (existsSync(this.logPath)) {
-        const existing = readFileSync(this.logPath, 'utf8')
-        writeFileSync(this.logPath, existing + line)
-      } else {
-        writeFileSync(this.logPath, line)
+      const line = `[${timestamp}] ${message.slice(0, 16_000)}\n`
+      if (existsSync(this.logPath) && statSync(this.logPath).size + Buffer.byteLength(line) > this.options.maxLogBytes) {
+        if (existsSync(`${this.logPath}.1`)) unlinkSync(`${this.logPath}.1`)
+        renameSync(this.logPath, `${this.logPath}.1`)
       }
-    } catch { /* ignore log errors */ }
+      appendFileSync(this.logPath, line, { mode: 0o600 })
+      this.logHealthy = true
+    } catch { this.logHealthy = false }
   }
 }
 
 // ── Daemon Client ───────────────────────────────────────────────────────────
 
 export class DaemonClient {
-  constructor(private readonly socketPath: string) {}
+  private readonly socketPath: string
+  constructor(socketPath: string) { this.socketPath = resolveDaemonSocketPath(socketPath) }
 
   async send(cmd: DaemonCommand, timeoutMs = 5000): Promise<DaemonResponse> {
-    if (!existsSync(this.socketPath)) {
+    if (process.platform !== 'win32' && !existsSync(this.socketPath)) {
       return { ok: false, error: 'Daemon socket not found. Is the daemon running?' }
     }
 
@@ -247,6 +289,13 @@ export class DaemonClient {
 
       socket.on('data', (data: Buffer) => {
         buffer += data.toString()
+        if (Buffer.byteLength(buffer) > 1024 * 1024 && !settled) {
+          settled = true
+          clearTimeout(timer)
+          socket.destroy()
+          resolve({ ok: false, error: 'Daemon response byte limit exceeded' })
+          return
+        }
         const nl = buffer.indexOf('\n')
         if (nl !== -1 && !settled) {
           settled = true
@@ -265,8 +314,12 @@ export class DaemonClient {
         if (!settled) {
           settled = true
           clearTimeout(timer)
-          resolve({ ok: false, error: err.message })
+          socket.destroy()
+          resolve({ ok: false, error: (err as NodeJS.ErrnoException).code === 'ENOENT' ? 'Daemon socket not found. Is the daemon running?' : err.message })
         }
+      })
+      socket.on('close', () => {
+        if (!settled) { settled = true; clearTimeout(timer); resolve({ ok: false, error: 'Daemon disconnected before responding' }) }
       })
 
       socket.connect(this.socketPath)
@@ -292,15 +345,15 @@ export class DaemonClient {
 // ── Paths ───────────────────────────────────────────────────────────────────
 
 export function getDaemonSocketPath(): string {
-  return join(homedir(), '.ovolv999', 'daemon.sock')
+  return resolveDaemonSocketPath(join(homedir(), '.ovolv999', 'daemon.sock'))
 }
 
 export function getDaemonLogPath(): string {
   return join(homedir(), '.ovolv999', 'daemon.log')
 }
 
-export function isDaemonRunning(): boolean {
-  return existsSync(getDaemonSocketPath())
+export async function isDaemonRunning(): Promise<boolean> {
+  return new DaemonClient(getDaemonSocketPath()).ping()
 }
 
 // ── Formatting ──────────────────────────────────────────────────────────────
