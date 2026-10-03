@@ -74,6 +74,73 @@ export interface ExtractionOptions {
   maxMessages?: number
 }
 
+const CATEGORIES = ['bug-fix', 'feature', 'refactor', 'test', 'docs', 'review', 'explore', 'config'] as const
+
+const CATEGORY_KEYWORDS: Record<typeof CATEGORIES[number], readonly string[]> = {
+  'bug-fix': ['bug', 'error', 'fix', 'broken', 'crash', 'fail', 'issue', 'wrong', 'incorrect'],
+  feature: ['add', 'implement', 'create', 'build', 'new', 'feature', 'support'],
+  refactor: ['refactor', 'cleanup', 'clean up', 'simplify', 'restructure', 'optimize', 'rename'],
+  test: ['test', 'spec', 'coverage', 'vitest', 'jest', 'pytest'],
+  docs: ['document', 'docs', 'readme', 'comment', 'jSDoc', 'explain'],
+  review: ['review', 'audit', 'check', 'inspect', 'analyze'],
+  explore: ['explore', 'find', 'search', 'where', 'how does', 'understand'],
+  config: ['config', 'configure', 'setup', 'install', 'environment', 'tsconfig', 'package.json'],
+}
+
+const CATEGORY_TIPS: Partial<Record<TaskCategory, readonly string[]>> = {
+  'bug-fix': [
+    'Reproduce the bug first before attempting a fix',
+    'Check related tests after making changes',
+    'Look for similar patterns elsewhere in the codebase',
+  ],
+  feature: [
+    'Check existing patterns and conventions first',
+    'Add tests for new functionality',
+    'Update documentation if the feature is user-facing',
+  ],
+  refactor: [
+    'Ensure existing tests pass after each change',
+    'Make incremental changes — one refactor at a time',
+    'Preserve public API unless explicitly changing it',
+  ],
+  test: [
+    'Cover both success and error cases',
+    'Use descriptive test names that explain the scenario',
+    'Aim for deterministic tests — avoid time/random dependencies',
+  ],
+  docs: [
+    'Write for the reader who knows least',
+    'Include code examples',
+    'Keep paragraphs short',
+  ],
+}
+
+interface ToolExtraction {
+  action: string
+  summarize: (args: Record<string, unknown>) => string
+}
+
+function summarizeFilePath(args: Record<string, unknown>): string {
+  return str(args.file_path ?? args.path ?? '')
+}
+
+function summarizePattern(args: Record<string, unknown>): string {
+  return str(args.pattern ?? '')
+}
+
+const TOOL_EXTRACTIONS: ReadonlyMap<string, ToolExtraction> = new Map<string, ToolExtraction>([
+  ['Read', { action: 'Read', summarize: summarizeFilePath }],
+  ['Write', { action: 'Write', summarize: summarizeFilePath }],
+  ['Edit', { action: 'Edit', summarize: summarizeFilePath }],
+  ['Bash', { action: 'Run', summarize: args => str(args.command ?? '').slice(0, 60) }],
+  ['Grep', { action: 'Search for', summarize: summarizePattern }],
+  ['Glob', { action: 'Find files matching', summarize: summarizePattern }],
+  ['Agent', { action: 'Dispatch agent to', summarize: args => str(args.description ?? args.prompt ?? '').slice(0, 60) }],
+  ['TodoWrite', { action: 'Update task list with', summarize: args => `${(args.todos as unknown[] ?? []).length} items` }],
+  ['WebFetch', { action: 'Fetch', summarize: args => str(args.url ?? '').slice(0, 60) }],
+  ['WebSearch', { action: 'Search the web for', summarize: args => str(args.query ?? '').slice(0, 60) }],
+])
+
 // ── Category Detection ──────────────────────────────────────────────────────
 
 /**
@@ -88,45 +155,13 @@ export function detectCategory(messages: OpenAIMessage[]): TaskCategory {
 
   if (!userText) return 'unknown'
 
-  // Score each category by keyword matches
-  const scores: Record<TaskCategory, number> = {
-    'bug-fix': 0,
-    'feature': 0,
-    'refactor': 0,
-    'test': 0,
-    'docs': 0,
-    'review': 0,
-    'explore': 0,
-    'config': 0,
-    'unknown': 0,
-  }
-
-  const keywords: Record<Exclude<TaskCategory, 'unknown'>, string[]> = {
-    'bug-fix': ['bug', 'error', 'fix', 'broken', 'crash', 'fail', 'issue', 'wrong', 'incorrect'],
-    'feature': ['add', 'implement', 'create', 'build', 'new', 'feature', 'support'],
-    'refactor': ['refactor', 'cleanup', 'clean up', 'simplify', 'restructure', 'optimize', 'rename'],
-    'test': ['test', 'spec', 'coverage', 'vitest', 'jest', 'pytest'],
-    'docs': ['document', 'docs', 'readme', 'comment', 'jSDoc', 'explain'],
-    'review': ['review', 'audit', 'check', 'inspect', 'analyze'],
-    'explore': ['explore', 'find', 'search', 'where', 'how does', 'understand'],
-    'config': ['config', 'configure', 'setup', 'install', 'environment', 'tsconfig', 'package.json'],
-  }
-
-  for (const [cat, words] of Object.entries(keywords)) {
-    for (const word of words) {
-      if (userText.includes(word)) {
-        scores[cat as TaskCategory] += 1
-      }
-    }
-  }
-
-  // Find highest scoring category
   let best: TaskCategory = 'unknown'
   let bestScore = 0
-  for (const [cat, score] of Object.entries(scores)) {
+  for (const category of CATEGORIES) {
+    const score = CATEGORY_KEYWORDS[category].reduce((count, word) => count + Number(userText.includes(word)), 0)
     if (score > bestScore) {
       bestScore = score
-      best = cat as TaskCategory
+      best = category
     }
   }
 
@@ -149,7 +184,7 @@ export function extractToolSequence(messages: OpenAIMessage[]): ToolCallEntry[] 
 
       try {
         const args: unknown = call.function?.arguments ? JSON.parse(call.function.arguments) : {}
-        summary = summarizeToolCall(name, args && typeof args === 'object' && !Array.isArray(args) ? args as Record<string, unknown> : {})
+        summary = TOOL_EXTRACTIONS.get(name)?.summarize(args && typeof args === 'object' && !Array.isArray(args) ? args as Record<string, unknown> : {}) ?? ''
       } catch {
         summary = ''
       }
@@ -159,33 +194,6 @@ export function extractToolSequence(messages: OpenAIMessage[]): ToolCallEntry[] 
   }
 
   return sequence
-}
-
-function summarizeToolCall(name: string, args: Record<string, unknown>): string {
-  switch (name) {
-    case 'Read':
-      return str(args.file_path ?? args.path ?? '')
-    case 'Write':
-      return str(args.file_path ?? args.path ?? '')
-    case 'Edit':
-      return str(args.file_path ?? args.path ?? '')
-    case 'Bash':
-      return str(args.command ?? '').slice(0, 60)
-    case 'Grep':
-      return str(args.pattern ?? '')
-    case 'Glob':
-      return str(args.pattern ?? '')
-    case 'Agent':
-      return str(args.description ?? args.prompt ?? '').slice(0, 60)
-    case 'TodoWrite':
-      return `${(args.todos as unknown[] ?? []).length} items`
-    case 'WebFetch':
-      return str(args.url ?? '').slice(0, 60)
-    case 'WebSearch':
-      return str(args.query ?? '').slice(0, 60)
-    default:
-      return ''
-  }
 }
 
 // ── Prompt Generation ───────────────────────────────────────────────────────
@@ -221,7 +229,7 @@ export function generateSkillPrompt(extraction: SkillExtraction): string {
   }
 
   // Tips based on category
-  const tips = getCategoryTips(extraction.category)
+  const tips = CATEGORY_TIPS[extraction.category] ?? []
   if (tips.length > 0) {
     lines.push('## Tips')
     for (const tip of tips) {
@@ -247,65 +255,12 @@ function deduplicateAndSummarize(tools: ToolCallEntry[]): string[] {
   }
 
   return groups.map(g => {
-    const action = toolAction(g.name)
+    const action = TOOL_EXTRACTIONS.get(g.name)?.action ?? g.name
     if (g.count === 1) {
       return g.summaries.length > 0 ? `${action} ${g.summaries[0]}` : action
     }
     return `${action} ${g.count} items${g.summaries.length > 0 ? ` (e.g. ${g.summaries[0]})` : ''}`
   })
-}
-
-function toolAction(name: string): string {
-  const actions: Record<string, string> = {
-    'Read': 'Read',
-    'Write': 'Write',
-    'Edit': 'Edit',
-    'Bash': 'Run',
-    'Grep': 'Search for',
-    'Glob': 'Find files matching',
-    'Agent': 'Dispatch agent to',
-    'TodoWrite': 'Update task list with',
-    'WebFetch': 'Fetch',
-    'WebSearch': 'Search the web for',
-  }
-  return actions[name] ?? name
-}
-
-function getCategoryTips(category: TaskCategory): string[] {
-  switch (category) {
-    case 'bug-fix':
-      return [
-        'Reproduce the bug first before attempting a fix',
-        'Check related tests after making changes',
-        'Look for similar patterns elsewhere in the codebase',
-      ]
-    case 'feature':
-      return [
-        'Check existing patterns and conventions first',
-        'Add tests for new functionality',
-        'Update documentation if the feature is user-facing',
-      ]
-    case 'refactor':
-      return [
-        'Ensure existing tests pass after each change',
-        'Make incremental changes — one refactor at a time',
-        'Preserve public API unless explicitly changing it',
-      ]
-    case 'test':
-      return [
-        'Cover both success and error cases',
-        'Use descriptive test names that explain the scenario',
-        'Aim for deterministic tests — avoid time/random dependencies',
-      ]
-    case 'docs':
-      return [
-        'Write for the reader who knows least',
-        'Include code examples',
-        'Keep paragraphs short',
-      ]
-    default:
-      return []
-  }
 }
 
 function titleCase(s: string): string {

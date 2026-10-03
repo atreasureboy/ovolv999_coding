@@ -1,4 +1,3 @@
-import { resolve } from 'path'
 /**
  * FileEditTool — exact string replacement in files
  * Reference: src/tools/FileEditTool/
@@ -9,16 +8,11 @@ import { resolve } from 'path'
 
 import { readFile } from 'fs/promises'
 import { existsSync } from 'fs'
-import { dirname } from 'path'
-import { createRequire } from 'module'
-import { runFileVerificationCommand } from '../core/verification.js'
-import { readFileSync } from 'fs'
-import { join } from 'path'
 import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/types.js'
 import { EDIT_FILE_DESCRIPTION } from '../prompts/tools.js'
-import { getFileState } from '../core/fileState.js'
-import { atomicWrite, statSafely } from '../core/atomicWrite.js'
-import { resolveWorkspacePath } from '../core/workspacePath.js'
+import { statSafely } from '../core/atomicWrite.js'
+import { persistFileMutation, prepareFileMutation, resolveFileOperation } from './fileOperations.js'
+import { formatEditedFile, formatReplacementDiff } from './fileEditFormatting.js'
 
 export interface EditFileInput {
   file_path: string
@@ -75,13 +69,9 @@ export class FileEditTool implements Tool {
   async execute(input: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
     const { file_path: rawPath, old_string, new_string, replace_all } = input as unknown as EditFileInput
 
-    const fileState = getFileState(context)
-    if (!rawPath || typeof rawPath !== 'string') {
-      return { content: 'Error: file_path is required', isError: true }
-    }
-    let file_path: string
-    try { file_path = resolveWorkspacePath(context, rawPath) }
-    catch (error) { return { content: `Error: ${(error as Error).message}`, isError: true } }
+    const operation = resolveFileOperation(rawPath, context)
+    if ('error' in operation) return operation.error
+    const { filePath: file_path, fileState } = operation
     if (typeof old_string !== 'string') {
       return { content: 'Error: old_string must be a string', isError: true }
     }
@@ -228,73 +218,14 @@ export class FileEditTool implements Tool {
       // then atomically replace. trackEdit is intentionally placed AFTER
       // the guards so a refused edit doesn't create a phantom history
       // version of content we never actually changed.
-      const backup = context.fileHistory?.trackEdit(file_path)
-      if (backup?.status === 'failed') return { content: `Backup failed; file was not changed: ${backup.error}`, isError: true }
-      context.signal?.throwIfAborted()
+      const preparationError = prepareFileMutation(file_path, context)
+      if (preparationError) return preparationError
 
       // Atomic write — see src/core/atomicWrite.ts.
-      await atomicWrite(file_path, newContent)
+      await persistFileMutation(operation, newContent)
 
-      // Refresh the file-state cache so a subsequent Read sees this edit's
-      // new content as the cached baseline. Pass `newContent` so the hash
-      // layer can detect same-mtime/same-size replacements on the next
-      // Write/Edit without re-reading.
-      fileState.markFileRead(file_path, newContent)
-
-      // Auto-format: detect prettier/eslint config in project and run after edit
-      // Walk up from file's directory to find project root (where config files live)
-      let projectRoot = dirname(file_path)
-      for (let i = 0; i < 10; i++) {
-        if (existsSync(`${projectRoot}/.prettierrc`) || existsSync(`${projectRoot}/.prettierrc.js`) ||
-            existsSync(`${projectRoot}/eslint.config.js`) || existsSync(`${projectRoot}/.eslintrc`) ||
-            existsSync(`${projectRoot}/.eslintrc.js`) || existsSync(`${projectRoot}/package.json`)) {
-          break
-        }
-        const parent = dirname(projectRoot)
-        if (parent === projectRoot) break
-        projectRoot = parent
-      }
-      let formatNote = ''
-      try {
-        const formatter = existsSync(join(projectRoot, '.prettierrc')) || existsSync(join(projectRoot, '.prettierrc.js')) || existsSync(join(projectRoot, 'prettier.config.js')) ? 'prettier'
-          : existsSync(join(projectRoot, '.eslintrc')) || existsSync(join(projectRoot, '.eslintrc.js')) || existsSync(join(projectRoot, 'eslint.config.js')) ? 'eslint' : undefined
-        if (formatter) {
-          const require = createRequire(join(projectRoot, 'package.json'))
-          const manifestPath = require.resolve(formatter + '/package.json')
-          const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { bin: string | Record<string, string> }
-          const bin = typeof manifest.bin === 'string' ? manifest.bin : manifest.bin[formatter]
-          if (bin) {
-            const formatted = await runFileVerificationCommand(process.execPath, [resolve(dirname(manifestPath), bin), formatter === 'prettier' ? '--write' : '--fix', file_path], projectRoot, context.signal, 10_000)
-            if (formatted.passed) formatNote = ' (formatted with ' + formatter + ')'
-          }
-        }
-      } catch (error) { void error }
-      context.signal?.throwIfAborted()
-
-      // If a formatter ran in-place above, the file content may now differ
-      // from `newContent`. Re-mark with the post-format content so the cache
-      // hash reflects what is actually on disk. Best-effort: a failed re-read
-      // leaves the pre-format hash, which is still a valid (just slightly
-      // stale) baseline.
-      if (formatNote !== '') {
-        try {
-          const postFormatContent = await readFile(file_path, 'utf8')
-          fileState.markFileRead(file_path, postFormatContent)
-        } catch { /* leave the prior hash in place */ }
-      }
-
-      // Build a simple diff for display
-      const oldLines = old_string.split('\n')
-      const newLines = new_string.split('\n')
-      const diffLines: string[] = []
-      const maxLines = Math.max(oldLines.length, newLines.length)
-      for (let i = 0; i < maxLines; i++) {
-        const o = oldLines[i]
-        const n = newLines[i]
-        if (o !== undefined) diffLines.push(`- ${o}`)
-        if (n !== undefined && n !== o) diffLines.push(`+ ${n}`)
-      }
-      const diff = diffLines.length > 0 ? `\n${diffLines.join('\n')}` : ''
+      const formatNote = await formatEditedFile(file_path, fileState, context.signal)
+      const diff = formatReplacementDiff(old_string, new_string)
 
       const count = replace_all ? occurrences : 1
       return {

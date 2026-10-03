@@ -199,15 +199,14 @@ describe('NotebookEditTool', () => {
     expect(result.content).toContain('not valid JSON')
   })
 
-  it('converts replace-past-end to insert', async () => {
-    // Cell index 3 doesn't exist (only 0-2), replace should become insert
+  it('replaces the last existing cell without inserting another', async () => {
     const result = await tool.execute(
       { notebook_path: nbPath, cell_id: '2', new_source: 'appended', edit_mode: 'replace' },
       makeCtx(),
     )
-    // cell-2 is the last cell (index 2), replace should work normally
     expect(result.isError).toBe(false)
     const nb = readNotebook(nbPath)
+    expect(nb.cells).toHaveLength(3)
     expect(nb.cells[2].source).toBe('appended')
   })
 })

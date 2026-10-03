@@ -83,7 +83,8 @@ NotebookEdit({
           },
           cell_id: {
             type: 'string',
-            description: 'Cell ID or numeric index. Required for replace/delete. For insert, the new cell goes AFTER this cell.',
+            description:
+              'Cell ID or numeric index. Required for replace/delete. For insert, the new cell goes AFTER this cell.',
           },
           new_source: {
             type: 'string',
@@ -125,8 +126,11 @@ NotebookEdit({
       return { content: 'Error: notebook_path is required', isError: true }
     }
     let fullPath: string
-    try { fullPath = resolveWorkspacePath(ctx, notebookPath) }
-    catch (error) { return { content: `Error: ${(error as Error).message}`, isError: true } }
+    try {
+      fullPath = resolveWorkspacePath(ctx, notebookPath)
+    } catch (error) {
+      return { content: `Error: ${(error as Error).message}`, isError: true }
+    }
     if (extname(fullPath) !== '.ipynb') {
       return { content: 'Error: file must be a Jupyter notebook (.ipynb)', isError: true }
     }
@@ -186,22 +190,22 @@ NotebookEdit({
       if (editMode === 'insert') cellIndex += 1 // insert AFTER the specified cell
     }
 
-    // Handle replace-past-end → convert to insert
-    let actualEditMode = editMode
-    if (editMode === 'replace' && cellIndex >= notebook.cells.length) {
-      actualEditMode = 'insert'
-    }
-
     const language = notebook.metadata?.language_info?.name ?? 'python'
 
     // Perform the operation
-    if (actualEditMode === 'delete') {
+    if (editMode === 'delete') {
       notebook.cells.splice(cellIndex, 1)
-    } else if (actualEditMode === 'insert') {
+    } else if (editMode === 'insert') {
       const newCell: NotebookCell =
         cellType === 'markdown'
           ? { cell_type: 'markdown', source: newSource, metadata: {} }
-          : { cell_type: 'code', source: newSource, metadata: {}, execution_count: null, outputs: [] }
+          : {
+              cell_type: 'code',
+              source: newSource,
+              metadata: {},
+              execution_count: null,
+              outputs: [],
+            }
       notebook.cells.splice(cellIndex, 0, newCell)
     } else {
       // replace
@@ -228,7 +232,8 @@ NotebookEdit({
 
     // Back up before modifying (undo/checkpoint support)
     const backup = ctx.fileHistory?.trackEdit(fullPath)
-    if (backup?.status === 'failed') return { content: `Backup failed; notebook was not changed: ${backup.error}`, isError: true }
+    if (backup?.status === 'failed')
+      return { content: `Backup failed; notebook was not changed: ${backup.error}`, isError: true }
     ctx.signal?.throwIfAborted()
 
     // Write back — atomic so a crash mid-write cannot leave a half-
@@ -240,8 +245,7 @@ NotebookEdit({
     }
 
     const action =
-      actualEditMode === 'delete' ? 'Deleted' :
-      actualEditMode === 'insert' ? 'Inserted' : 'Updated'
+      editMode === 'delete' ? 'Deleted' : editMode === 'insert' ? 'Inserted' : 'Updated'
     return {
       content: `${action} cell ${cellId ?? '0'} in ${fullPath} (${language})`,
       isError: false,

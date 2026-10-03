@@ -7,9 +7,7 @@ import { existsSync } from 'fs'
 import { readFile } from 'fs/promises'
 import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/types.js'
 import { WRITE_FILE_DESCRIPTION } from '../prompts/tools.js'
-import { getFileState } from '../core/fileState.js'
-import { atomicWrite } from '../core/atomicWrite.js'
-import { resolveWorkspacePath } from '../core/workspacePath.js'
+import { persistFileMutation, prepareFileMutation, resolveFileOperation } from './fileOperations.js'
 
 export interface WriteFileInput {
   file_path: string
@@ -45,13 +43,9 @@ export class FileWriteTool implements Tool {
   async execute(input: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
     const { file_path: rawPath, content } = input as unknown as WriteFileInput
 
-    const fileState = getFileState(context)
-    if (!rawPath || typeof rawPath !== 'string') {
-      return { content: 'Error: file_path is required', isError: true }
-    }
-    let file_path: string
-    try { file_path = resolveWorkspacePath(context, rawPath) }
-    catch (error) { return { content: `Error: ${(error as Error).message}`, isError: true } }
+    const operation = resolveFileOperation(rawPath, context)
+    if ('error' in operation) return operation.error
+    const { filePath: file_path, fileState } = operation
     if (typeof content !== 'string') {
       return { content: 'Error: content must be a string', isError: true }
     }
@@ -110,21 +104,14 @@ export class FileWriteTool implements Tool {
     }
 
     // Back up the file before modifying (undo/checkpoint support)
-    const backup = context.fileHistory?.trackEdit(file_path)
-    if (backup?.status === 'failed') return { content: `Backup failed; file was not changed: ${backup.error}`, isError: true }
-    context.signal?.throwIfAborted()
+    const preparationError = prepareFileMutation(file_path, context)
+    if (preparationError) return preparationError
 
     try {
       // Atomic write: write to a uniquely-suffixed tmp file in the same
       // directory, then rename over the target. The rename is atomic on POSIX,
       // so a crash mid-write never leaves the target half-written.
-      await atomicWrite(file_path, content)
-
-      // Refresh the file-state cache with the just-written content so:
-      //   - subsequent Read sees "File unchanged" without re-reading
-      //   - subsequent Write/Edit hash-checks against this baseline
-      // Pass `content` (the bytes we just wrote) to populate the hash.
-      fileState.markFileRead(file_path, content)
+      await persistFileMutation(operation, content)
 
       // Line count: strip one trailing newline so "hello\n" = 1 line, not 2
       const lines = content.endsWith('\n') ? content.slice(0, -1).split('\n').length : content.split('\n').length

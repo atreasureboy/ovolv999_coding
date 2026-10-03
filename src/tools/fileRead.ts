@@ -6,8 +6,7 @@
 import { readFile, stat } from 'fs/promises'
 import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/types.js'
 import { READ_FILE_DESCRIPTION } from '../prompts/tools.js'
-import { getFileState } from '../core/fileState.js'
-import { resolveWorkspacePath } from '../core/workspacePath.js'
+import { resolveFileOperation } from './fileOperations.js'
 
 export interface ReadFileInput {
   file_path: string
@@ -51,13 +50,9 @@ export class FileReadTool implements Tool {
   async execute(input: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
     const { file_path: rawPath, offset, limit } = input as unknown as ReadFileInput
 
-    const fileState = getFileState(context)
-    if (!rawPath || typeof rawPath !== 'string') {
-      return { content: 'Error: file_path is required', isError: true }
-    }
-    let file_path: string
-    try { file_path = resolveWorkspacePath(context, rawPath) }
-    catch (error) { return { content: `Error: ${(error as Error).message}`, isError: true } }
+    const operation = resolveFileOperation(rawPath, context)
+    if ('error' in operation) return operation.error
+    const { filePath: file_path, fileState } = operation
 
     try {
       // File unchanged detection (Claude Code pattern) — skip re-reading if not modified

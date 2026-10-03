@@ -162,11 +162,39 @@ describe('extractToolSequence', () => {
     expect(seq).toHaveLength(1)
     expect(seq[0].summary).toBe('')
   })
+
+  it('preserves argument aliases, primitive coercion, and unknown tool names', () => {
+    const msgs = [assistantMsg('', [
+      toolCall('Read', { path: '/legacy/file.ts' }),
+      toolCall('Write', { file_path: 42 }),
+      toolCall('Edit', { file_path: false, path: '/unused.ts' }),
+      toolCall('TodoWrite', { todos: [{}, {}] }),
+      toolCall('toString', { command: 'ignored' }),
+      toolCall('__proto__', { command: 'ignored' }),
+    ])]
+    expect(extractToolSequence(msgs)).toEqual([
+      { name: 'Read', summary: '/legacy/file.ts' },
+      { name: 'Write', summary: '42' },
+      { name: 'Edit', summary: 'false' },
+      { name: 'TodoWrite', summary: '2 items' },
+      { name: 'toString', summary: '' },
+      { name: '__proto__', summary: '' },
+    ])
+  })
 })
 
 // ── Prompt Generation ───────────────────────────────────────────────────────
 
 describe('generateSkillPrompt', () => {
+  it('treats prototype property names as unknown tools in the approach', () => {
+    const prompt = generateSkillPrompt({
+      name: 'unknown-tools', description: '', category: 'unknown',
+      toolSequence: [{ name: 'toString', summary: '' }, { name: '__proto__', summary: '' }],
+      messageCount: 1, turnCount: 0, prompt: '',
+    })
+    expect(prompt).toBe('# Unknown Tools\n\n## Task\nComplete the following task: $ARGS\n\n## Approach\n1. toString\n2. __proto__\n')
+  })
+
   it('generates markdown with title and task', () => {
     const extraction = {
       name: 'fix-lint',

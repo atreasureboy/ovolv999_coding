@@ -26,6 +26,10 @@ function getManager(ctx: ToolContext): BackgroundTaskManager | undefined {
   return ctx.backgroundTaskManager
 }
 
+function taskNotFound(taskId: string): ToolResult {
+  return { content: `Task not found: ${taskId}. Hint: use TaskList to see all task IDs.`, isError: true }
+}
+
 // ── TaskCreate ──────────────────────────────────────────────────────────────
 
 export class TaskCreateTool implements Tool {
@@ -165,30 +169,17 @@ export class TaskGetTool implements Tool {
     const block = input.block as boolean | undefined
     const timeout = Math.min((input.timeout as number | undefined) ?? 30_000, 300_000)
 
-    // If blocking, wait for completion
+    let timedOut = false
     if (block) {
       const finalInfo = await manager.waitForTask(taskId, timeout)
-      if (!finalInfo) {
-        return { content: `Task not found: ${taskId}. Hint: use TaskList to see all task IDs.`, isError: true }
-      }
-      const detail = manager.getTaskDetail(taskId)
-      if (!detail) {
-        return { content: `Task not found: ${taskId}. Hint: use TaskList to see all task IDs.`, isError: true }
-      }
-      const blocked = finalInfo.status === 'running' ? ' (timed out waiting)' : ''
-      return {
-        content: formatTaskDetail(detail) + blocked,
-        isError: false,
-      }
+      if (!finalInfo) return taskNotFound(taskId)
+      timedOut = finalInfo.status === 'running'
     }
 
-    // Non-blocking: return current state
     const detail = manager.getTaskDetail(taskId)
-    if (!detail) {
-      return { content: `Task not found: ${taskId}. Hint: use TaskList to see all task IDs.`, isError: true }
-    }
+    if (!detail) return taskNotFound(taskId)
     return {
-      content: formatTaskDetail(detail),
+      content: formatTaskDetail(detail) + (timedOut ? ' (timed out waiting)' : ''),
       isError: false,
     }
   }
@@ -284,7 +275,7 @@ export class TaskUpdateTool implements Tool {
     })
 
     if (!success) {
-      return Promise.resolve({ content: `Task not found: ${taskId}. Hint: use TaskList to see all task IDs.`, isError: true })
+      return Promise.resolve(taskNotFound(taskId))
     }
 
     const task = manager.getTask(taskId)
@@ -347,7 +338,7 @@ Use this when a background command is no longer needed or is stuck.`,
 
     const task = manager.getTask(taskId)
     if (!task) {
-      return Promise.resolve({ content: `Task not found: ${taskId}. Hint: use TaskList to see all task IDs.`, isError: true })
+      return Promise.resolve(taskNotFound(taskId))
     }
 
     if (task.status !== 'running') {
