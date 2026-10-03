@@ -24,13 +24,13 @@ import { randomUUID } from 'crypto'
 import { writeFileSync, mkdirSync, appendFileSync, renameSync } from 'fs'
 import { join } from 'path'
 import { registerPhysicalResource, spawnManaged, type ExecutionProfile } from './executionBackend.js'
-import { captureProcessIdentity, inspectProcessIdentity, type ProcessIdentity } from './processIdentity.js'
-import { captureOwnedProcessTree, stopOwnedProcessTree, type OwnedProcessTree } from './processTree.js'
+import { inspectProcessIdentity, type ProcessIdentity } from './processIdentity.js'
+import { captureOwnedProcessTreeFromPid, mergeOwnedProcessTrees, OwnedProcessTreeCaptureError, stopOwnedProcessTree, type OwnedProcessTree } from './processTree.js'
 import { StringDecoder } from 'string_decoder'
 
 function getShellInvocation(command: string): { shell: string; args: string[] } {
   if (process.platform === 'win32') {
-    return { shell: process.env.ComSpec || 'cmd.exe', args: ['/c', command] }
+    return { shell: process.env.ComSpec || 'cmd.exe', args: ['/d', '/s', '/c', `"${command}"`] }
   }
   return { shell: process.env.SHELL || '/bin/bash', args: ['-lc', command] }
 }
@@ -52,6 +52,7 @@ export interface TaskInfo {
   durationMs: number | null
   outputLength: number
   metadata: Record<string, unknown>
+  processAccounting?: 'observed-only'
 }
 
 /** Task detail — includes accumulated output. */
@@ -83,6 +84,9 @@ interface InternalTask {
    */
   killTimer: NodeJS.Timeout | null
   identity: Promise<ProcessIdentity | null>
+  tree?: OwnedProcessTree
+  hasUnverifiedDescendants?: boolean
+  tracking?: Promise<void>
   stopPromise?: Promise<void>
   onSettled: () => void
 }
@@ -125,16 +129,27 @@ function stopInternal(task: InternalTask, graceMs: number): boolean {
   task.info.status = 'stopping'
   task.stopPromise = (async () => {
     try {
+      await task.tracking
       const identity = await task.identity
       if (!identity) {
-        if (proc.exitCode === null && proc.signalCode === null) throw new Error('Process birth identity unavailable; termination cannot be verified')
+        if (proc.pid !== undefined) throw new Error('Process birth identity unavailable; termination cannot be verified')
       } else {
-        let tree: OwnedProcessTree
-        if (await inspectProcessIdentity(identity) === 'matching') tree = await captureOwnedProcessTree(identity)
-        else throw new Error('Task root exited before descendant discovery; resources require recovery')
+        let tree = task.tree
+        if (await inspectProcessIdentity(identity) === 'matching') {
+          try {
+            const current = await captureOwnedProcessTreeFromPid(identity.pid)
+            if (current?.root.birthId === identity.birthId) tree = mergeOwnedProcessTrees(tree, current)
+          } catch (error) {
+            if (!(error instanceof OwnedProcessTreeCaptureError) || error.tree.root.birthId !== identity.birthId) throw error
+            tree = mergeOwnedProcessTrees(tree, error.tree)
+            task.hasUnverifiedDescendants ||= error.hasUnverifiedDescendants
+          }
+        }
+        if (!tree) throw new Error('Task root exited before descendant discovery; resources require recovery')
         const result = await stopOwnedProcessTree(tree, graceMs)
         if (!result.stopped) throw new Error(result.reason ?? 'Process tree stop failed')
       }
+      if (task.hasUnverifiedDescendants) throw new Error('Descendant birth identities were unavailable; termination cannot be confirmed')
       recordTaskCompletion(task.info, 'stopped', proc.exitCode)
       task.onSettled()
     } catch (error) {
@@ -143,6 +158,32 @@ function stopInternal(task: InternalTask, graceMs: number): boolean {
     }
   })()
   return true
+}
+
+async function settleClosedTask(task: InternalTask, code: number | null): Promise<void> {
+  try {
+    await task.tracking
+    if (task.tree) {
+      const descendants = task.tree.members.filter(identity => identity.pid !== task.tree!.root.pid || identity.birthId !== task.tree!.root.birthId)
+      const states = await Promise.all(descendants.map(inspectProcessIdentity))
+      if (states.includes('unknown')) throw new Error('Owned descendant identity cannot be verified after task root close')
+      if (states.includes('matching')) {
+        const result = await stopOwnedProcessTree(task.tree, 0)
+        if (!result.stopped) throw new Error(result.reason ?? 'Owned descendants could not be stopped')
+        task.info.metadata.descendantsStoppedAfterRootExit = true
+        if (task.hasUnverifiedDescendants) throw new Error('Descendant birth identities were unavailable; termination cannot be confirmed')
+        recordTaskCompletion(task.info, 'failed', code)
+        task.onSettled()
+        return
+      }
+    }
+    if (task.hasUnverifiedDescendants) throw new Error('Descendant birth identities were unavailable; termination cannot be confirmed')
+    recordTaskCompletion(task.info, code === 0 ? 'completed' : 'failed', code)
+    task.onSettled()
+  } catch (error) {
+    task.info.status = 'stop_failed'
+    task.info.metadata.stopError = error instanceof Error ? error.message : String(error)
+  }
 }
 // ── Manager ─────────────────────────────────────────────────────────────────
 
@@ -236,6 +277,7 @@ export class BackgroundTaskManager {
       durationMs: null,
       outputLength: 0,
       metadata: options?.metadata ?? {},
+      processAccounting: 'observed-only',
     }
 
     // Optional: persist output to file for large outputs
@@ -356,7 +398,30 @@ export class BackgroundTaskManager {
 
     task.process = proc
     info.pid = proc.pid ?? null
-    task.identity = proc.pid ? captureProcessIdentity(proc.pid) : Promise.resolve(null)
+    let rootClosed = false
+    let trackingTimer: NodeJS.Timeout | undefined
+    const trackTree = (): void => {
+      task.tracking = (async () => {
+        if (!proc.pid) return
+        const current = await captureOwnedProcessTreeFromPid(proc.pid)
+        if (!current) return
+        if (task.tree && current.root.birthId !== task.tree.root.birthId) throw new Error('Task root identity changed during descendant tracking')
+        task.tree = mergeOwnedProcessTrees(task.tree, current)
+      })().catch(error => {
+        if (error instanceof OwnedProcessTreeCaptureError && (!task.tree || error.tree.root.birthId === task.tree.root.birthId)) {
+          task.tree = mergeOwnedProcessTrees(task.tree, error.tree)
+          task.hasUnverifiedDescendants ||= error.hasUnverifiedDescendants
+        }
+        task.info.metadata.discoveryError = error instanceof Error ? error.message : String(error)
+      }).then(() => { task.info.metadata.trackedDescendants = Math.max(0, (task.tree?.members.length ?? 1) - 1) })
+      void task.tracking.then(() => {
+        if (rootClosed || task.stopped) return
+        trackingTimer = setTimeout(trackTree, 250)
+        trackingTimer.unref()
+      })
+    }
+    trackTree()
+    task.identity = task.tracking!.then(() => task.tree?.root ?? null)
 
     const stdoutDecoder = new StringDecoder('utf8')
     const stderrDecoder = new StringDecoder('utf8')
@@ -385,9 +450,10 @@ export class BackgroundTaskManager {
     }
 
     proc.on('close', (code: number | null) => {
+      rootClosed = true
+      clearTimeout(trackingTimer)
       appendOutput(stdoutDecoder.end())
       appendOutput(stderrDecoder.end())
-      if (!task.stopped) onSettled()
       // Process has exited. Always clear timer + null the handle FIRST,
       // so the escalation callback (if it races us) sees task.process
       // !== proc and bails out. Only THEN decide whether to override
@@ -401,7 +467,7 @@ export class BackgroundTaskManager {
       task.process = null
       if (task.stopped) return
       if (info.status !== 'running') return
-      recordTaskCompletion(info, code === 0 ? 'completed' : 'failed', code)
+      task.stopPromise = settleClosedTask(task, code)
     })
 
     proc.on('error', (err: Error & { code?: string }) => {
@@ -573,6 +639,9 @@ export function formatTaskDetail(detail: TaskDetail): string {
     `Command: ${detail.command}`,
     `Started: ${new Date(detail.startTime).toISOString()}`,
   ]
+  if (detail.processAccounting === 'observed-only') {
+    lines.push('Process accounting: observed only. Completion covers observed processes; termination of unobserved detached descendants is not confirmed.')
+  }
   if (detail.endTime) {
     lines.push(`Ended: ${new Date(detail.endTime).toISOString()}`)
     lines.push(`Duration: ${(detail.durationMs! / 1000).toFixed(1)}s`)

@@ -12,6 +12,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
+import { isRecord, isStringArray } from './persistedData.js'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -89,13 +90,42 @@ function ensureDirs(): void {
   }
 }
 
-function loadJson<T>(path: string, fallback: T): T {
-  if (!existsSync(path)) return fallback
+function loadJson<T>(path: string, validate: (value: unknown) => value is T): T[] {
+  if (!existsSync(path)) return []
   try {
-    return JSON.parse(readFileSync(path, 'utf8')) as T
+    const value: unknown = JSON.parse(readFileSync(path, 'utf8'))
+    return Array.isArray(value) ? value.filter(validate) : []
   } catch {
-    return fallback
+    return []
   }
+}
+
+function hasStrings(value: Record<string, unknown>, fields: string[]): boolean {
+  return fields.every(field => typeof value[field] === 'string')
+}
+
+function isCount(value: unknown): boolean { return Number.isSafeInteger(value) && Number(value) >= 0 }
+function isConfidence(value: unknown): boolean { return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1 }
+
+function isPattern(value: unknown): value is LearnedPattern {
+  return isRecord(value) && hasStrings(value, ['id', 'trigger', 'action', 'context', 'lastUsed', 'createdAt'])
+    && isCount(value.successCount) && isCount(value.failureCount) && isStringArray(value.tags)
+}
+
+function isDream(value: unknown): value is DreamEntry {
+  return isRecord(value) && hasStrings(value, ['id', 'timestamp', 'category', 'description'])
+    && typeof value.type === 'string' && ['insight', 'pattern', 'mistake', 'improvement'].includes(value.type) && isConfidence(value.confidence)
+    && (value.evidence === undefined || typeof value.evidence === 'string') && (value.applied === undefined || typeof value.applied === 'boolean')
+}
+
+function isKnowledge(value: unknown): value is KnowledgeEntry {
+  return isRecord(value) && hasStrings(value, ['id', 'topic', 'question', 'answer', 'createdAt', 'lastAccessed'])
+    && isCount(value.accessCount) && isConfidence(value.confidence) && isStringArray(value.sources)
+}
+
+function isSkill(value: unknown): value is SkillExtraction {
+  return isRecord(value) && hasStrings(value, ['sourceTask', 'extractedAt', 'skillName', 'description'])
+    && isStringArray(value.steps) && isStringArray(value.prerequisites) && isStringArray(value.tags)
 }
 
 function saveJson(path: string, data: unknown): void {
@@ -112,7 +142,7 @@ export function recordPattern(
   tags: string[] = [],
 ): LearnedPattern {
   ensureDirs()
-  const patterns = loadJson<LearnedPattern[]>(getPatternsPath(), [])
+  const patterns = loadJson(getPatternsPath(), isPattern)
 
   // Check if pattern exists
   const existing = patterns.find(p => p.trigger === trigger && p.action === action)
@@ -142,7 +172,7 @@ export function recordPattern(
 }
 
 export function recordPatternFailure(trigger: string, action: string): void {
-  const patterns = loadJson<LearnedPattern[]>(getPatternsPath(), [])
+  const patterns = loadJson(getPatternsPath(), isPattern)
   const existing = patterns.find(p => p.trigger === trigger && p.action === action)
   if (existing) {
     existing.failureCount++
@@ -152,7 +182,7 @@ export function recordPatternFailure(trigger: string, action: string): void {
 }
 
 export function getPatterns(): LearnedPattern[] {
-  return loadJson<LearnedPattern[]>(getPatternsPath(), [])
+  return loadJson(getPatternsPath(), isPattern)
 }
 
 export function findPatterns(trigger: string): LearnedPattern[] {
@@ -176,7 +206,7 @@ export function dream(
   evidence?: string,
 ): DreamEntry {
   ensureDirs()
-  const log = loadJson<DreamEntry[]>(getDreamLogPath(), [])
+  const log = loadJson(getDreamLogPath(), isDream)
 
   const entry: DreamEntry = {
     id: `dream-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -195,13 +225,13 @@ export function dream(
 }
 
 export function getDreamLog(limit?: number): DreamEntry[] {
-  const log = loadJson<DreamEntry[]>(getDreamLogPath(), [])
+  const log = loadJson(getDreamLogPath(), isDream)
   const sorted = log.sort((a, b) => b.timestamp.localeCompare(a.timestamp))
   return limit ? sorted.slice(0, limit) : sorted
 }
 
 export function markDreamApplied(id: string): void {
-  const log = loadJson<DreamEntry[]>(getDreamLogPath(), [])
+  const log = loadJson(getDreamLogPath(), isDream)
   const entry = log.find(d => d.id === id)
   if (entry) {
     entry.applied = true
@@ -218,7 +248,7 @@ export function addKnowledge(
   sources: string[] = [],
 ): KnowledgeEntry {
   ensureDirs()
-  const kb = loadJson<KnowledgeEntry[]>(getKnowledgePath(), [])
+  const kb = loadJson(getKnowledgePath(), isKnowledge)
 
   const existing = kb.find(e => e.topic === topic && e.question === question)
   if (existing) {
@@ -248,10 +278,10 @@ export function addKnowledge(
 }
 
 export function searchKnowledge(query: string, limit = 5): KnowledgeEntry[] {
-  const kb = loadJson<KnowledgeEntry[]>(getKnowledgePath(), [])
+  const kb = loadJson(getKnowledgePath(), isKnowledge)
   const lower = query.toLowerCase()
 
-  return kb
+  const results = kb
     .map(entry => {
       let score = 0
       if (entry.topic.toLowerCase().includes(lower)) score += 3
@@ -267,20 +297,24 @@ export function searchKnowledge(query: string, limit = 5): KnowledgeEntry[] {
       entry.lastAccessed = new Date().toISOString()
       return entry
     })
+  if (results.length > 0) saveJson(getKnowledgePath(), kb)
+  return results
 }
 
 export function getKnowledge(): KnowledgeEntry[] {
-  return loadJson<KnowledgeEntry[]>(getKnowledgePath(), [])
+  return loadJson(getKnowledgePath(), isKnowledge)
 }
 
 // ── Skill Extraction ────────────────────────────────────────────────────────
 
 export function extractSkill(extraction: Omit<SkillExtraction, 'extractedAt'>): SkillExtraction {
-  ensureDirs()
   const full: SkillExtraction = {
     ...extraction,
     extractedAt: new Date().toISOString(),
   }
+
+  if (!isSkill(full) || !full.skillName.trim() || /[\\/:\0]/.test(full.skillName) || ['.', '..'].includes(full.skillName.trim())) throw new Error('Invalid extracted skill name or data')
+  ensureDirs()
 
   const filename = `${full.skillName.replace(/\s+/g, '-').toLowerCase()}.json`
   writeFileSync(join(getSkillsExtractedDir(), filename), JSON.stringify(full, null, 2))
@@ -295,7 +329,8 @@ export function getExtractedSkills(): SkillExtraction[] {
   for (const file of readdirSync(dir)) {
     if (!file.endsWith('.json')) continue
     try {
-      skills.push(JSON.parse(readFileSync(join(dir, file), 'utf8')) as SkillExtraction)
+      const value: unknown = JSON.parse(readFileSync(join(dir, file), 'utf8'))
+      if (isSkill(value)) skills.push(value)
     } catch { /* skip */ }
   }
   return skills

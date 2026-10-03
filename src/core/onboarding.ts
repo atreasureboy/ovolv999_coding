@@ -13,7 +13,7 @@
  * Output is formatted as markdown for easy reading.
  */
 
-import { existsSync, readFileSync, readdirSync, statSync } from 'fs'
+import { existsSync, readFileSync, readdirSync, lstatSync } from 'fs'
 import { join, resolve, extname, basename, relative } from 'path'
 import { execSync } from 'child_process'
 import { z } from 'zod'
@@ -156,7 +156,7 @@ function readPackageJson(root: string): PackageMetadata | null {
 // ── Structure ───────────────────────────────────────────────────────────────
 
 function buildStructure(root: string, currentDir: string, depth: number): DirectoryNode {
-  const name = relative(root, currentDir) || basename(root)
+  const name = basename(currentDir)
   const node: DirectoryNode = {
     name: name || '.',
     path: currentDir,
@@ -174,7 +174,8 @@ function buildStructure(root: string, currentDir: string, depth: number): Direct
     for (const entry of entries) {
       const fullPath = join(currentDir, entry)
       try {
-        const stat = statSync(fullPath)
+        const stat = lstatSync(fullPath)
+        if (stat.isSymbolicLink()) continue
         if (stat.isDirectory()) {
           children.push(buildStructure(root, fullPath, depth + 1))
         } else if (depth < 2) {
@@ -301,7 +302,8 @@ function countTestFiles(dir: string): number {
     const entries = readdirSync(dir)
     for (const entry of entries) {
       const fullPath = join(dir, entry)
-      const stat = statSync(fullPath)
+      const stat = lstatSync(fullPath)
+      if (stat.isSymbolicLink()) continue
       if (stat.isDirectory()) {
         if (!IGNORED_DIRS.has(entry)) count += countTestFiles(fullPath)
       } else if (entry.includes('.test.') || entry.includes('.spec.') || entry.startsWith('test_') || entry.endsWith('_test.py')) {
@@ -367,7 +369,8 @@ function computeStats(root: string): CodeStats {
         if (IGNORED_DIRS.has(entry) || entry.startsWith('.')) continue
         const fullPath = join(dir, entry)
         try {
-          const stat = statSync(fullPath)
+          const stat = lstatSync(fullPath)
+          if (stat.isSymbolicLink()) continue
           if (stat.isDirectory()) {
             walk(fullPath)
           } else {
@@ -418,10 +421,10 @@ function detectPrimaryLanguage(stats: CodeStats): string {
 function detectFramework(pkg: PackageMetadata | null, deps: DependencyInfo): string | null {
   if (!pkg) return null
   const all = { ...deps.production, ...deps.development }
+  if (all.next) return 'Next.js'
   if (all.react) return 'React'
   if (all.vue) return 'Vue'
   if (all.express) return 'Express'
-  if (all.next) return 'Next.js'
   if (all.fastapi) return 'FastAPI'
   if (all.django) return 'Django'
   if (all.flask) return 'Flask'
@@ -432,9 +435,16 @@ function detectConventions(root: string, pkg: PackageMetadata | null): string[] 
   const conventions: string[] = []
 
   if (existsSync(join(root, '.editorconfig'))) conventions.push('EditorConfig defined')
-  if (existsSync(join(root, '.prettierrc')) || pkg?.devDependencies?.prettie) conventions.push('Prettier formatting')
+  if (existsSync(join(root, '.prettierrc')) || pkg?.devDependencies?.prettier || pkg?.dependencies?.prettier) conventions.push('Prettier formatting')
   if (existsSync(join(root, '.eslintrc')) || existsSync(join(root, '.eslintrc.json')) || pkg?.devDependencies?.eslint) conventions.push('ESLint configured')
-  if (existsSync(join(root, 'tsconfig.json'))) conventions.push('TypeScript strict typing')
+  if (existsSync(join(root, 'tsconfig.json'))) {
+    let strict: boolean
+    try {
+      const config = JSON.parse(readFileSync(join(root, 'tsconfig.json'), 'utf8')) as { compilerOptions?: { strict?: unknown } } | null
+      strict = config?.compilerOptions?.strict === true
+    } catch { strict = false }
+    conventions.push(strict ? 'TypeScript strict typing' : 'TypeScript configured')
+  }
   if (existsSync(join(root, '.ovolv999')) || existsSync(join(root, '.ovogo'))) conventions.push('ovolv999 configured')
   if (existsSync(join(root, 'AGENTS.md'))) conventions.push('AGENTS.md instructions')
   if (existsSync(join(root, '.pre-commit-config.yaml'))) conventions.push('pre-commit hooks')
@@ -610,8 +620,7 @@ export function formatOverview(overview: ProjectOverview): string {
 
 function formatTree(node: DirectoryNode, prefix: string, isRoot: boolean): string {
   const lines: string[] = []
-  const display = isRoot ? basename(node.path) : node.name
-  lines.push(`${prefix}${display}/`)
+  if (isRoot) lines.push(`${prefix}${basename(node.path)}/`)
 
   if (!node.children) return lines.join('\n')
 

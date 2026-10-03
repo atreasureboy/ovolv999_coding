@@ -222,6 +222,9 @@ Failed or unavailable verification prevents acceptance of code changes.
     })
     const agentLabel = customConfig ? 'custom' : (presetName ?? 'general-purpose')
 
+    if (input.max_iterations !== undefined && (typeof input.max_iterations !== 'number' || !Number.isSafeInteger(input.max_iterations) || input.max_iterations < 1)) {
+      return { content: 'Error: max_iterations must be a positive integer', isError: true }
+    }
     if (typeof input.max_iterations === 'number') {
       agentConfig.maxIterations = Math.min(input.max_iterations, 200)
     }
@@ -350,7 +353,16 @@ Failed or unavailable verification prevents acceptance of code changes.
         : undefined,
     }
 
-    const childEngine = factory(childConfig, childRenderer)
+    let childEngine: ReturnType<AgentChildEngineFactory>
+    try {
+      childEngine = factory(childConfig, childRenderer)
+    } catch (error) {
+      if (paneSlot) {
+        try { tmuxLayout.releaseSlot(paneSlot.slot) } finally { childRenderer.destroy() }
+      }
+      mainRenderer.agentDone(description, false)
+      throw error
+    }
 
     const normalizedPrompt = normalizeDelegatedPrompt(prompt, parentConfig)
     const placeholdersReplaced = normalizedPrompt !== prompt

@@ -14,7 +14,7 @@ export const knowledgeCommands: Command[] = [
     description:
       'Extract a reusable skill from the current session. Usage: /skill-save <name> [description]',
     handler: async (args, ctx) => {
-      const parts = args.trim().split(/\s+/)
+      const parts = args.trim().split(/\s+/).filter(Boolean)
       const name = parts[0]
       const description = parts.slice(1).join(' ')
       if (!name) {
@@ -61,7 +61,7 @@ export const knowledgeCommands: Command[] = [
     description:
       'Project knowledge base. Usage: /knowledge [add <cat> <key> <val> | search <q> | remove <key> | list | stats]',
     handler: async (args, ctx) => {
-      const parts = args.trim().split(/\s+/)
+      const parts = args.trim().split(/\s+/).filter(Boolean)
       const sub = parts[0] ?? 'list'
       const {
         loadKnowledge,
@@ -141,7 +141,7 @@ export const knowledgeCommands: Command[] = [
         formatBookmarkStats,
         loadBookmarks,
       } = await import('../core/bookmarks.js')
-      const parts = args.trim().split(/\s+/)
+      const parts = args.trim().split(/\s+/).filter(Boolean)
       const sub = parts[0] ?? 'list'
       if (sub === 'add') {
         const loc = parts[1]
@@ -214,7 +214,7 @@ export const knowledgeCommands: Command[] = [
         formatSnippetList,
         formatSnippetStats,
       } = await import('../core/snippets.js')
-      const parts = args.trim().split(/\s+/)
+      const parts = args.trim().split(/\s+/).filter(Boolean)
       const sub = parts[0] ?? 'list'
       if (sub === 'add') {
         const name = parts[1]
@@ -295,7 +295,7 @@ export const knowledgeCommands: Command[] = [
         formatSyncResult,
         formatTeamMemoryStatus,
       } = teamMemModule
-      const parts = args.trim().split(/\s+/)
+      const parts = args.trim().split(/\s+/).filter(Boolean)
       const sub = parts[0] ?? 'status'
       if (sub === 'init') {
         const url = parts[1]
@@ -349,7 +349,7 @@ export const knowledgeCommands: Command[] = [
         formatDreamLog,
         formatDreamStats,
       } = dreamMod
-      const parts = args.trim().split(/\s+/)
+      const parts = args.trim().split(/\s+/).filter(Boolean)
       const sub = parts[0] ?? 'stats'
       if (sub === 'stats') {
         return text(formatDreamStats())
@@ -389,7 +389,7 @@ export const knowledgeCommands: Command[] = [
     handler: async (args) => {
       const msgMod = await import('../core/messageBus.js')
       const { getMessageBus, formatAgentList, formatMessageList, formatBusStats } = msgMod
-      const parts = args.trim().split(/\s+/)
+      const parts = args.trim().split(/\s+/).filter(Boolean)
       const sub = parts[0] ?? 'stats'
       const bus = getMessageBus()
       if (sub === 'agents') {

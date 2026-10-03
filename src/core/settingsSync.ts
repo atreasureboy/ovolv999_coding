@@ -17,10 +17,10 @@
  *   syncPull({ transport: 'git', repo, passphrase }) → applies bundle
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'fs'
-import { join } from 'path'
-import { homedir, hostname } from 'os'
-import { execSync } from 'child_process'
+import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, mkdtempSync } from 'fs'
+import { join, dirname } from 'path'
+import { homedir, hostname, tmpdir } from 'os'
+import { execFileSync } from 'child_process'
 import { randomBytes, createHash, createCipheriv, createDecipheriv, scryptSync } from 'crypto'
 
 // ── Types ───────────────────────────────────────────────────────────────────
@@ -143,6 +143,7 @@ export function hashBundle(bundle: SettingsBundle): string {
 // ── Bundle Application ──────────────────────────────────────────────────────
 
 export function applyBundle(bundle: SettingsBundle, opts: { force?: boolean } = {}): { applied: boolean; warnings: string[] } {
+  if (!isSettingsBundle(bundle)) return { applied: false, warnings: ['Invalid settings bundle'] }
   const dir = getOvolv999Dir()
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
 
@@ -240,7 +241,7 @@ function pushToFile(payload: string, options: SyncPushOptions, bundle: SettingsB
     return { success: false, message: 'filePath is required for file transport', warnings: [] }
   }
   try {
-    const dir = join(options.filePath, '..')
+    const dir = dirname(options.filePath)
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
     writeFileSync(options.filePath, payload)
     return {
@@ -260,25 +261,19 @@ function pushToGit(payload: string, options: SyncPushOptions, bundle: SettingsBu
     return { success: false, message: 'repo is required for git transport', warnings: [] }
   }
   const branch = options.branch ?? 'ovolv999-sync'
-  const tmpDir = join(getOvolv999Dir(), 'sync-tmp')
+  let tmpDir: string | undefined
   try {
-    // Clean + clone
-    if (existsSync(tmpDir)) rmSync(tmpDir, { recursive: true, force: true })
-    execSync(`git clone --depth 1 ${shellQuote(options.repo)} ${shellQuote(tmpDir)} 2>&1`, {
-      stdio: 'pipe', timeout: 30000,
-    })
+    runSyncGit(['check-ref-format', '--branch', branch])
+    tmpDir = mkdtempSync(join(tmpdir(), 'ovolv999-settings-sync-'))
+    const remoteBranch = runSyncGit(['ls-remote', '--heads', '--', options.repo, `refs/heads/${branch}`]).trim()
+    runSyncGit(['clone', '--depth', '1', ...(remoteBranch ? ['--branch', branch] : []), '--', options.repo, tmpDir])
+    if (!remoteBranch) runSyncGit(['checkout', '-b', branch], tmpDir)
     // Write payload
     writeFileSync(join(tmpDir, 'ovolv999-bundle.json'), payload)
-    // Commit + push
-    execSync(`git checkout -b ${shellQuote(branch)} 2>/dev/null || git checkout ${shellQuote(branch)}`, {
-      cwd: tmpDir, stdio: 'pipe', timeout: 5000,
-    })
-    execSync('git add ovolv999-bundle.json && git commit -m "ovolv999 settings sync"', {
-      cwd: tmpDir, stdio: 'pipe', timeout: 10000,
-    })
-    execSync(`git push origin ${shellQuote(branch)} 2>&1`, {
-      cwd: tmpDir, stdio: 'pipe', timeout: 30000,
-    })
+    runSyncGit(['add', '--', 'ovolv999-bundle.json'], tmpDir)
+    const changes = runSyncGit(['diff', '--cached', '--name-only'], tmpDir).trim()
+    if (changes) runSyncGit(['commit', '-m', 'ovolv999 settings sync'], tmpDir)
+    runSyncGit(['push', 'origin', `HEAD:refs/heads/${branch}`], tmpDir)
     return {
       success: true,
       message: `Bundle pushed to ${options.repo} (${branch})`,
@@ -289,7 +284,7 @@ function pushToGit(payload: string, options: SyncPushOptions, bundle: SettingsBu
   } catch (err) {
     return { success: false, message: `Git push failed: ${(err as Error).message}`, warnings: [] }
   } finally {
-    if (existsSync(tmpDir)) rmSync(tmpDir, { recursive: true, force: true })
+    if (tmpDir) rmSync(tmpDir, { recursive: true, force: true })
   }
 }
 
@@ -306,7 +301,11 @@ export function syncPull(options: SyncPullOptions): SyncResult {
       if (!existsSync(options.filePath)) {
         return { success: false, message: `Bundle not found: ${options.filePath}`, warnings: [] }
       }
-      payload = readFileSync(options.filePath, 'utf8')
+      try {
+        payload = readFileSync(options.filePath, 'utf8')
+      } catch (err) {
+        return { success: false, message: `Read failed: ${(err as Error).message}`, warnings: [] }
+      }
       break
 
     case 'git': {
@@ -341,6 +340,8 @@ export function syncPull(options: SyncPullOptions): SyncResult {
     return { success: false, message: `Decrypt failed: ${(err as Error).message}`, warnings: [] }
   }
 
+  if (!isSettingsBundle(bundle)) return { success: false, message: 'Invalid settings bundle', warnings: [] }
+
   if (options.dryRun) {
     return {
       success: true,
@@ -351,30 +352,33 @@ export function syncPull(options: SyncPullOptions): SyncResult {
     }
   }
 
-  const result = applyBundle(bundle, { force: options.force })
-  return {
-    success: result.applied,
-    message: result.applied ? 'Bundle applied successfully' : 'Bundle not applied (schema mismatch — use force)',
-    bundle,
-    applied: result.applied,
-    warnings: result.warnings,
+  try {
+    const result = applyBundle(bundle, { force: options.force })
+    return {
+      success: result.applied,
+      message: result.applied ? 'Bundle applied successfully' : 'Bundle not applied (schema mismatch — use force)',
+      bundle,
+      applied: result.applied,
+      warnings: result.warnings,
+    }
+  } catch (err) {
+    return { success: false, message: `Apply failed: ${(err as Error).message}`, warnings: [] }
   }
 }
 
 function fetchFromGit(repo: string, branch: string): string | null {
-  const tmpDir = join(getOvolv999Dir(), 'sync-tmp')
+  let tmpDir: string | undefined
   try {
-    if (existsSync(tmpDir)) rmSync(tmpDir, { recursive: true, force: true })
-    execSync(`git clone --depth 1 -b ${shellQuote(branch)} ${shellQuote(repo)} ${shellQuote(tmpDir)} 2>&1`, {
-      stdio: 'pipe', timeout: 30000,
-    })
+    runSyncGit(['check-ref-format', '--branch', branch])
+    tmpDir = mkdtempSync(join(tmpdir(), 'ovolv999-settings-sync-'))
+    runSyncGit(['clone', '--depth', '1', '--branch', branch, '--', repo, tmpDir])
     const bundlePath = join(tmpDir, 'ovolv999-bundle.json')
     if (!existsSync(bundlePath)) return null
     return readFileSync(bundlePath, 'utf8')
   } catch {
     return null
   } finally {
-    if (existsSync(tmpDir)) rmSync(tmpDir, { recursive: true, force: true })
+    if (tmpDir) rmSync(tmpDir, { recursive: true, force: true })
   }
 }
 
@@ -416,7 +420,7 @@ export function diffBundles(local: SettingsBundle, remote: SettingsBundle): stri
     const lv = JSON.stringify(local[key])
     const rv = JSON.stringify(remote[key])
     if (lv !== rv) {
-      diffs.push(`  ${label}: ${lv === rv ? 'same' : 'different'}`)
+      diffs.push(`  ${label}: different`)
     }
   }
   return diffs
@@ -461,7 +465,13 @@ export function formatSyncResult(result: SyncResult): string {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-function shellQuote(s: string): string {
-  if (/^[A-Za-z0-9_:.@/-]+$/.test(s)) return s
-  return `'${s.replace(/'/g, "'\\''")}'`
+function runSyncGit(args: string[], cwd?: string): string {
+  return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: 'pipe', timeout: 30000, windowsHide: true })
+}
+
+function isSettingsBundle(value: unknown): value is SettingsBundle {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const bundle = value as Record<string, unknown>
+  if (bundle.version !== 1 || typeof bundle.createdAt !== 'string' || typeof bundle.hostname !== 'string' || typeof bundle.schemaHash !== 'string') return false
+  return ['profiles', 'aliases'].every(key => bundle[key] === undefined || (bundle[key] !== null && typeof bundle[key] === 'object' && !Array.isArray(bundle[key])))
 }

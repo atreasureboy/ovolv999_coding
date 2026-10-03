@@ -43,8 +43,9 @@ After analysis, call ExitPlanMode with your plan to request user approval.`,
   }
 
   execute(_input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    if (!ctx.enterPlanMode) return Promise.resolve({ content: 'Plan mode is unavailable in this execution context.', isError: true })
     try {
-      ctx.enterPlanMode?.()
+      ctx.enterPlanMode()
       return Promise.resolve({
         content: 'Entered plan mode. Only read-only tools (Read/Glob/Grep/Web) are available. Analyze, then call ExitPlanMode with your plan for approval.',
         isError: false,

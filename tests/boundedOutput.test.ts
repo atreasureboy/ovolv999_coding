@@ -2,6 +2,11 @@ import { describe, expect, it } from 'vitest'
 import { BoundedOutputBuffer } from '../src/tools/boundedOutput.js'
 
 describe('bounded command output', () => {
+  it('preserves a multibyte character spanning the head and tail when nothing was dropped', () => {
+    const output = new BoundedOutputBuffer(4)
+    output.append('abcédef')
+    expect(output.render()).toBe('abcédef')
+  })
   it('retains all output through the combined head and tail budget', () => {
     const output = new BoundedOutputBuffer(4)
     output.append('ab')

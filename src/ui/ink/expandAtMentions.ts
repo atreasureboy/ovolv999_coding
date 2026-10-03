@@ -22,7 +22,7 @@ import { resolve, isAbsolute, extname } from 'path'
 import { MENTION_IMAGE_TYPES, buildImageDataUrl } from '../../utils/imageFormats.js'
 
 const MAX_FILE_CHARS = 8000
-const AT_MENTION_RE = /(?:^|\s)@((?:\.\/)?(?:[A-Za-z0-9_.\-/]+))/g
+const AT_MENTION_RE = /(?:^|\s)@((?:\.\/)?(?:[\p{L}\p{N}_.\-/\\:]+))/gu
 
 export interface ImageMention {
   path: string

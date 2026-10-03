@@ -96,6 +96,8 @@ export class Renderer {
   private streaming = false
 
   private stream: NodeJS.WritableStream | null = null
+  private ownsStream = false
+  private resizeListener: (() => void) | null = null
 
   constructor(opts?: { stream?: NodeJS.WritableStream }) {
     const s = opts?.stream ?? process.stdout
@@ -104,31 +106,38 @@ export class Renderer {
     this.tty = (s as NodeJS.WriteStream).isTTY === true
     this.width = this.tty ? ((s as NodeJS.WriteStream).columns ?? 100) : 100
     if (this.tty) {
-      (s as NodeJS.WriteStream).on?.('resize', () => {
+      this.resizeListener = () => {
         this.width = (s as NodeJS.WriteStream).columns ?? 100
-      })
+      }
+      s.on('resize', this.resizeListener)
     }
   }
 
   static forFile(path: string): Renderer {
     const fs = createWriteStream(path, { flags: 'a' })
     fs.on('error', () => {})
-    return new Renderer({ stream: fs as unknown as NodeJS.WritableStream })
+    const renderer = new Renderer({ stream: fs as unknown as NodeJS.WritableStream })
+    renderer.ownsStream = true
+    return renderer
   }
 
   /** Close the underlying stream if it's a file stream (prevents fd leak) */
   destroy(): void {
-    if (this.stream && typeof (this.stream as { end?: () => void }).end === 'function') {
+    this.stopSpinner()
+    if (this.stream && this.resizeListener) this.stream.off('resize', this.resizeListener)
+    this.resizeListener = null
+    if (this.ownsStream && this.stream && typeof (this.stream as { end?: () => void }).end === 'function') {
       (this.stream as { end: () => void }).end()
     }
     this.stream = null
+    this.out = () => {}
   }
 
   private w(s: string): void { this.out(s) }
 
   // Helper: dim horizontal rule
   private hr(): string {
-    const len = Math.min(this.width - 2, 80)
+    const len = Math.max(0, Math.min(this.width - 2, 80))
     return `${D}${C.gray}${'·'.repeat(len)}${R}`
   }
 

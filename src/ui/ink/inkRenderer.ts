@@ -65,12 +65,10 @@ export class InkRenderer {
   }
 
   toolResult(name: string, result: string, isError: boolean): void {
-    // The last tool message without a result gets the result attached.
-    // This works because tools are sequential within a turn.
     const msgs = this.store.getState().messages
     for (let i = msgs.length - 1; i >= 0; i--) {
       const m = msgs[i]
-      if (m.type === 'tool' && m.result === undefined) {
+      if (m.type === 'tool' && m.name === name && m.result === undefined) {
         this.store.setToolResult(m.id, result, isError)
         return
       }
@@ -116,18 +114,18 @@ export class InkRenderer {
     const msgs = this.store.getState().messages
     for (let i = msgs.length - 1; i >= 0; i--) {
       const m = msgs[i]
-      if (m.type === 'agent' && m.status === 'running') {
+      if (m.type === 'agent' && m.desc === desc && m.status === 'running') {
         this.store.setAgentDone(m.id, ok)
         return
       }
     }
   }
 
-  agentSummary(_type: string, _desc: string, summary: string): void {
+  agentSummary(type: string, desc: string, summary: string): void {
     const msgs = this.store.getState().messages
     for (let i = msgs.length - 1; i >= 0; i--) {
       const m = msgs[i]
-      if (m.type === 'agent' && (m.status === 'done' || m.status === 'failed')) {
+      if (m.type === 'agent' && m.agentType === type && m.desc === desc && (m.status === 'done' || m.status === 'failed')) {
         this.store.setAgentDone(m.id, m.status === 'done', summary)
         return
       }

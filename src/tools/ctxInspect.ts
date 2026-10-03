@@ -42,7 +42,8 @@ Token breakdown by message role, top-N largest messages, and projected savings f
             description: 'summary (default): overview. largest: top-N biggest messages. breakdown: per-role stats. projection: what snip would save.',
           },
           top_n: {
-            type: 'number',
+            type: 'integer',
+            minimum: 1,
             description: 'Number of largest messages to show (for "largest" action). Default 10.',
           },
         },
@@ -60,7 +61,7 @@ Token breakdown by message role, top-N largest messages, and projected savings f
 
   private executeSync(input: Record<string, unknown>, ctx: ToolContext): ToolResult {
     const action = (input.action as string) ?? 'summary'
-    const topN = (input.top_n as number) ?? TOP_N_DEFAULT
+    const topN = input.top_n === undefined ? TOP_N_DEFAULT : input.top_n
     const messages = ctx.getMessages?.() ?? []
 
     if (messages.length === 0) {
@@ -69,6 +70,9 @@ Token breakdown by message role, top-N largest messages, and projected savings f
 
     switch (action) {
       case 'largest':
+        if (typeof topN !== 'number' || !Number.isSafeInteger(topN) || topN < 1) {
+          return { content: 'Error: top_n must be a positive safe integer', isError: true }
+        }
         return { content: this.renderLargest(messages, topN), isError: false }
       case 'breakdown':
         return { content: this.renderBreakdown(messages), isError: false }

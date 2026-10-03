@@ -21,6 +21,7 @@ import {
   formatTaskList,
   formatTaskDetail,
 } from '../core/backgroundTaskManager.js'
+import { assertExecutionProfile } from '../core/executionBackend.js'
 
 function getManager(ctx: ToolContext): BackgroundTaskManager | undefined {
   return ctx.backgroundTaskManager
@@ -86,16 +87,25 @@ The task runs detached. Use TaskGet with block=true to wait for completion.`,
     }
 
     const command = input.command as string
-    if (!command) {
+    if (typeof command !== 'string' || !command.trim()) {
       return Promise.resolve({ content: 'Error: command is required', isError: true })
     }
 
-    const id = manager.createTask(command, {
-      description: input.description as string | undefined,
-      cwd: ctx.cwd,
-      sessionDir: ctx.sessionDir,
-      metadata: input.metadata as Record<string, unknown> | undefined,
-    })
+    if (ctx.signal?.aborted) return Promise.resolve({ content: 'Task creation cancelled.', isError: true, status: 'cancelled' })
+    let id: string
+    try {
+      assertExecutionProfile(ctx.executionProfile)
+      id = manager.createTask(command, {
+        description: input.description as string | undefined,
+        cwd: ctx.cwd,
+        sessionDir: ctx.sessionDir,
+        metadata: input.metadata as Record<string, unknown> | undefined,
+        signal: ctx.signal,
+        profile: ctx.executionProfile,
+      })
+    } catch (error) {
+      return Promise.resolve({ content: `Task creation failed: ${(error as Error).message}`, isError: true })
+    }
 
     const task = manager.getTask(id)
     if (!task) {
@@ -108,7 +118,7 @@ The task runs detached. Use TaskGet with block=true to wait for completion.`,
       })
     }
     return Promise.resolve({
-      content: `Background task created: ${id}\nCommand: ${task.command}\nPID: ${task.pid ?? 'unknown'}\nStatus: running\n\nUse TaskGet with task_id="${id}" to check status and retrieve output.`,
+      content: `Background task created: ${id}\nCommand: ${task.command}\nPID: ${task.pid ?? 'unknown'}\nStatus: ${task.status}\n\nUse TaskGet with task_id="${id}" to check status and retrieve output.`,
       isError: false,
     })
   }
@@ -357,7 +367,7 @@ Use this when a background command is no longer needed or is stuck.`,
     }
 
     return Promise.resolve({
-      content: `Stop requested for task ${taskId}: ${task.description}. Status: stopping; use TaskOutput to confirm physical termination.`,
+      content: `Stop requested for task ${taskId}: ${task.description}. Status: stopping; use TaskGet to confirm physical termination.`,
       isError: false,
     })
   }

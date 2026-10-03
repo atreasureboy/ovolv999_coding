@@ -161,14 +161,23 @@ export function resolveAgentConfig(input: {
 }): AgentConfig {
   if (input.config) return input.config
   const preset = input.preset ?? 'general-purpose'
-  if (!AGENT_PRESETS[preset]) {
+  if (!Object.hasOwn(AGENT_PRESETS, preset)) {
     // Reject unknown presets instead of silently falling back — prevents
     // typos like "expoler" from spawning a full general-purpose agent
     throw new Error(`Unknown agent preset: "${preset}". Valid presets: ${PRESET_NAMES.join(' | ')}`)
   }
   const found = AGENT_PRESETS[preset]
   // Return a shallow clone so callers can safely mutate (e.g. maxIterations override)
-  return { ...found, identity: { ...found.identity } }
+  return {
+    ...found,
+    identity: { ...found.identity },
+    tools: found.tools ? [...found.tools] : undefined,
+    disallowedTools: found.disallowedTools ? [...found.disallowedTools] : undefined,
+    skills: found.skills ? [...found.skills] : undefined,
+    modules: found.modules
+      ? Object.fromEntries(Object.entries(found.modules).map(([name, module]) => [name, { ...module }]))
+      : undefined,
+  }
 }
 
 /**
@@ -176,11 +185,16 @@ export function resolveAgentConfig(input: {
  * Returns a safe AgentConfig or null if the input is malformed.
  */
 export function validateAgentConfig(raw: unknown): AgentConfig | null {
-  if (typeof raw !== 'object' || raw === null) return null
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null
   const obj = raw as Record<string, unknown>
   const identity = obj.identity
-  if (typeof identity !== 'object' || identity === null) return null
+  if (typeof identity !== 'object' || identity === null || Array.isArray(identity)) return null
   const id = identity as Record<string, unknown>
+  for (const key of ['maxIterations', 'maxOutputTokens']) {
+    const value = obj[key]
+    if (value !== undefined && (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0)) return null
+  }
+  if (obj.temperature !== undefined && (typeof obj.temperature !== 'number' || !Number.isFinite(obj.temperature))) return null
   // systemPrompt must be a function (preset pattern) — if LLM passes a string, wrap it
   let systemPrompt: (cwd: string) => string
   if (typeof id.systemPrompt === 'function') {

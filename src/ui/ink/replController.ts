@@ -14,6 +14,7 @@ import {
 } from '../../core/sessionManager.js'
 import { formatApiError } from '../../utils/apiError.js'
 import { normalizeOutcome, type OutcomeStatus } from '../../core/outcome.js'
+import { refreshGitBranch } from './gitInfo.js'
 
 export interface InkReplControllerOptions {
   store: UIStore
@@ -145,7 +146,7 @@ export function createInkReplController(opts: InkReplControllerOptions): InkRepl
       }
       return { newHistory: history, reason: result.result.reason, status }
     } catch (error: unknown) {
-      if ((error as Error).name !== 'AbortError') {
+      if (!(error instanceof Error) || error.name !== 'AbortError') {
         const formatted = formatApiError(error)
         store.addError(
           `${formatted.title}: ${formatted.detail}${formatted.hint ? ' ' + formatted.hint : ''}`,
@@ -153,6 +154,7 @@ export function createInkReplController(opts: InkReplControllerOptions): InkRepl
       }
       return { newHistory: history, reason: 'error' }
     } finally {
+      refreshGitBranch()
       store.setRunning(false)
       store.setSpinner(false)
     }
@@ -206,6 +208,7 @@ export function createInkReplController(opts: InkReplControllerOptions): InkRepl
       return true
     }
     const result = await dispatchSlashCommand(input, slashContext)
+    refreshGitBranch()
     if (result === null) return false
     switch (result.type) {
       case 'text':

@@ -18,6 +18,7 @@ export class ACPServer extends EventEmitter {
   private handlers: ACPHandlers
   private cwd: string
   private initialized = false
+  private shutdownRequested = false
   private detachInput?: () => void
   private active = 0
   private maxMessageBytes: number
@@ -48,6 +49,7 @@ export class ACPServer extends EventEmitter {
 
   start(input: NodeJS.ReadableStream = process.stdin): void {
     this.detachInput?.()
+    this.shutdownRequested = false
     const failed = (error: Error): void => { this.emit('protocolError', error); this.stop() }
     this.detachInput = attachFramedInput(input, this.maxMessageBytes, {
       onFrame: line => {
@@ -85,6 +87,7 @@ export class ACPServer extends EventEmitter {
     const req = msg
     const id = 'id' in req ? req.id : undefined
     const { method, params } = req
+    if (this.shutdownRequested) { this.respondError(id, RPC_ERRORS.INVALID_REQUEST.code, 'Server has shut down'); return }
     if (params !== undefined && (typeof params !== 'object' || params === null || Array.isArray(params))) { this.respondError(id, RPC_ERRORS.INVALID_PARAMS.code, 'Invalid params'); return }
     if (Buffer.byteLength(JSON.stringify(req)) > this.maxMessageBytes) { this.respondError(id, RPC_ERRORS.INVALID_PARAMS.code, 'ACP request byte limit exceeded'); return }
     const traits = METHOD_TRAITS.get(method)
@@ -110,7 +113,8 @@ export class ACPServer extends EventEmitter {
           break
 
         case 'shutdown':
-          this.initialized = false
+          this.shutdownRequested = true
+          this.stop()
           this.respond(id, {})
           this.emit('shutdown')
           break

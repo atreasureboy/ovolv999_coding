@@ -32,22 +32,15 @@ For commands expected to run >5 minutes, ALWAYS use background mode:
 run_in_background=true
 command: "npm run build > /tmp/build.log 2>&1"
 
-# Step 2 (later): Check progress
-command: "tail -50 /tmp/build.log"
-
-# Step 3: Check if finished (look for completion marker or exit)
-command: "ps aux | grep 'npm run build' | grep -v grep || echo 'BUILD DONE'; tail -20 /tmp/build.log"
+# The response returns a task ID. Check its authoritative status later:
+TaskGet({ task_id: "<returned task ID>", block: true, timeout: 30000 })
 \`\`\`
 
 ## Parallel Execution
 
-To run multiple commands simultaneously, call Bash multiple times with run_in_background=true in the SAME response.
+Run independent read-only commands concurrently when the runtime permits. Serialize commands that mutate the same files or depend on another command's result.
 
-Example: Run build + lint + test all at once:
-- Call 1: build → /tmp/build.log (background)
-- Call 2: lint → /tmp/lint.log (background)
-- Call 3: test → /tmp/test.log (background)
-Then in next turn: read all three output files.
+Build, lint, and tests may share generated files. Run them in the order required by the project and query each background task by its returned ID before using its result. Read the task output and exit code; a missing process or a timeout waiting for completion does not prove success.
 
 ## Git Safety Protocol
 
@@ -64,7 +57,7 @@ Then in next turn: read all three output files.
 - Use absolute paths; avoid cd
 - For dependent sequential commands, chain with && in one call`
 
-export const READ_FILE_DESCRIPTION = `Reads a file from the local filesystem. You can access any file directly by using this tool.
+export const READ_FILE_DESCRIPTION = `Reads a file from the local filesystem within the configured workspace and permission policy.
 
 Usage:
 - The file_path parameter must be an absolute path

@@ -97,7 +97,11 @@ export function runWithDeadline<T>(
   })
   // Kick off the task. .then/.catch routes to BOTH the race-resolver
   // and the settled-state observer.
-  task().then(resolveTask, rejectTask)
+  try {
+    task().then(resolveTask, rejectTask)
+  } catch (error) {
+    rejectTask(error)
+  }
 
   // `taskSettled` is a never-rejecting promise that resolves to a
   // PromiseSettledResult — { status, value } or { status, reason }.

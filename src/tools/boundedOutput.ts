@@ -28,9 +28,9 @@ export class BoundedOutputBuffer {
   }
 
   render(): string {
+    if (this.droppedBytes === 0) return Buffer.concat([this.head, this.tail]).toString('utf8')
     const head = this.head.toString('utf8')
     const tail = this.tail.toString('utf8')
-    if (this.droppedBytes === 0) return head + tail
     const marker = `\n\n[... ${this.droppedBytes.toLocaleString()} bytes of live output dropped from the middle (kept ${this.bytesPerEnd.toLocaleString()} bytes at head + ${this.bytesPerEnd.toLocaleString()} bytes at tail) ...]\n`
     return head + marker + tail
   }

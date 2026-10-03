@@ -57,7 +57,11 @@ function parseFrontmatter(content: string): {
     if (colonIdx > 0) {
       const key = line.slice(0, colonIdx).trim()
       // Strip surrounding quotes from value
-      const value = line.slice(colonIdx + 1).trim().replace(/^["']|["']$/g, '')
+      const rawValue = line.slice(colonIdx + 1).trim()
+      let value = rawValue.replace(/^["']|["']$/g, '')
+      if (rawValue.startsWith('"') && rawValue.endsWith('"')) {
+        try { value = JSON.parse(rawValue) as string } catch (error) { void error }
+      }
       if (key) fm[key] = value
     }
   }
@@ -285,11 +289,17 @@ export function loadSkills(cwd: string): Map<string, Skill> {
   for (const s of BUILTIN_SKILLS) map.set(s.name, s)
 
   // Global user skills override built-ins
+  for (const s of loadFromDir(join(homedir(), '.ovolv999', 'skills'), 'global')) {
+    map.set(s.name, s)
+  }
   for (const s of loadFromDir(join(homedir(), '.ovogo', 'skills'), 'global')) {
     map.set(s.name, s)
   }
 
   // Project skills override all
+  for (const s of loadFromDir(resolve(cwd, '.ovolv999', 'skills'), 'project')) {
+    map.set(s.name, s)
+  }
   for (const s of loadFromDir(resolve(cwd, '.ovogo', 'skills'), 'project')) {
     map.set(s.name, s)
   }
@@ -316,5 +326,5 @@ export function formatSkillIndex(skills: Map<string, Skill>): string {
  * Expand a skill prompt, substituting $ARGS with the provided arguments string.
  */
 export function expandSkillPrompt(skill: Skill, args: string): string {
-  return skill.prompt.replace(/\$ARGS/g, args.trim())
+  return skill.prompt.replace(/\$ARGS/g, () => args.trim())
 }

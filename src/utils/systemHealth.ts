@@ -7,10 +7,12 @@
  * network connectivity, shell environment.
  */
 
-import { existsSync, readFileSync, statSync } from 'fs'
+import { existsSync, readFileSync, realpathSync, statSync, statfsSync } from 'fs'
 import { join, dirname } from 'path'
 import { homedir, platform, freemem, totalmem } from 'os'
 import { execSync } from 'child_process'
+import { fileURLToPath } from 'url'
+import { compareVersions, getPackageRoot } from './autoUpdater.js'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -75,15 +77,8 @@ function commandVersion(cmd: string, versionFlag = '--version'): string | null {
 
 function getDiskFreeMB(path: string): number {
   try {
-    if (platform() === 'win32') {
-      const out = execSync(`dir "${path}" 2>nul | find "bytes free"`, { encoding: 'utf8', timeout: 5000 })
-      const match = out.match(/([\d,]+)\s+bytes free/i)
-      if (match) return parseInt(match[1].replace(/,/g, ''), 10) / (1024 * 1024)
-    } else {
-      const out = execSync(`df -m "${path}" 2>/dev/null | tail -1`, { encoding: 'utf8', timeout: 5000 })
-      const parts = out.trim().split(/\s+/)
-      if (parts.length >= 4) return parseInt(parts[3], 10)
-    }
+    const stats = statfsSync(path)
+    return stats.bavail * stats.bsize / (1024 * 1024)
   } catch { /* ignore */ }
   return -1
 }
@@ -92,25 +87,21 @@ function getDiskFreeMB(path: string): number {
 
 function checkNodeVersion(): SystemCheck {
   const version = process.versions.node
-  const major = parseInt(version.split('.')[0], 10)
-
-  if (major < 18) {
+  let minimum = '22.13.0'
+  const packageRoot = getPackageRoot()
+  try {
+    const pkg: unknown = packageRoot && JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8'))
+    if (pkg && typeof pkg === 'object' && 'engines' in pkg && pkg.engines && typeof pkg.engines === 'object' && 'node' in pkg.engines && typeof pkg.engines.node === 'string') {
+      minimum = /^>=(\d+\.\d+\.\d+)$/.exec(pkg.engines.node)?.[1] ?? minimum
+    }
+  } catch (error) { void error }
+  if (compareVersions(version, minimum) < 0) {
     return {
       id: 'node-version',
       name: 'Node.js Version',
       level: 'error',
-      message: `Node.js ${version} is too old (requires >=18)`,
-      fix: 'Update Node.js to v18 or later: https://nodejs.org/',
-    }
-  }
-
-  if (major < 20) {
-    return {
-      id: 'node-version',
-      name: 'Node.js Version',
-      level: 'warning',
-      message: `Node.js ${version} (v20+ recommended)`,
-      fix: 'Consider updating to Node.js v20+ for better performance',
+      message: `Node.js ${version} is too old (requires >=${minimum})`,
+      fix: `Update Node.js to v${minimum} or later: https://nodejs.org/`,
     }
   }
 
@@ -232,8 +223,8 @@ function checkMemory(): SystemCheck {
 }
 
 function checkInstallLocation(): SystemCheck {
-  const execPath = process.execPath
-  const installDir = dirname(dirname(execPath))
+  const execPath = fileURLToPath(import.meta.url)
+  const installDir = getPackageRoot() ?? dirname(execPath)
 
   // Check if installed in a writable location
   try {
@@ -259,11 +250,20 @@ function checkInstallLocation(): SystemCheck {
 }
 
 function checkMultipleInstalls(): SystemCheck {
-  const locations: string[] = []
+  const locations = new Set<string>()
+  const current = getPackageRoot()
+  const addLocation = (path: string): void => {
+    if (!existsSync(path)) return
+    try {
+      const target = realpathSync(path)
+      const location = getPackageRoot(statSync(target).isDirectory() ? target : dirname(target)) ?? target
+      if (location !== current) locations.add(location)
+    } catch (error) { void error }
+  }
 
   try {
-    const npmGlobal = execSync('npm root -g 2>/dev/null', { encoding: 'utf8', timeout: 5000 }).trim()
-    if (npmGlobal) locations.push(npmGlobal)
+    const npmGlobal = execSync('npm root -g', { encoding: 'utf8', timeout: 5000, stdio: 'pipe' }).trim()
+    if (npmGlobal) addLocation(join(npmGlobal, 'ovogogogo'))
   } catch { /* ignore */ }
 
   const home = homedir()
@@ -275,23 +275,22 @@ function checkMultipleInstalls(): SystemCheck {
   ]
 
   for (const p of possiblePaths) {
-    if (existsSync(join(p, 'ovolv999')) || existsSync(join(p, 'ovogogogo'))) {
-      locations.push(p)
-    }
+    addLocation(join(p, 'ovolv999'))
+    addLocation(join(p, 'ovogogogo'))
   }
 
-  if (locations.length > 1) {
+  if (locations.size > 0) {
     return {
       id: 'multiple-installs',
       name: 'Multiple Installations',
       level: 'warning',
-      message: `Found ${locations.length} installations`,
-      details: locations.join('\n'),
+      message: `Found ${locations.size} other installation(s)`,
+      details: [...locations].join('\n'),
       fix: 'Remove duplicate installations to avoid confusion',
     }
   }
 
-  return { id: 'multiple-installs', name: 'Multiple Installations', level: 'ok', message: 'Single installation' }
+  return { id: 'multiple-installs', name: 'Multiple Installations', level: 'ok', message: 'No other installations found' }
 }
 
 function checkShell(): SystemCheck {

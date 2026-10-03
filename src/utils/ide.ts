@@ -6,8 +6,8 @@
  */
 
 import { existsSync, readFileSync } from 'fs'
-import { join, resolve, isAbsolute } from 'path'
-import { execSync } from 'child_process'
+import { join, resolve, isAbsolute, dirname } from 'path'
+import { execFileSync, execSync } from 'child_process'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -181,6 +181,16 @@ function findIdeExecutable(type: IDEType): string | undefined {
 
 // ── Launch Operations ───────────────────────────────────────────────────────
 
+function launchExecutable(ide: IDEType, fallback: string): string {
+  if (process.platform !== 'win32') return fallback
+  const nativeName = { vscode: 'Code.exe', cursor: 'Cursor.exe', windsurf: 'Windsurf.exe' }[ide as 'vscode' | 'cursor' | 'windsurf']
+  if (!nativeName) return fallback
+  const found = findIdeExecutable(ide)?.split(/\r?\n/)[0]
+  if (!found) return fallback
+  const nativePath = resolve(dirname(found), '..', nativeName)
+  return existsSync(nativePath) ? nativePath : fallback
+}
+
 export function openInIDE(
   filePath: string,
   options: { line?: number; column?: number; ide?: IDEType; cwd?: string } = {},
@@ -199,28 +209,30 @@ export function openInIDE(
     ? `:${options.line}${options.column ? `:${options.column}` : ''}`
     : ''
 
-  const cmds: Record<string, string> = {
-    vscode: `code "${absPath}${position}"`,
-    cursor: `cursor "${absPath}${position}"`,
-    windsurf: `windsurf "${absPath}${position}"`,
-    intellij: `idea "${absPath}${position ? `:${options.line}` : ''}"`,
-    webstorm: `webstorm "${absPath}${position ? `:${options.line}` : ''}"`,
-    pycharm: `pycharm "${absPath}${position ? `:${options.line}` : ''}"`,
-    goland: `goland "${absPath}${position ? `:${options.line}` : ''}"`,
-    sublime: `subl "${absPath}${position}"`,
-    neovim: `nvim "${absPath}${position ? ` +${options.line}` : ''}"`,
-    vim: `vim "${absPath}${position ? ` +${options.line}` : ''}"`,
-    emacs: `emacs "${absPath}${position ? ` +${options.line}:${options.column ?? 1}` : ''}"`,
-    zed: `zeditor "${absPath}${position}"`,
+  const cmds: Record<string, [string, string[]]> = {
+    vscode: ['code', position ? ['--goto', absPath + position] : [absPath]],
+    cursor: ['cursor', position ? ['--goto', absPath + position] : [absPath]],
+    windsurf: ['windsurf', position ? ['--goto', absPath + position] : [absPath]],
+    intellij: ['idea', [...(options.line ? ['--line', String(options.line)] : []), absPath]],
+    webstorm: ['webstorm', [...(options.line ? ['--line', String(options.line)] : []), absPath]],
+    pycharm: ['pycharm', [...(options.line ? ['--line', String(options.line)] : []), absPath]],
+    goland: ['goland', [...(options.line ? ['--line', String(options.line)] : []), absPath]],
+    sublime: ['subl', [absPath + position]],
+    neovim: ['nvim', [...(options.line ? ['+' + options.line] : []), absPath]],
+    vim: ['vim', [...(options.line ? ['+' + options.line] : []), absPath]],
+    emacs: ['emacs', [...(options.line ? [`+${options.line}:${options.column ?? 1}`] : []), absPath]],
+    zed: ['zeditor', [absPath + position]],
   }
 
-  const cmd = cmds[ide]
-  if (!cmd) {
+  const launch = cmds[ide]
+  if (!launch) {
     return { success: false, message: `Opening files in ${ide} not supported` }
   }
 
+  const executable = launchExecutable(ide, launch[0])
+  const cmd = [executable, ...launch[1].map(arg => JSON.stringify(arg))].join(' ')
   try {
-    execSync(cmd, { stdio: 'pipe', timeout: 5000 })
+    execFileSync(executable, launch[1], { stdio: 'pipe', timeout: 5000 })
     return { success: true, message: `Opened in ${ide}`, command: cmd }
   } catch (err) {
     return {
@@ -246,18 +258,21 @@ export function openDiffInIDE(
   const newAbs = isAbsolute(newPath) ? newPath : resolve(cwd, newPath)
 
   const cmds: Record<string, string> = {
-    vscode: `code --diff "${oldAbs}" "${newAbs}"`,
-    cursor: `cursor --diff "${oldAbs}" "${newAbs}"`,
-    windsurf: `windsurf --diff "${oldAbs}" "${newAbs}"`,
+    vscode: 'code',
+    cursor: 'cursor',
+    windsurf: 'windsurf',
   }
 
-  const cmd = cmds[ide]
-  if (!cmd) {
+  const launcher = cmds[ide]
+  if (!launcher) {
     return { success: false, message: `Diff view not supported in ${ide}` }
   }
 
+  const executable = launchExecutable(ide, launcher)
+  const args = ['--diff', oldAbs, newAbs]
+  const cmd = [executable, ...args.map(arg => JSON.stringify(arg))].join(' ')
   try {
-    execSync(cmd, { stdio: 'pipe', timeout: 5000 })
+    execFileSync(executable, args, { stdio: 'pipe', timeout: 5000 })
     return { success: true, message: `Opened diff in ${ide}`, command: cmd }
   } catch (err) {
     return {

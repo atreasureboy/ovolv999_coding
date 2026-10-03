@@ -20,7 +20,9 @@
 import { spawn, execFileSync, type ChildProcess } from 'child_process'
 import { EventEmitter } from 'events'
 import { resolve } from 'path'
-import { existsSync } from 'fs'
+import { existsSync, readFileSync } from 'fs'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { isRecord } from './persistedData.js'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -85,7 +87,6 @@ interface ServerSpec {
 const SERVER_PATTERNS: Record<LanguageId, ServerSpec[]> = {
   typescript: [
     { command: 'typescript-language-server', args: ['--stdio'], languageId: 'typescript' },
-    { command: 'tsserver', args: [], languageId: 'typescript' },
   ],
   javascript: [
     { command: 'typescript-language-server', args: ['--stdio'], languageId: 'javascript' },
@@ -103,20 +104,17 @@ const SERVER_PATTERNS: Record<LanguageId, ServerSpec[]> = {
   ],
 }
 
-export function detectServer(languageId: LanguageId = 'typescript'): ServerSpec | null {
+export function detectServer(languageId: LanguageId = 'typescript', cwd = process.cwd()): ServerSpec | null {
   const specs = SERVER_PATTERNS[languageId]
   if (!specs) return null
 
-  // Check TS-specific path: node_modules/.bin/tsserver
   if (languageId === 'typescript' || languageId === 'javascript') {
-    const localTsserver = resolve(process.cwd(), 'node_modules', '.bin', 'tsserver')
-    if (existsSync(localTsserver)) {
-      return { command: 'node', args: [localTsserver], languageId }
-    }
-    const localTsLs = resolve(process.cwd(), 'node_modules', '.bin', 'typescript-language-server')
-    if (existsSync(localTsLs)) {
-      return { command: localTsLs, args: ['--stdio'], languageId }
-    }
+    try {
+      const dir = resolve(cwd, 'node_modules', 'typescript-language-server')
+      const pkg: unknown = JSON.parse(readFileSync(resolve(dir, 'package.json'), 'utf8'))
+      const bin = isRecord(pkg) && (typeof pkg.bin === 'string' ? pkg.bin : isRecord(pkg.bin) ? pkg.bin['typescript-language-server'] : undefined)
+      if (typeof bin === 'string' && existsSync(resolve(dir, bin))) return { command: process.execPath, args: [resolve(dir, bin), '--stdio'], languageId }
+    } catch (error) { void error }
   }
 
   for (const spec of specs) {
@@ -141,6 +139,7 @@ export class LspClient extends EventEmitter {
   private serverSpec: ServerSpec | null = null
   private options: LspClientOptions
   private shutdown = false
+  private starting: Promise<boolean> | null = null
 
   constructor(options: LspClientOptions) {
     super()
@@ -149,14 +148,22 @@ export class LspClient extends EventEmitter {
 
   // ── Lifecycle ─────────────────────────────────────────────────────────
 
-  async start(): Promise<boolean> {
+  start(): Promise<boolean> {
+    if (this.starting) return this.starting
+    const pending = this.startOnce()
+    this.starting = pending
+    void pending.then(() => { if (this.starting === pending) this.starting = null }, () => { if (this.starting === pending) this.starting = null })
+    return pending
+  }
+
+  private async startOnce(): Promise<boolean> {
     if (this.initialized) return true
     this.shutdown = false
     this.buffer = Buffer.alloc(0)
 
     this.serverSpec = this.options.command
       ? { command: this.options.command, args: this.options.args ?? [], languageId: this.options.languageId ?? 'typescript' }
-      : detectServer(this.options.languageId)
+      : detectServer(this.options.languageId, fileUriToPath(this.options.rootUri))
 
     if (!this.serverSpec) return false
 
@@ -164,6 +171,7 @@ export class LspClient extends EventEmitter {
       this.proc = spawn(this.serverSpec.command, this.serverSpec.args, {
         stdio: ['pipe', 'pipe', 'pipe'],
         cwd: fileUriToPath(this.options.rootUri),
+        windowsHide: true,
       })
     } catch {
       return false
@@ -175,8 +183,10 @@ export class LspClient extends EventEmitter {
       for (const { reject } of this.pending.values()) reject(err)
       this.pending.clear()
       this.initialized = false
+      this.kill()
     })
     if (!proc.stdout || !proc.stdin) {
+      this.kill()
       return false
     }
 
@@ -184,6 +194,7 @@ export class LspClient extends EventEmitter {
     // 'error' event fires on the next tick. Set up a guard so start()
     // rejects quickly rather than waiting for the full init timeout.
     if (!proc.pid) {
+      this.kill()
       return false
     }
 
@@ -199,11 +210,13 @@ export class LspClient extends EventEmitter {
     proc.stdout.on('data', (data: Buffer) => {
       if (this.proc === proc) this.onData(data)
     })
+    proc.stderr?.resume()
+    proc.stdin.on('error', () => { if (this.proc === proc) this.kill() })
+    proc.stdout.on('error', () => { if (this.proc === proc) this.kill() })
     proc.on('exit', () => {
       if (this.proc !== proc) return
-      this.initialized = false
       this.proc = null
-      this.buffer = Buffer.alloc(0)
+      this.kill()
     })
 
     // Initialize
@@ -220,6 +233,7 @@ export class LspClient extends EventEmitter {
         },
       }, this.options.timeoutMs)
 
+      if (this.proc !== proc || this.shutdown) return false
       this.notify('initialized', {})
       this.initialized = true
       return true
@@ -313,7 +327,7 @@ export class LspClient extends EventEmitter {
     if (!this.isRunning()) return []
     try {
       const result = await this.request('workspace/symbol', { query }, this.options.timeoutMs)
-      return (result as LspSymbol[]) ?? []
+      return Array.isArray(result) ? result.filter(isLspSymbol) : []
     } catch {
       return []
     }
@@ -337,6 +351,7 @@ export class LspClient extends EventEmitter {
   kill(): void {
     this.initialized = false
     this.buffer = Buffer.alloc(0)
+    this.diagnostics.clear()
     const proc = this.proc
     this.proc = null
     if (proc) {
@@ -353,13 +368,15 @@ export class LspClient extends EventEmitter {
 
     while (true) {
       const headerEnd = this.buffer.indexOf('\r\n\r\n')
-      if (headerEnd < 0) break
+      if (headerEnd < 0) { if (this.buffer.length > 16384) this.kill(); break }
+      if (headerEnd > 16384) { this.kill(); return }
 
       const header = this.buffer.subarray(0, headerEnd).toString('utf8')
-      const match = header.match(/Content-Length:\s*(\d+)/i)
-      if (!match) break
+      const matches = [...header.matchAll(/^Content-Length:\s*(\d+)\s*$/gim)]
+      if (matches.length !== 1) { this.kill(); return }
 
-      const length = parseInt(match[1], 10)
+      const length = Number(matches[0][1])
+      if (!Number.isSafeInteger(length) || length < 1 || length > 8 * 1024 * 1024) { this.kill(); return }
       const bodyStart = headerEnd + 4
       if (this.buffer.length < bodyStart + length) break
 
@@ -368,8 +385,8 @@ export class LspClient extends EventEmitter {
       this.buffer = remaining.length ? remaining : Buffer.alloc(0)
 
       try {
-        const msg = JSON.parse(body) as LspMessage
-        this.handleMessage(msg)
+        const msg: unknown = JSON.parse(body)
+        if (isRecord(msg) && msg.jsonrpc === '2.0') this.handleMessage(msg as unknown as LspMessage)
       } catch { /* malformed JSON */ }
     }
   }
@@ -393,9 +410,10 @@ export class LspClient extends EventEmitter {
     if (msg.method) {
       switch (msg.method) {
         case 'textDocument/publishDiagnostics': {
-          const params = msg.params as { uri: string; diagnostics: Array<Record<string, unknown>> }
-          if (params?.uri) {
-            const diags = (params.diagnostics ?? []).map((d) => normalizeDiagnostic(params.uri, d))
+          const params = msg.params
+          if (isRecord(params) && typeof params.uri === 'string' && Array.isArray(params.diagnostics)) {
+            const uri = params.uri
+            const diags = params.diagnostics.filter(isRecord).map(d => normalizeDiagnostic(uri, d))
             this.diagnostics.set(params.uri, diags)
             this.emit('diagnostics', params.uri, diags)
           }
@@ -449,59 +467,68 @@ export class LspClient extends EventEmitter {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
+function isLspSymbol(value: unknown): value is LspSymbol {
+  return isRecord(value) && typeof value.name === 'string' && typeof value.kind === 'number'
+    && isRecord(value.location) && typeof value.location.uri === 'string' && isLspRange(value.location.range)
+    && (value.containerName === undefined || typeof value.containerName === 'string')
+}
+
+function isLspRange(value: unknown): value is LspRange {
+  if (!isRecord(value)) return false
+  return [value.start, value.end].every(position => isRecord(position)
+    && Number.isSafeInteger(position.line) && (position.line as number) >= 0
+    && Number.isSafeInteger(position.character) && (position.character as number) >= 0)
+}
+
 function normalizeDiagnostic(uri: string, raw: Record<string, unknown>): LspDiagnostic {
   const severityMap = ['error', 'warning', 'information', 'hint']
   const severity = typeof raw.severity === 'number'
     ? severityMap[raw.severity - 1] ?? 'information'
     : 'error'
 
-  const range = raw.range as { start: LspPosition; end: LspPosition } | undefined
+  const range = isLspRange(raw.range) ? raw.range : undefined
 
   return {
     uri,
     range: range ?? { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
     severity: severity as LspDiagnostic['severity'],
-    code: raw.code as string | number | undefined,
-    source: raw.source as string | undefined,
-    message: (raw.message as string) ?? '(no message)',
+    code: typeof raw.code === 'string' || typeof raw.code === 'number' ? raw.code : undefined,
+    source: typeof raw.source === 'string' ? raw.source : undefined,
+    message: typeof raw.message === 'string' ? raw.message : '(no message)',
   }
 }
 
 export function pathToFileUri(path: string): string {
-  const resolved = resolve(path)
-  const normalized = process.platform === 'win32'
-    ? resolved.replace(/\\/g, '/')
-    : resolved
-  return `file://${process.platform === 'win32' ? '/' : ''}${normalized}`
+  return pathToFileURL(resolve(path)).href
 }
 
 export function fileUriToPath(uri: string): string {
   if (uri.startsWith('file://')) {
+    try { return fileURLToPath(uri) } catch (error) { void error }
     const path = uri.slice(7)
     if (process.platform === 'win32') {
-      return path.replace(/^\//, '').replace(/\//g, '\\')
+      return decodeURIComponent(path).replace(/^\//, '').replace(/\//g, '\\')
     }
-    return path
+    return decodeURIComponent(path)
   }
   return uri
 }
 
 // ── Singleton Convenience ───────────────────────────────────────────────────
 
-let defaultClient: LspClient | null = null
+const defaultClients = new Map<string, LspClient>()
 
 export function getDefaultLspClient(rootUri: string): LspClient {
-  if (!defaultClient) {
-    defaultClient = new LspClient({ rootUri })
-  }
-  return defaultClient
+  const key = pathToFileUri(fileUriToPath(rootUri))
+  let client = defaultClients.get(key)
+  if (!client) { client = new LspClient({ rootUri: key }); defaultClients.set(key, client) }
+  return client
 }
 
 export async function shutdownDefaultLspClient(): Promise<void> {
-  if (defaultClient) {
-    await defaultClient.stop()
-    defaultClient = null
-  }
+  const clients = [...defaultClients.values()]
+  defaultClients.clear()
+  await Promise.all(clients.map(client => client.stop()))
 }
 
 // ── Formatting ──────────────────────────────────────────────────────────────

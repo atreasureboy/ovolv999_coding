@@ -7,6 +7,7 @@
 
 import { ANSI, bold as boldText, dim, underline, ansiLength, padRight } from '../utils/ansi.js'
 import { getActiveTheme } from './theme.js'
+import { tokenize } from './ink/highlight.js'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -267,54 +268,16 @@ function renderTable(header: string[], rows: string[][]): string {
 
 function applySyntaxHighlighting(line: string, lang: string | undefined): string {
   if (!lang) return ANSI.DIM + line + ANSI.RESET
-
   const theme = getActiveTheme()
-
-  // Comments
-  if (['ts', 'js', 'tsx', 'jsx', 'java', 'go', 'rust', 'c', 'cpp'].includes(lang)) {
-    if (line.trim().startsWith('//')) {
-      return `\x1b[38;2;${hexToRgb(theme.colors.comment)}m${line}\x1b[0m`
-    }
-  }
-  if (['py', 'rb', 'sh'].includes(lang)) {
-    if (line.trim().startsWith('#')) {
-      return `\x1b[38;2;${hexToRgb(theme.colors.comment)}m${line}\x1b[0m`
-    }
-  }
-
-  // Strings
-  let result = line
-  result = result.replace(/(["'`])((?:\\.|(?!\1).)*)\1/g, (match) => {
-    return `\x1b[38;2;${hexToRgb(theme.colors.string)}m${match}\x1b[0m`
-  })
-
-  // Keywords
-  const keywords = getKeywords(lang)
-  if (keywords.length > 0) {
-    const pattern = new RegExp(`\\b(${keywords.join('|')})\\b`, 'g')
-    result = result.replace(pattern, (match) => {
-      return `\x1b[38;2;${hexToRgb(theme.colors.keyword)}m${match}\x1b[0m`
-    })
-  }
-
-  // Numbers
-  result = result.replace(/\b(\d+\.?\d*)\b/g, (match) => {
-    return `\x1b[38;2;${hexToRgb(theme.colors.number)}m${match}\x1b[0m`
-  })
-
-  return result
+  return tokenize(line, lang).map(token => {
+    const color = token.dim && !token.color ? theme.colors.comment
+      : token.color === 'green' ? theme.colors.string
+      : token.color === 'magenta' ? theme.colors.keyword
+      : token.color === 'yellow' ? theme.colors.number
+      : undefined
+    return color ? `\x1b[38;2;${hexToRgb(color)}m${token.text}\x1b[0m` : token.text
+  }).join('')
 }
-
-function getKeywords(lang: string): string[] {
-  const common = ['const', 'let', 'var', 'function', 'return', 'if', 'else', 'for', 'while', 'class', 'import', 'export', 'default', 'async', 'await', 'new', 'try', 'catch', 'throw', 'typeof', 'instanceof']
-  const python = ['def', 'class', 'if', 'elif', 'else', 'for', 'while', 'import', 'from', 'return', 'try', 'except', 'raise', 'with', 'as', 'lambda', 'yield', 'pass', 'break', 'continue', 'True', 'False', 'None']
-  const go = ['func', 'var', 'const', 'type', 'struct', 'interface', 'package', 'import', 'return', 'if', 'else', 'for', 'switch', 'case', 'default', 'go', 'defer', 'chan', 'map', 'range']
-
-  if (['py'].includes(lang)) return python
-  if (['go'].includes(lang)) return go
-  return common
-}
-
 function hexToRgb(hex: string): string {
   const cleaned = hex.replace('#', '')
   const r = parseInt(cleaned.slice(0, 2), 16)

@@ -231,12 +231,10 @@ export function setActiveStyle(cwd: string, styleId: string): { success: boolean
   mkdirSync(dir, { recursive: true })
 
   // Preserve existing custom styles
-  const existing = result.hasConfig
-    ? JSON.parse(readFileSync(configPath, 'utf8')) as OutputStyleConfig
-    : {}
+  const custom = result.styles.filter(style => !BUILT_IN_STYLES.includes(style))
   const config: OutputStyleConfig = {
-    ...existing,
     active: styleId,
+    ...(custom.length ? { custom } : {}),
   }
 
   writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf8')

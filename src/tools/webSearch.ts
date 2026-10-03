@@ -126,6 +126,10 @@ async function fetchWithAbort<T>(
 
   try {
     const resp = await fetch(url, { ...init, signal: controller.signal })
+    if (!resp.ok) {
+      await resp.body?.cancel().catch(() => undefined)
+      throw new Error(`HTTP ${resp.status} ${resp.statusText}: ${label}`)
+    }
     return await raceParse(() => consume(resp))
   } finally {
     clearTimeout(timer)
@@ -187,6 +191,7 @@ async function duckduckgoSearch(
 
     // Related topics
     for (const topic of data.RelatedTopics ?? []) {
+      if (results.length >= numResults) break
       if (topic.Text && topic.FirstURL) {
         results.push({
           title: topic.Text.split(' - ')[0] ?? topic.Text,
@@ -204,7 +209,7 @@ async function duckduckgoSearch(
     if (err instanceof Error && (err.name === 'CancelledError' || err.name === 'TimeoutError')) {
       throw err
     }
-    return []
+    throw err
   }
 }
 
@@ -243,7 +248,7 @@ async function googleSearch(
     if (err instanceof Error && (err.name === 'CancelledError' || err.name === 'TimeoutError')) {
       throw err
     }
-    return []
+    throw err
   }
 }
 
@@ -281,7 +286,7 @@ async function serpApiSearch(
     if (err instanceof Error && (err.name === 'CancelledError' || err.name === 'TimeoutError')) {
       throw err
     }
-    return []
+    throw err
   }
 }
 
@@ -359,6 +364,7 @@ Backends (set env vars for better results):
     }
 
     const numResults = Math.min(typeof num_results === 'number' ? num_results : 5, 10)
+    if (!Number.isSafeInteger(numResults) || numResults <= 0) return { content: 'Error: num_results must be a positive integer', isError: true }
     const signal = context.signal
 
     // Try backends in priority order.
@@ -370,12 +376,16 @@ Backends (set env vars for better results):
       let results: SearchResult[] = []
       let backend = 'DuckDuckGo'
 
-      if (googleKey && googleEngineId) {
-        results = await googleSearch(query, numResults, googleKey, googleEngineId, signal)
-        backend = 'Google Custom Search'
-      } else if (serpKey) {
-        results = await serpApiSearch(query, numResults, serpKey, signal)
-        backend = 'SerpAPI'
+      try {
+        if (googleKey && googleEngineId) {
+          results = await googleSearch(query, numResults, googleKey, googleEngineId, signal)
+          backend = 'Google Custom Search'
+        } else if (serpKey) {
+          results = await serpApiSearch(query, numResults, serpKey, signal)
+          backend = 'SerpAPI'
+        }
+      } catch (error) {
+        if (signal?.aborted || error instanceof Error && ['CancelledError', 'TimeoutError'].includes(error.name)) throw error
       }
 
       // Fallback to DDG if primary returned nothing.
@@ -385,7 +395,7 @@ Backends (set env vars for better results):
       }
 
       return {
-        content: formatResults(results, query, backend),
+        content: formatResults(results.slice(0, numResults), query, backend),
         isError: false,
       }
     } catch (err: unknown) {

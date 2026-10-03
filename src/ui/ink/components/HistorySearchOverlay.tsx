@@ -49,7 +49,7 @@ export function HistorySearchOverlay({ history, onSelect, onCancel }: HistorySea
       return
     }
     // Ctrl+R again — cycle to next match
-    if (input === '\x12') {
+    if (key.ctrl && (input === 'r' || input === '\x12')) {
       setSelected((s) => Math.min(matches.length - 1, s + 1))
       return
     }

@@ -5,10 +5,11 @@
  * Provides validation, resizing, base64 encoding, and storage.
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'fs'
+import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, rmSync } from 'fs'
 import { join, extname } from 'path'
 import { homedir } from 'os'
-import { execFileSync, execSync } from 'child_process'
+import { execFileSync } from 'child_process'
+import { randomUUID } from 'crypto'
 import { INPUT_IMAGE_TYPES, buildImageDataUrl } from './imageFormats.js'
 
 // ── Types ───────────────────────────────────────────────────────────────────
@@ -54,6 +55,7 @@ export function validateImage(path: string): ImageValidationResult {
   }
 
   const stat = statSync(path)
+  if (!stat.isFile()) return { valid: false, errors: ['Image path is not a file'], warnings }
   if (stat.size > MAX_IMAGE_SIZE) {
     errors.push(
       `Image too large: ${(stat.size / 1024 / 1024).toFixed(1)}MB (max ${MAX_IMAGE_SIZE / 1024 / 1024}MB)`,
@@ -129,6 +131,7 @@ export function getImageInfo(path: string, includeBase64 = false): ImageInfo | n
   if (!existsSync(path)) return null
 
   const stat = statSync(path)
+  if (!stat.isFile()) return null
   const dims = getImageDimensions(path)
   const info: ImageInfo = {
     path,
@@ -190,11 +193,11 @@ export function getResizedPath(path: string, maxDimension = MAX_DIMENSION): stri
   // Try to use sips (macOS) or convert (ImageMagick)
   try {
     const ext = extname(path)
-    const resizedPath = path.replace(ext, `_resized${ext}`)
+    const resizedPath = path.slice(0, path.length - ext.length) + `_resized${ext}`
 
     // Try ImageMagick
     try {
-      execSync(`convert "${path}" -resize ${maxDimension}x${maxDimension}\\> "${resizedPath}"`, {
+      execFileSync('convert', [path, '-resize', `${maxDimension}x${maxDimension}>`, resizedPath], {
         timeout: 10000,
         stdio: 'pipe',
       })
@@ -205,7 +208,7 @@ export function getResizedPath(path: string, maxDimension = MAX_DIMENSION): stri
 
     // Try sips (macOS)
     try {
-      execSync(`sips --resampleHeightWidthMax ${maxDimension} "${path}" --out "${resizedPath}"`, {
+      execFileSync('sips', ['--resampleHeightWidthMax', String(maxDimension), path, '--out', resizedPath], {
         timeout: 10000,
         stdio: 'pipe',
       })
@@ -255,11 +258,11 @@ export function getClipboardImagePath(): string | null {
   const dir = getImageStoreDir()
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
 
-  const tmpPath = join(dir, `clipboard-${Date.now()}.png`)
+  const tmpPath = join(dir, `clipboard-${randomUUID()}.png`)
 
   // Try macOS pngpaste
   try {
-    execSync(`pngpaste "${tmpPath}"`, { timeout: 5000, stdio: 'pipe' })
+    execFileSync('pngpaste', [tmpPath], { timeout: 5000, stdio: 'pipe' })
     if (existsSync(tmpPath) && statSync(tmpPath).size > 0) return tmpPath
   } catch {
     /* not macOS or pngpaste not installed */
@@ -267,16 +270,17 @@ export function getClipboardImagePath(): string | null {
 
   // Try Linux xclip
   try {
-    execSync(`xclip -selection clipboard -t image/png -o > "${tmpPath}"`, {
+    const image = execFileSync('xclip', ['-selection', 'clipboard', '-t', 'image/png', '-o'], {
       timeout: 5000,
       stdio: 'pipe',
-      shell: '/bin/bash',
     })
+    if (image.length > 0) writeFileSync(tmpPath, image)
     if (existsSync(tmpPath) && statSync(tmpPath).size > 0) return tmpPath
   } catch {
     /* not Linux or xclip not installed */
   }
 
+  rmSync(tmpPath, { force: true })
   return null
 }
 

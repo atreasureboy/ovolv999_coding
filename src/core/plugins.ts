@@ -366,6 +366,7 @@ export function createPluginScaffold(
   name: string,
   options: { description?: string; tools?: boolean; commands?: boolean } = {},
 ): string {
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(name)) throw new Error('Invalid plugin name')
   const pluginDir = join(resolve(cwd), PLUGIN_DIR, name)
   mkdirSync(pluginDir, { recursive: true })
 

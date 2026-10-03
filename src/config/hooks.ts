@@ -186,11 +186,14 @@ export class HookRunner implements IHookRunner {
     const results: HookResult[] = []
     for (const entry of entries) {
       if (toolName !== undefined && !matchesHook(entry, toolName)) continue
-      const exec = this.runner({
-        command: entry.command,
-        env,
-        timeoutMs: this.timeoutMs,
-      })
+      const started = Date.now()
+      let exec: ReturnType<HookCommandRunner>
+      try {
+        exec = this.runner({ command: entry.command, env, timeoutMs: this.timeoutMs })
+      } catch (error) {
+        const failure = classifyError(error)
+        exec = { ok: false, status: failure.status, signal: failure.signal, durationMs: Date.now() - started, error: failure.message, errorCode: failure.code }
+      }
       // Redact sensitive env values from any surfaced error text — applies
       // uniformly whether the runner is the real defaultRunner or an
       // injected fake. We re-redact against the live process.env too so

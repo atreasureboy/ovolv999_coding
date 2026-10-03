@@ -1,5 +1,7 @@
 import { spawnSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
 import { parseCron, parseField } from '../../src/core/cron.js'
@@ -10,29 +12,41 @@ describe('cron field parsing', () => {
     const compiled = ts.transpileModule(source, {
       compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
     }).outputText
-    const script = compiled + `
+    const directory = mkdtempSync(join(tmpdir(), 'cron-field-'))
+    const path = join(directory, 'cron.cjs')
+    writeFileSync(path, compiled)
+    writeFileSync(join(directory, 'persistedData.js'), ts.transpileModule(
+      readFileSync(new URL('../../src/core/persistedData.ts', import.meta.url), 'utf8'),
+      { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } },
+    ).outputText)
+    const script = `
+      const cron = require(${JSON.stringify(path)})
       for (const field of ['1-5/0', '1-5/-2', '1-5/nope']) {
         try {
-          exports.parseField(field, 'minute', 0, 59)
+          cron.parseField(field, 'minute', 0, 59)
           console.log(field + ': accepted')
         } catch (error) {
-          console.log(field + ': ' + (error instanceof exports.CronParseError ? 'rejected' : 'unexpected'))
+          console.log(field + ': ' + (error instanceof cron.CronParseError ? 'rejected' : 'unexpected'))
         }
       }
     `
-    const result = spawnSync(process.execPath, ['-e', script], {
-      cwd: process.cwd(),
-      encoding: 'utf8',
-      timeout: 2000,
-      maxBuffer: 10_000,
-    })
-    expect(result.error === undefined).toBe(true)
-    expect(result.status).toBe(0)
-    expect(result.stdout.trim().split(/\r?\n/)).toEqual([
-      '1-5/0: rejected',
-      '1-5/-2: rejected',
-      '1-5/nope: rejected',
-    ])
+    try {
+      const result = spawnSync(process.execPath, ['-e', script], {
+        cwd: directory,
+        encoding: 'utf8',
+        timeout: 2000,
+        maxBuffer: 10_000,
+      })
+      expect(result.error === undefined).toBe(true)
+      expect(result.status, result.stderr).toBe(0)
+      expect(result.stdout.trim().split(/\r?\n/)).toEqual([
+        '1-5/0: rejected',
+        '1-5/-2: rejected',
+        '1-5/nope: rejected',
+      ])
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
   })
 
   it('uses the same name resolution for both range endpoints', () => {

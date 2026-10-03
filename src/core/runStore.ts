@@ -40,7 +40,7 @@ function validRunMetadata(value: Record<string, unknown>, path: string): boolean
     && (value.parentRunId === undefined || identity(value.parentRunId))
     && text(value.workspace, 32768) && text(value.epoch, 128)
     && Number.isSafeInteger(value.revision) && Number(value.revision) >= 0
-    && RUN_STATUSES.has(String(value.status))
+    && typeof value.status === 'string' && RUN_STATUSES.has(value.status)
     && validRunOwner(value.owner) && object(value.operations)
 }
 

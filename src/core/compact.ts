@@ -308,7 +308,11 @@ export async function maybeCompact(
       // the engine would silently fall through to `compacted: false`.
       signal ? { signal } : undefined,
     )
-    summaryText = response.choices[0]?.message?.content ?? ''
+    const choice = response.choices[0]
+    if (choice?.finish_reason !== 'stop' || choice.message.tool_calls?.length) {
+      return { compacted: false, messages, summaryTokens: 0, originalTokens }
+    }
+    summaryText = choice.message.content ?? ''
   } catch (err) {
     // Cancellation contract: aborts are NEVER silently swallowed. The
     // engine relies on the throw to surface the cancellation up through

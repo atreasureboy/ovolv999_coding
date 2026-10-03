@@ -8,8 +8,9 @@
  * and jump back to it later.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
-import { join, resolve, relative } from 'path'
+import { existsSync, mkdirSync, writeFileSync } from 'fs'
+import { join, resolve, relative, win32 } from 'path'
+import { isRecord, isStringArray, readPersistedRows } from './persistedData.js'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -47,15 +48,17 @@ export function getBookmarksPath(cwd: string): string {
 }
 
 export function loadBookmarks(cwd: string): BookmarkStore {
-  const path = getBookmarksPath(cwd)
-  if (!existsSync(path)) {
-    return { bookmarks: [] }
-  }
-  try {
-    return JSON.parse(readFileSync(path, 'utf8')) as BookmarkStore
-  } catch {
-    return { bookmarks: [] }
-  }
+  return { bookmarks: readPersistedRows(getBookmarksPath(cwd), 'bookmarks', isBookmark) }
+}
+
+function isBookmark(value: unknown): value is Bookmark {
+  if (!isRecord(value)) return false
+  return typeof value.id === 'string' && typeof value.path === 'string'
+    && Number.isInteger(value.line) && Number(value.line) >= 1
+    && typeof value.note === 'string' && typeof value.createdAt === 'string'
+    && typeof value.visitCount === 'number' && Number.isFinite(value.visitCount)
+    && (value.lastVisited === null || typeof value.lastVisited === 'string')
+    && (value.tags === undefined || isStringArray(value.tags))
 }
 
 export function saveBookmarks(cwd: string, store: BookmarkStore): void {
@@ -111,6 +114,7 @@ export function addBookmark(
 }
 
 export function removeBookmark(cwd: string, idOrNote: string): boolean {
+  if (!idOrNote.trim()) return false
   const store = loadBookmarks(cwd)
   const before = store.bookmarks.length
   store.bookmarks = store.bookmarks.filter(
@@ -231,7 +235,7 @@ export function formatBookmarkStats(store: BookmarkStore): string {
   if (topFiles.length > 0) {
     lines.push('  Top files:')
     for (const [path, count] of topFiles) {
-      const name = path.split('/').pop() ?? path
+      const name = win32.basename(path)
       lines.push(`    ${name}: ${count}`)
     }
   }

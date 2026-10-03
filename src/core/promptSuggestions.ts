@@ -80,10 +80,9 @@ export function detectLanguage(filePath: string): string {
 }
 
 export function isTestFile(filePath: string): boolean {
-  const name = filePath.toLowerCase()
+  const name = filePath.toLowerCase().replace(/\\/g, '/')
   return name.includes('.test.') || name.includes('.spec.')
-    || name.includes('test/') || name.includes('tests/')
-    || name.includes('__tests__') || name.includes('spec/')
+    || /(?:^|\/)(?:test|tests|__tests__|spec)(?:\/|$)/.test(name)
 }
 
 // ── Suggestion Rules ────────────────────────────────────────────────────────

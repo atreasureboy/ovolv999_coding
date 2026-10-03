@@ -58,14 +58,18 @@ function isWhitespace(s: unknown): boolean {
 }
 
 function headTailTruncate(text: string, maxChars: number, head: number, tail: number): string {
+  if (!Number.isSafeInteger(maxChars) || maxChars < 0) throw new RangeError('Character budget must be a nonnegative integer')
   if (text.length <= maxChars) return text
-  const saved = text.length - (head + tail)
-  if (saved < SNIP_MIN_SAVINGS_CHARS) return text
+  const markerBudget = `\n\n[…snip: ${text.length} chars omitted…]\n\n`.length
+  if (maxChars <= markerBudget) return text.slice(0, maxChars)
+  const available = maxChars - markerBudget
+  head = Math.min(head, Math.ceil(available / 2))
+  tail = Math.min(tail, available - head)
   const omitted = text.length - head - tail
   return (
     text.slice(0, head)
     + `\n\n[…snip: ${omitted} chars omitted…]\n\n`
-    + text.slice(-tail)
+    + (tail ? text.slice(-tail) : '')
   )
 }
 
@@ -217,6 +221,7 @@ export function snipCompact(
   messages: OpenAIMessage[],
   protectRecent: number = SNIP_KEEP_RECENT,
 ): SnipResult {
+  if (!Number.isSafeInteger(protectRecent) || protectRecent < 0) throw new RangeError('Protected range must be a nonnegative integer')
   const tokensBefore = estimateTokens(messages)
   const working = [...messages]
 

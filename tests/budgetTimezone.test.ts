@@ -1,10 +1,25 @@
-import { describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { spawnSync } from 'node:child_process'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { ModuleKind, transpileModule } from 'typescript'
+
+let runtime: string
+beforeAll(() => {
+  runtime = mkdtempSync(join(tmpdir(), 'ovo-budget-timezone-'))
+  writeFileSync(join(runtime, 'package.json'), '{"type":"module"}')
+  for (const name of ['budget', 'persistedData']) {
+    const source = readFileSync(new URL(`../src/core/${name}.ts`, import.meta.url), 'utf8')
+    writeFileSync(join(runtime, `${name}.js`), transpileModule(source, { compilerOptions: { module: ModuleKind.ESNext, target: 9 } }).outputText)
+  }
+})
+afterAll(() => rmSync(runtime, { recursive: true, force: true }))
 
 describe('budget UTC period contract', () => {
   it.each(['UTC', 'Asia/Shanghai', 'America/New_York'])('uses the same boundaries in %s', (timezone) => {
-    const moduleUrl = new URL('../src/core/budget.ts', import.meta.url).href
+    const moduleUrl = pathToFileURL(join(runtime, 'budget.js')).href
     const script = `
       import { getPeriodKey, getPeriodStart, getPeriodEnd } from ${JSON.stringify(moduleUrl)};
       const date = new Date('2025-03-09T23:30:00Z');

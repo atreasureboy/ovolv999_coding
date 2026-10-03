@@ -10,9 +10,9 @@ import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/type
 
 interface McpRegistryEntry {
   client: {
-    listResources: () => Promise<Array<{ uri: string; name?: string; description?: string; mimeType?: string }>>
-    readResource: (uri: string) => Promise<Array<{ uri: string; mimeType?: string; text?: string; blob?: string }>>
-    listPrompts: () => Promise<Array<{ name: string; description?: string; arguments?: Array<{ name: string; description?: string; required?: boolean }> }>>
+    listResources: (signal?: AbortSignal) => Promise<Array<{ uri: string; name?: string; description?: string; mimeType?: string }>>
+    readResource: (uri: string, signal?: AbortSignal) => Promise<Array<{ uri: string; mimeType?: string; text?: string; blob?: string }>>
+    listPrompts: (signal?: AbortSignal) => Promise<Array<{ name: string; description?: string; arguments?: Array<{ name: string; description?: string; required?: boolean }> }>>
   }
   serverName: string
 }
@@ -64,14 +64,17 @@ Lists resources (with URIs, names, descriptions) and prompts from each connected
 
     const filterServer = input.server as string | undefined
     const lines: string[] = []
+    let hasErrors = false
 
     for (const [name, entry] of registry) {
       if (filterServer && name !== filterServer) continue
       try {
-        const [resources, prompts] = await Promise.all([
-          entry.client.listResources().catch(() => []),
-          entry.client.listPrompts().catch(() => []),
+        const [resourceResult, promptResult] = await Promise.allSettled([
+          entry.client.listResources(ctx.signal),
+          entry.client.listPrompts(ctx.signal),
         ])
+        const resources = resourceResult.status === 'fulfilled' ? resourceResult.value : []
+        const prompts = promptResult.status === 'fulfilled' ? promptResult.value : []
 
         lines.push(`\n=== ${name} ===`)
 
@@ -82,6 +85,9 @@ Lists resources (with URIs, names, descriptions) and prompts from each connected
             const mime = r.mimeType ? ` [${r.mimeType}]` : ''
             lines.push(`  ${r.uri}${mime}${desc}`)
           }
+        } else if (resourceResult.status === 'rejected') {
+          lines.push(`Resources: error (${resourceResult.reason instanceof Error ? resourceResult.reason.message : String(resourceResult.reason)})`)
+          hasErrors = true
         } else {
           lines.push('Resources: none')
         }
@@ -93,8 +99,12 @@ Lists resources (with URIs, names, descriptions) and prompts from each connected
             const args = p.arguments?.map(a => `${a.name}${a.required ? '!' : ''}`).join(', ')
             lines.push(`  /${p.name}${args ? ` (${args})` : ''}${desc}`)
           }
+        } else if (promptResult.status === 'rejected') {
+          lines.push(`Prompts: error (${promptResult.reason instanceof Error ? promptResult.reason.message : String(promptResult.reason)})`)
+          hasErrors = true
         }
       } catch (err) {
+        hasErrors = true
         lines.push(`\n=== ${name} === (error: ${err instanceof Error ? err.message : String(err)})`)
       }
     }
@@ -103,7 +113,7 @@ Lists resources (with URIs, names, descriptions) and prompts from each connected
       return { content: filterServer ? `No MCP server named "${filterServer}".` : 'No MCP servers connected.', isError: false }
     }
 
-    return { content: lines.join('\n'), isError: false }
+    return { content: lines.join('\n'), isError: hasErrors }
   }
 }
 
@@ -149,7 +159,7 @@ export class ReadMcpResourceTool implements Tool {
     }
 
     const uri = input.uri as string
-    if (!uri) {
+    if (typeof uri !== 'string' || !uri) {
       return { content: 'Error: uri is required', isError: true }
     }
 
@@ -163,24 +173,27 @@ export class ReadMcpResourceTool implements Tool {
         return { content: `No MCP server named "${serverName}".`, isError: true }
       }
     } else {
+      const matches: McpRegistryEntry[] = []
       // Search all servers for the URI
       for (const [, entry] of registry) {
         try {
-          const resources = await entry.client.listResources()
+          const resources = await entry.client.listResources(ctx.signal)
           if (resources.some(r => r.uri === uri)) {
-            targetEntry = entry
-            break
+            matches.push(entry)
           }
         } catch { /* try next */ }
       }
+      if (matches.length > 1) return { content: `Resource "${uri}" is exposed by multiple servers. Specify server to choose the resource.`, isError: true }
+      targetEntry = matches[0]
       if (!targetEntry) {
         // Fallback: try reading from the first server
+        if (registry.size > 1) return { content: `Resource "${uri}" was not found. Specify server for a resource that is not listed.`, isError: true }
         targetEntry = registry.values().next().value
       }
     }
 
     try {
-      const contents = await targetEntry!.client.readResource(uri)
+      const contents = await targetEntry!.client.readResource(uri, ctx.signal)
       if (contents.length === 0) {
         return { content: `Resource "${uri}" returned no content.`, isError: false }
       }

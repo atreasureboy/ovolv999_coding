@@ -146,9 +146,10 @@ export function fuzzyMatch(query: string, target: string): FuzzyResult | null {
  */
 export function suggestFiles(cwd: string, query: string, max = 15): FileSuggestion[] {
   // Determine the directory to search and the prefix to match
-  const fullPath = query
-  const dir = dirname(fullPath)
-  const prefix = basename(fullPath).toLowerCase()
+  const fullPath = query.replace(/\\/g, '/')
+  const directoryQuery = fullPath.endsWith('/')
+  const dir = directoryQuery ? fullPath.slice(0, -1) : dirname(fullPath)
+  const prefix = directoryQuery ? '' : basename(fullPath).toLowerCase()
 
   let searchDir: string
   let displayDir: string

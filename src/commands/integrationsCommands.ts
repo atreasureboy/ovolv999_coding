@@ -9,7 +9,7 @@ export const integrationsCommands: Command[] = [
     handler: async (args, ctx) => {
       const hooksModule = await import('../core/hooks.js')
       const { loadHooksConfig, saveHooksConfig, formatHooksConfig, runHook } = hooksModule
-      const parts = args.trim().split(/\s+/)
+      const parts = args.trim().split(/\s+/).filter(Boolean)
       const sub = parts[0] ?? 'list'
       const config = loadHooksConfig() as Record<
         string,
@@ -83,7 +83,7 @@ export const integrationsCommands: Command[] = [
         formatPluginList,
         formatPlugin,
       } = pluginMod
-      const parts = args.trim().split(/\s+/)
+      const parts = args.trim().split(/\s+/).filter(Boolean)
       const sub = parts[0] ?? 'list'
       if (sub === 'list' || sub === 'ls') {
         return text(formatPluginList(listPlugins()))
@@ -129,11 +129,11 @@ export const integrationsCommands: Command[] = [
     name: 'magic-docs',
     aliases: ['mdocs'],
     description: 'Extract project documentation. Usage: /magic-docs [write | <section>]',
-    handler: async (args) => {
+    handler: async (args, ctx) => {
       const md = await import('../core/magicDocs.js')
-      const parts = args.trim().split(/\s+/)
+      const parts = args.trim().split(/\s+/).filter(Boolean)
       const sub = parts[0] ?? 'preview'
-      const rootDir = process.cwd()
+      const rootDir = ctx.cwd
       if (sub === 'write') {
         const outputPath = parts[1] ?? `${rootDir}/.ovolv999/magic-docs.md`
         const result = md.extractDocs({ rootDir, outputPath })
@@ -158,7 +158,7 @@ export const integrationsCommands: Command[] = [
       'SSH remote profiles. Usage: /ssh [list | add <name> <host> [user] [port] | remove <name> | test <name> | run <name> <command>]',
     handler: async (args) => {
       const ssh = await import('../core/sshRemote.js')
-      const parts = args.trim().split(/\s+/)
+      const parts = args.trim().split(/\s+/).filter(Boolean)
       const sub = parts[0] ?? 'list'
       if (sub === 'list') {
         return text(ssh.formatProfileList(ssh.loadProfiles()))
@@ -205,23 +205,23 @@ export const integrationsCommands: Command[] = [
   {
     name: 'lsp',
     description: 'Language server status. Usage: /lsp [status | symbols <query>]',
-    handler: async (args) => {
+    handler: async (args, ctx) => {
       const lsp = await import('../core/lspClient.js')
-      const parts = args.trim().split(/\s+/)
+      const parts = args.trim().split(/\s+/).filter(Boolean)
       const sub = parts[0] ?? 'status'
       if (sub === 'status') {
         const spec = lsp.detectServer('typescript')
         const lines = ['LSP Status:']
         lines.push(`  Detected server: ${spec ? spec.command : 'none'}`)
         lines.push(
-          `  Default client running: ${lsp.getDefaultLspClient(lsp.pathToFileUri(process.cwd())).isRunning() ? 'yes' : 'no'}`,
+          `  Default client running: ${lsp.getDefaultLspClient(lsp.pathToFileUri(ctx.cwd)).isRunning() ? 'yes' : 'no'}`,
         )
         return text(lines.join('\n'))
       }
       if (sub === 'symbols') {
         const query = parts.slice(1).join(' ')
         if (!query) return text('Usage: /lsp symbols <query>')
-        const client = lsp.getDefaultLspClient(lsp.pathToFileUri(process.cwd()))
+        const client = lsp.getDefaultLspClient(lsp.pathToFileUri(ctx.cwd))
         if (!client.isRunning()) {
           const started = await client.start()
           if (!started) return text('LSP server not available')
@@ -243,7 +243,7 @@ export const integrationsCommands: Command[] = [
       'Check for ovolv999 updates. Usage: /update [check | ignore <version> | install [beta]]',
     handler: async (args) => {
       const upd = await import('../utils/autoUpdater.js')
-      const parts = args.trim().split(/\s+/)
+      const parts = args.trim().split(/\s+/).filter(Boolean)
       const sub = parts[0] ?? 'check'
       if (sub === 'check') {
         const cached = upd.getCachedCheck()

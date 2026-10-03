@@ -177,6 +177,8 @@ export function center(text: string, width: number, pad = ' '): string {
 }
 
 export function truncate(text: string, maxWidth: number, suffix = '…'): string {
+  if (maxWidth <= 0) return ''
+  if (ansiLength(suffix) >= maxWidth && ansiLength(text) > maxWidth) return stripAnsi(suffix).slice(0, maxWidth)
   const len = ansiLength(text)
   if (len <= maxWidth) return text
   const keep = maxWidth - ansiLength(suffix)

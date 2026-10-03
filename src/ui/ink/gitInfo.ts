@@ -15,12 +15,15 @@ export function getGitBranch(cwd: string): string | null {
   if (cachedBranches.has(workspace)) return cachedBranches.get(workspace) ?? null
   let cachedBranch: string | null
   try {
-    const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+    const run = (args: string[]) => execFileSync('git', args, {
       cwd: workspace,
       timeout: 2000,
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'pipe'],
     }).trim()
+    let branch: string
+    try { branch = run(['symbolic-ref', '--short', 'HEAD']) }
+    catch { branch = run(['rev-parse', '--abbrev-ref', 'HEAD']) }
     cachedBranch = branch || null
   } catch {
     cachedBranch = null

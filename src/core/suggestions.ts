@@ -15,7 +15,7 @@
  *   - TODO/FIXME in code → "address TODOs"
  */
 
-import { execSync } from 'child_process'
+import { execFileSync } from 'child_process'
 import { existsSync, readFileSync } from 'fs'
 import { join, resolve } from 'path'
 
@@ -108,29 +108,35 @@ export function getGitState(cwd: string): GitState {
   }
 
   try {
-    const run = (cmd: string): string => {
-      return execSync(cmd, { cwd, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim()
+    const run = (args: string[]): string => {
+      return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 3000 })
     }
 
+    if (run(['rev-parse', '--is-inside-work-tree']).trim() !== 'true') return state
     state.hasGit = true
-    state.branch = run('git rev-parse --abbrev-ref HEAD')
-    const status = run('git status --porcelain=v1')
+    try { state.branch = run(['rev-parse', '--abbrev-ref', 'HEAD']).trim() } catch (error) { void error }
+    const status = run(['status', '--porcelain=v1', '-z'])
 
-    for (const line of status.split('\n').filter(Boolean)) {
+    const records = status.split('\0')
+    for (let index = 0; index < records.length; index++) {
+      const line = records[index]
+      if (!line) continue
       const code = line.slice(0, 2)
-      const file = line.slice(3).trim()
+      const file = line.slice(3)
       if (code[0] === '?' && code[1] === '?') {
         state.untrackedCount++
+        state.modifiedFiles.push(file)
       } else {
         if (code[0] !== ' ' && code[0] !== '?') state.stagedCount++
         if (code[1] !== ' ' && code[1] !== '?') state.modifiedCount++
-        if (code[1] !== ' ' && code[1] !== '?') state.modifiedFiles.push(file)
+        state.modifiedFiles.push(file)
       }
+      if (code.includes('R') || code.includes('C')) index++
     }
 
     // Ahead/behind
     try {
-      const tracking = run('git rev-list --left-right --count HEAD...@{upstream} 2>/dev/null')
+      const tracking = run(['rev-list', '--left-right', '--count', 'HEAD...@{upstream}']).trim()
       const [ahead, behind] = tracking.split(/\s+/).map(Number)
       state.ahead = isNaN(ahead) ? 0 : ahead
       state.behind = isNaN(behind) ? 0 : behind
@@ -149,13 +155,13 @@ export function scanForTODOs(cwd: string, maxFiles = 50): { count: number; files
   let count = 0
 
   try {
-    const output = execSync(
-      'git grep -l -E "TODO|FIXME|HACK|XXX|BUG" 2>/dev/null || true',
+    const output = execFileSync(
+      'git', ['grep', '-l', '-z', '-E', 'TODO|FIXME|HACK|XXX|BUG', '--'],
       { cwd, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 3000 },
-    ).trim()
+    )
 
     if (output) {
-      for (const f of output.split('\n').filter(Boolean).slice(0, maxFiles)) {
+      for (const f of output.split('\0').filter(Boolean).slice(0, maxFiles)) {
         files.push(f)
         try {
           const content = readFileSync(join(cwd, f), 'utf8')
@@ -363,7 +369,7 @@ const ruleIdleAction: SuggestionRule = (ctx) => {
   if (!ctx.idleSeconds || ctx.idleSeconds < 60) return null
 
   const git = getGitState(ctx.cwd)
-  if (git.ahead > 0 && git.modifiedCount === 0) {
+  if (git.ahead > 0 && git.modifiedCount === 0 && git.stagedCount === 0 && git.untrackedCount === 0) {
     return {
       id: 'push-commits',
       label: 'Push commits',
@@ -432,7 +438,7 @@ export function enrichContext(ctx: Partial<SuggestionContext>, cwd: string): Sug
     recentToolResults: ctx.recentToolResults ?? [],
     conversationLength: ctx.conversationLength ?? 0,
     lastTurnCompleted: ctx.lastTurnCompleted ?? false,
-    hasUncommittedChanges: ctx.hasUncommittedChanges ?? (git.modifiedCount > 0 || git.stagedCount > 0),
+    hasUncommittedChanges: ctx.hasUncommittedChanges ?? (git.modifiedCount > 0 || git.stagedCount > 0 || git.untrackedCount > 0),
     todoCount: ctx.todoCount ?? todos.count,
     hasTests: ctx.hasTests ?? tests.hasTests,
     testsRecentlyRun: ctx.testsRecentlyRun ?? false,

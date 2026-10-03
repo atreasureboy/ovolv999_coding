@@ -15,7 +15,7 @@
  */
 
 import { Text, Box, useInput, useStdin } from 'ink'
-import { useState, useCallback, useEffect, useMemo } from 'react'
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import { SlashMenu, type SlashEntry } from './SlashMenu.js'
 import { FileSuggestMenu } from './FileSuggestMenu.js'
 import { HistorySearchOverlay } from './HistorySearchOverlay.js'
@@ -23,6 +23,7 @@ import { suggestFiles } from '../fileSuggest.js'
 import { pasteStore } from '../pasteStore.js'
 import { openInEditor } from '../../../utils/editor.js'
 import { listCommands } from '../../../commands/index.js'
+import { loadKeybindings, lookupAction } from '../../keybindings.js'
 
 export interface PromptInputProps {
   /** Called when the user presses Enter with non-empty text. */
@@ -57,6 +58,8 @@ export function PromptInput({
   const [menuSelected, setMenuSelected] = useState(0)
   const [fileSelected, setFileSelected] = useState(0)
   const [searchMode, setSearchMode] = useState(false)
+  const searchActive = useRef(false)
+  const bindings = useMemo(() => loadKeybindings(cwd).bindings, [cwd])
 
   // ── Compute slash menu entries ────────────────────────────────────────────
 
@@ -148,6 +151,8 @@ export function PromptInput({
   }, [text, showMenu, menuEntries, autocomplete, fileContext, fileSuggestions, autocompleteFile, onSubmit])
 
   useInput((input, key) => {
+    if (searchActive.current) return
+    const action = lookupAction(input, key, bindings)
     // ── ESC: interrupt ───────────────────────────────────────────────────
     if (key.escape) {
       if (disabled) onInterrupt?.()
@@ -170,19 +175,22 @@ export function PromptInput({
     }
 
     // ── Ctrl+R: reverse history search ───────────────────────────────────
-    if (input === '\x12') {
-      if (history.length > 0) setSearchMode(true)
+    if (action === 'search-history') {
+      if (history.length > 0) {
+        searchActive.current = true
+        setSearchMode(true)
+      }
       return
     }
 
     // ── Ctrl+Y: copy last assistant reply ────────────────────────────────
-    if (input === '\x19') {
+    if (action === 'copy-reply') {
       onCopy?.()
       return
     }
 
     // ── Ctrl+G: open external editor ─────────────────────────────────────
-    if (input === '\x07') {
+    if (action === 'open-editor') {
       // Suspend raw mode so the editor can take over the terminal
       if (setRawMode) setRawMode(false)
       const edited = openInEditor(text)
@@ -263,12 +271,12 @@ export function PromptInput({
     }
 
     // Ctrl+A = Home, Ctrl+E = End, Ctrl+U = clear line
-    if (input === '\x01') { setCursor(0); return }
-    if (input === '\x05') { setCursor(text.length); return }
-    if (input === '\x15') { setText(''); setCursor(0); return }
+    if (action === 'cursor-home') { setCursor(0); return }
+    if (action === 'cursor-end') { setCursor(text.length); return }
+    if (action === 'clear-line') { setText(''); setCursor(0); return }
 
     // Ctrl+J = newline (multi-line input)
-    if (input === '\x0a') {
+    if (action === 'newline') {
       const newText = text.slice(0, cursor) + '\n' + text.slice(cursor)
       setText(newText)
       setCursor(cursor + 1)
@@ -285,7 +293,7 @@ export function PromptInput({
       setText(newText)
       setCursor(cursor + insertText.length)
     }
-  })
+  }, { isActive: !searchMode })
 
   // ── Render ────────────────────────────────────────────────────────────────
 
@@ -348,11 +356,15 @@ export function PromptInput({
         <HistorySearchOverlay
           history={history}
           onSelect={(selected) => {
+            searchActive.current = false
             setText(selected)
             setCursor(selected.length)
             setSearchMode(false)
           }}
-          onCancel={() => setSearchMode(false)}
+          onCancel={() => {
+            searchActive.current = false
+            setSearchMode(false)
+          }}
         />
       ) : null}
       {/* Token estimate for non-trivial inputs */}

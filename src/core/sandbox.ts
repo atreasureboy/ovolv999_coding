@@ -18,8 +18,9 @@
  * the wrapper unless a violation occurs.
  */
 
-import { existsSync, writeFileSync, mkdirSync, readFileSync } from 'fs'
-import { join } from 'path'
+import { existsSync, writeFileSync, mkdirSync, readFileSync, statSync } from 'fs'
+import { join, isAbsolute, resolve, sep } from 'path'
+import { createHash } from 'crypto'
 import { homedir, tmpdir } from 'os'
 import { execSync } from 'child_process'
 
@@ -68,13 +69,17 @@ function getConfigPath(): string {
 }
 
 export function loadConfig(): SandboxConfig {
+  const defaults = (): SandboxConfig => ({ ...DEFAULT_CONFIG, readOnlyPaths: [...DEFAULT_CONFIG.readOnlyPaths], writablePaths: [...DEFAULT_CONFIG.writablePaths], deniedPaths: [...DEFAULT_CONFIG.deniedPaths] })
   const path = getConfigPath()
-  if (!existsSync(path)) return { ...DEFAULT_CONFIG }
+  if (!existsSync(path)) return defaults()
   try {
     const raw = JSON.parse(readFileSync(path, 'utf8')) as Partial<SandboxConfig>
-    return { ...DEFAULT_CONFIG, ...raw }
+    if (!raw || typeof raw !== 'object') return defaults()
+    const cfg = { ...defaults(), ...raw }
+    if (!['readOnlyPaths', 'writablePaths', 'deniedPaths'].every(key => Array.isArray(cfg[key as keyof SandboxConfig]) && (cfg[key as keyof SandboxConfig] as unknown[]).every(value => typeof value === 'string'))) return defaults()
+    return cfg
   } catch {
-    return { ...DEFAULT_CONFIG }
+    return defaults()
   }
 }
 
@@ -83,6 +88,7 @@ export function saveConfig(config: SandboxConfig): void {
   const dir = join(path, '..')
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
   writeFileSync(path, JSON.stringify(config, null, 2))
+  invalidateProfileCache()
 }
 
 export function updateConfig(patch: Partial<SandboxConfig>): SandboxConfig {
@@ -139,15 +145,15 @@ export function generateMacOSProfile(config: SandboxConfig, cwd: string): string
   const writable = [cwd, ...getTempPaths(), ...config.writablePaths]
 
   for (const p of readOnly) {
-    lines.push(`(allow file-read* (subpath "${p}"))`)
+    lines.push(`(allow file-read* (subpath ${JSON.stringify(p)}))`)
   }
   for (const p of writable) {
-    lines.push(`(allow file-write* (subpath "${p}"))`)
-    lines.push(`(allow file-read* (subpath "${p}"))`)
+    lines.push(`(allow file-write* (subpath ${JSON.stringify(p)}))`)
+    lines.push(`(allow file-read* (subpath ${JSON.stringify(p)}))`)
   }
   for (const p of config.deniedPaths) {
-    lines.push(`(deny file-read* (subpath "${p}"))`)
-    lines.push(`(deny file-write* (subpath "${p}"))`)
+    lines.push(`(deny file-read* (subpath ${JSON.stringify(p)}))`)
+    lines.push(`(deny file-write* (subpath ${JSON.stringify(p)}))`)
   }
 
   // Process execution
@@ -155,7 +161,8 @@ export function generateMacOSProfile(config: SandboxConfig, cwd: string): string
     lines.push('(allow process-exec (subpath "/usr/bin"))')
     lines.push('(allow process-exec (subpath "/bin"))')
     lines.push('(allow process-exec (subpath "/usr/local/bin"))')
-    lines.push(`(allow process-exec (subpath "${cwd}"))`)
+    lines.push(`(allow process-exec (subpath ${JSON.stringify(cwd)}))`)
+    lines.push('(allow process-fork)')
   } else {
     lines.push('(allow process-exec)')
     lines.push('(allow process-fork)')
@@ -198,12 +205,17 @@ export function generateBubblewrapArgs(config: SandboxConfig, cwd: string): stri
     }
   }
 
-  // Denied paths — don't bind them at all
-  // (bwrap doesn't have an explicit deny; just omit the bind)
-
   // Proc + dev
   args.push('--proc', '/proc')
   args.push('--dev', '/dev')
+  const denied = [...new Set(config.deniedPaths.map(path => resolve(path)))].sort((a, b) => a.length - b.length)
+  const masked: string[] = []
+  for (const path of denied) {
+    if (!existsSync(path) || masked.some(parent => path === parent || path.startsWith(parent + sep))) continue
+    if (statSync(path).isDirectory()) args.push('--tmpfs', path, '--remount-ro', path)
+    else args.push('--ro-bind', '/dev/null', path)
+    masked.push(path)
+  }
 
   // Network: bubblewrap can't restrict network without unshare-net + setup
   if (!config.allowNetwork || config.level === 'strict') {
@@ -222,6 +234,7 @@ export function generateBubblewrapArgs(config: SandboxConfig, cwd: string): stri
 // ── Profile Compilation ─────────────────────────────────────────────────────
 
 let cachedProfile: SandboxProfile | null = null
+let cachedProfileKey = ''
 
 /**
  * Compile the current config into a sandbox profile. The profile
@@ -244,7 +257,8 @@ export function compileProfile(cwd: string, config?: SandboxConfig): SandboxProf
     case 'macos-seatbelt': {
       const profileDir = join(homedir(), '.ovolv999', 'sandbox')
       if (!existsSync(profileDir)) mkdirSync(profileDir, { recursive: true })
-      const profilePath = join(profileDir, `ovolv999-${cfg.level}.sb`)
+      const hash = createHash('sha256').update(JSON.stringify([resolve(cwd), cfg])).digest('hex').slice(0, 16)
+      const profilePath = join(profileDir, `ovolv999-${cfg.level}-${hash}.sb`)
       const content = generateMacOSProfile(cfg, cwd)
       writeFileSync(profilePath, content)
       return {
@@ -272,13 +286,17 @@ export function compileProfile(cwd: string, config?: SandboxConfig): SandboxProf
 }
 
 export function getCachedProfile(cwd: string): SandboxProfile {
-  if (cachedProfile) return cachedProfile
-  cachedProfile = compileProfile(cwd)
+  const cfg = loadConfig()
+  const key = JSON.stringify([resolve(cwd), cfg])
+  if (cachedProfile && cachedProfileKey === key) return cachedProfile
+  cachedProfile = compileProfile(cwd, cfg)
+  cachedProfileKey = key
   return cachedProfile
 }
 
 export function invalidateProfileCache(): void {
   cachedProfile = null
+  cachedProfileKey = ''
 }
 
 // ── Command Wrapping ────────────────────────────────────────────────────────
@@ -291,8 +309,8 @@ export function wrapCommand(command: string, cwd: string, config?: SandboxConfig
   const cfg = config ?? loadConfig()
   if (!cfg.enabled || cfg.level === 'permissive') return command
   const profile = compileProfile(cwd, cfg)
-  if (!profile.prefix) return command
-  return profile.prefix + command
+  if (!profile.prefix) throw new Error(`Sandbox isolation is unavailable on ${process.platform}; command refused`)
+  return profile.prefix + (profile.backend === 'macos-seatbelt' ? '/bin/sh -c ' : '') + shellQuote(command)
 }
 
 // ── Validation ──────────────────────────────────────────────────────────────
@@ -315,13 +333,13 @@ export function validateConfig(config: SandboxConfig): ValidationResult {
   }
 
   for (const p of config.deniedPaths) {
-    if (!p.startsWith('/')) {
+    if (!isAbsolute(p)) {
       issues.push(`deniedPath must be absolute: ${p}`)
     }
   }
 
   for (const p of config.writablePaths) {
-    if (!p.startsWith('/')) {
+    if (!isAbsolute(p)) {
       issues.push(`writablePath must be absolute: ${p}`)
     }
   }

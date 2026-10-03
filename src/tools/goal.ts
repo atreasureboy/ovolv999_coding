@@ -71,8 +71,8 @@ Use this for multi-step objectives that span many turns.`,
           subtask_id: { type: 'string', description: 'Subtask ID (for update_subtask)' },
           status: {
             type: 'string',
-            enum: ['pending', 'in_progress', 'done', 'skipped', 'failed'],
-            description: 'New subtask status (for update_subtask)',
+            enum: ['pending', 'in_progress', 'done', 'skipped', 'failed', 'completed', 'paused'],
+            description: 'Goal status filter for list; subtask status for update_subtask (pending/in_progress/done/skipped/failed)',
           },
           priority: {
             type: 'string',
@@ -104,6 +104,18 @@ Use this for multi-step objectives that span many turns.`,
   execute(input: Record<string, unknown>, _ctx: ToolContext): Promise<ToolResult> {
     const action = input.action as string
 
+    const invalid = (message: string): Promise<ToolResult> => Promise.resolve({ content: `Error: ${message}`, isError: true })
+    if (input.priority !== undefined && (typeof input.priority !== 'string' || !['low', 'medium', 'high', 'critical'].includes(input.priority))) return invalid('Invalid goal priority')
+    for (const key of ['tags', 'subtasks']) {
+      if (input[key] !== undefined && (!Array.isArray(input[key]) || !(input[key] as unknown[]).every(value => typeof value === 'string'))) return invalid(`${key} must be an array of strings`)
+    }
+    if (input.status !== undefined && action === 'list' && (typeof input.status !== 'string' || !['pending', 'in_progress', 'completed', 'failed', 'paused'].includes(input.status))) return invalid('Invalid goal status filter')
+    if (input.status !== undefined && action === 'update_subtask' && (typeof input.status !== 'string' || !['pending', 'in_progress', 'done', 'skipped', 'failed'].includes(input.status))) return invalid('Invalid subtask status')
+    if (action === 'create' && (typeof input.objective !== 'string' || !input.objective.trim())) return invalid('objective is required for create')
+    if (action === 'add_subtask' && (typeof input.description !== 'string' || !input.description.trim())) return invalid('description is required for add_subtask')
+    if (action === 'add_context' && (typeof input.note !== 'string' || !input.note.trim())) return invalid('note is required for add_context')
+    if (action === 'update' && input.objective !== undefined && (typeof input.objective !== 'string' || !input.objective.trim())) return invalid('objective must be a nonempty string')
+
     try {
       switch (action) {
         case 'create': {
@@ -134,11 +146,11 @@ Use this for multi-step objectives that span many turns.`,
         }
 
         case 'update': {
-          const goal = updateGoal(input.goal_id as string, {
-            objective: input.objective as string | undefined,
-            priority: input.priority as Goal['priority'] | undefined,
-            tags: input.tags as string[] | undefined,
-          })
+          const updates: Partial<Goal> = {}
+          if (input.objective !== undefined) updates.objective = input.objective as string
+          if (input.priority !== undefined) updates.priority = input.priority as Goal['priority']
+          if (input.tags !== undefined) updates.tags = input.tags as string[]
+          const goal = updateGoal(input.goal_id as string, updates)
           if (!goal) return Promise.resolve({ content: `Goal not found: ${str(input.goal_id)}`, isError: true })
           return Promise.resolve({ content: formatGoal(goal), isError: false })
         }
@@ -194,10 +206,10 @@ Use this for multi-step objectives that span many turns.`,
         }
 
         case 'update_subtask': {
-          const st = updateSubtask(input.goal_id as string, input.subtask_id as string, {
-            status: input.status as SubTaskStatus | undefined,
-            result: input.note as string | undefined,
-          })
+          const updates: { status?: SubTaskStatus; result?: string } = {}
+          if (input.status !== undefined) updates.status = input.status as SubTaskStatus
+          if (input.note !== undefined) updates.result = input.note as string
+          const st = updateSubtask(input.goal_id as string, input.subtask_id as string, updates)
           if (!st) return Promise.resolve({ content: 'Subtask not found', isError: true })
           return Promise.resolve({ content: `Updated subtask: ${st.description} → ${st.status}`, isError: false })
         }

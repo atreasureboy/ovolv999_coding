@@ -14,7 +14,7 @@
 
 ## 简介
 
-ovolv999 是一个面向自主编码的 TypeScript Agent 基座。当前实现保留兼容模型接口，并参考 Codex 的工具路由、审批和执行生命周期划分职责。模块边界、精简依据与验证记录见 [逐模块重构说明](docs/module-refinement.md)。
+ovolv999 是一个面向自主编码的 TypeScript Agent 基座。当前实现保留兼容模型接口，并参考 Codex 的工具路由、审批和执行生命周期划分职责。模块边界见 [逐模块重构说明](docs/module-refinement.md)，最新逐文件修复与验证见 [文件审计记录](docs/file-audit.md)。
 
 所有 Agent 共享同一套运行时（Harness），通过启用/禁用模块获得差异化能力。不存在 `agent_type` 枚举——角色是 `AgentConfig`（identity + modules + tools）的组合配置。
 
@@ -31,14 +31,14 @@ ovolv999 是一个面向自主编码的 TypeScript Agent 基座。当前实现�
 - **Plan 模式** — `EnterPlanMode` / `ExitPlanMode` / `VerifyPlanExecution` 闭环
 - **MCP 客户端** — 默认仅 stdio transport；HTTP/SSE 与 OAuth 未接线，工具以 `mcp__<server>__<tool>` 注入
 - **沙箱执行** — 当前支持 trusted-local；isolated-worker 在没有已验证独立执行后端时拒绝启动
-- **进程内 LSP** — tsserver / pylsp / rust-analyzer / gopls，JSON-RPC 2.0，诊断 + 符号搜索
+- **进程内 LSP** — typescript-language-server / pylsp / rust-analyzer / gopls；缺少可用服务时回退语言检查。tsserver 使用不同协议，不作为 LSP 启动
 - **SSH 远程** — SshProfile 管理，rsync 同步，远程 agent 执行
 - **后台会话** — `--bg` 启动 detached 会话，`ps/attach/logs/stop/rm/clean` CLI 管理
 - **上下文管理** — microCompact + snipCompact + autoCompact 三级策略，含系统提示词 token
 - **Budget + Effort** — token 预算控制 + 自动 effort 分级
 - **Auto-Classifier** — 自动将用户请求分类为 code/search/debug/general，选择最优 effort
 - **Auto-Dream** — 空闲时后台知识整理与经验巩固
-- **MagicDocs** — 自动从代码提取项目文档（7 种提取器：overview/api/models/config/decisions/patterns/dependencies）
+- **MagicDocs** — 自动从代码提取项目文档（overview/api/models/config/decisions/patterns/dependencies/tests）
 - **遥测** — opt-in 本地分析，14 种事件类型，聚合统计
 - **设置同步** — AES-256-GCM 加密，git/file 传输，跨机器配置同步
 - **系统健康检查** — 13 项环境检测（Node/API/磁盘/Git/权限等）
@@ -209,8 +209,8 @@ tool_calls [A, B, C, D, E, F]
      ├─ Batch 2 (串行): [D=Write]
      │     → 等 Batch 1 完成 → 执行 D
      │
-     └─ Batch 3 (并行): [E=Bash, F=Agent]
-           → Promise.all([E, F]) → 同时执行
+     └─ 后续调用: [E=Bash, F=Agent]
+           → 根据实际只读属性、资源锁和隔离条件决定串行或并行
 ```
 
 ## 工具参考
@@ -368,8 +368,11 @@ export const plugin: Plugin = {
 ```bash
 git clone https://github.com/atreasureboy/ovolv999_coding.git
 cd ovolv999_coding
-pnpm install
+pnpm install --frozen-lockfile
+pnpm run build
 ```
+
+使用 `package.json` 声明的 pnpm 版本。Windows 可运行 `setup.bat`，macOS/Linux 可运行 `./setup.sh`；二者共用 `pnpm run setup:local`，每次冻结安装并重建，再链接全局命令。已有 `.env` 保留；失败会中断后续步骤。
 
 ### 配置
 
@@ -402,35 +405,37 @@ ovolv999 stop <id>    # 停止会话
 ovolv999 clean        # 清理已终止会话
 
 # 构建后使用全局命令
-npm run build
-npm link
+pnpm run build
+pnpm link --global
 ovolv999 "任务描述"
 ```
 
 ### 配置文件
 
-ovolv999 读取多级配置（优先级从高到低）：
+CLI 参数优先；项目模型与运行参数来自工作目录向 Git 根查找的首个 `.ovolv999.json` / `.ovolv999.jsonc`，再回退环境变量及默认值。凭据来自环境或 CLI 装载的 `.env`。
 
-1. **`.opencode/opencode.json`** — 项目级配置
-2. **`~/.config/opencode/opencode.json`** — 用户级配置
-3. **环境变量** — `OPENAI_API_KEY` / `OVOGO_MODEL` / `OPENAI_BASE_URL`
+权限、Hooks、任务上下文和 MCP 使用 `~/.ovogo/settings.json` 与项目 `.ovogo/settings.json` 分层设置。项目设置覆盖对应用户设置，权限规则与 Hooks 按层追加。`/profile` 等辅助能力的 `.ovolv999/` 存储有各自接口，不自动改写当前引擎参数。
 
-```jsonc
-// .opencode/opencode.json 示例
+```json
 {
-  "model": "claude-sonnet-4-6-20250514",
-  "effort": "high",
+  "model": "my-model",
+  "permissionMode": "ask",
+  "maxIterations": 50,
+  "enabledModules": ["memory", "workspace", "critic", "reflection"]
+}
+```
+
+项目 `.ovogo/settings.json` 示例：
+
+```json
+{
   "permissions": {
     "mode": "default",
-    "allow": ["Read", "Glob", "Grep"],
-    "deny": []
+    "rules": [{ "toolName": "Read", "behavior": "allow", "ruleContent": "*", "source": "project" }]
   },
   "mcp": {
-    "servers": {
-      "my-server": { "command": "npx", "args": ["my-mcp-server"] }
-    }
-  },
-  "telemetry": { "enabled": false }
+    "servers": [{ "name": "my-server", "type": "stdio", "command": ["my-mcp-server"] }]
+  }
 }
 ```
 
@@ -487,7 +492,7 @@ ovolv999/
 | 后台任务 | `TaskCreate/Get/List/Update/Stop` + Bash background |
 | 后台会话 | `--bg` + `ps/attach/logs/stop/rm/clean` CLI |
 | MCP 客户端 | 默认 stdio + tools/resources/prompts；HTTP/SSE/OAuth 未接线 |
-| 进程内 LSP | tsserver/pylsp/rust-analyzer/gopls JSON-RPC 2.0 |
+| 进程内 LSP | typescript-language-server/pylsp/rust-analyzer/gopls JSON-RPC 2.0 |
 | SSH 远程 | SshProfile + rsync 同步 + remote agent |
 | API 重试 | SDK 隐藏重试关闭；网关有界重试与流中断边界见行为测试 |
 | 模块化插件 | Plugin 接口 + `/plugins` 动态加载 |

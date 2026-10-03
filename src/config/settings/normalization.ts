@@ -1,6 +1,6 @@
 import type { PermissionMode, PermissionRule } from '../../core/permissionSystem.js'
 import type { McpServerConfig } from '../../core/mcpClient.js'
-import type { OvogoSettings } from './types.js'
+import type { HookEntry, HooksConfig, OvogoSettings, TaskContext } from './types.js'
 
 const PERMISSION_MODES = new Set(['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions'])
 const PERMISSION_BEHAVIORS = new Set(['allow', 'deny', 'ask'])
@@ -8,6 +8,29 @@ const PERMISSION_SOURCES = new Set(['builtin', 'user', 'project'])
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function normalizeHooks(value: unknown): HooksConfig | undefined {
+  if (!isObject(value)) return undefined
+  const hooks: HooksConfig = {}
+  const names = ['PreToolCall', 'PostToolCall', 'UserPromptSubmit', 'OnError', 'OnComplete', 'OnContextOverflow'] as const
+  for (const name of names) {
+    const entries = value[name]
+    if (!Array.isArray(entries)) continue
+    hooks[name] = entries.filter((entry): entry is HookEntry => isObject(entry)
+      && typeof entry.command === 'string' && Boolean(entry.command.trim())
+      && (entry.matcher === undefined || typeof entry.matcher === 'string'))
+      .map(entry => entry.matcher === undefined ? { command: entry.command } : { command: entry.command, matcher: entry.matcher })
+  }
+  return hooks
+}
+
+function normalizeTaskContext(value: unknown): TaskContext | undefined {
+  if (!isObject(value)) return undefined
+  const context: TaskContext = {}
+  for (const name of ['name', 'phase', 'notes'] as const) if (typeof value[name] === 'string') context[name] = value[name]
+  if (Array.isArray(value.scope)) context.scope = value.scope.filter((item): item is string => typeof item === 'string')
+  return context
 }
 
 function normalizePermissionRule(value: unknown): PermissionRule | null {
@@ -50,7 +73,6 @@ function normalizeMcp(value: unknown): { servers: McpServerConfig[] } | undefine
 
 export function normalizeSettings(value: unknown): OvogoSettings {
   if (!isObject(value)) return {}
-  const settings = value as OvogoSettings
   const rawPermissions = isObject(value.permissions) ? value.permissions : undefined
   const rawMode = rawPermissions?.mode
   const rawRules = Array.isArray(rawPermissions?.rules) ? rawPermissions.rules : []
@@ -59,8 +81,8 @@ export function normalizeSettings(value: unknown): OvogoSettings {
     .filter((rule): rule is PermissionRule => rule !== null)
 
   return {
-    hooks: settings.hooks,
-    taskContext: settings.taskContext,
+    hooks: normalizeHooks(value.hooks),
+    taskContext: normalizeTaskContext(value.taskContext),
     poor: isObject(value.poor) && typeof value.poor.enabled === 'boolean'
       ? { enabled: value.poor.enabled }
       : undefined,

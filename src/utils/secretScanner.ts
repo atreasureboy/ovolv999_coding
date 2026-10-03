@@ -70,7 +70,7 @@ const PATTERNS: SecretPattern[] = [
   // OpenAI API keys
   {
     name: 'OpenAI API key',
-    regex: /\bsk-[a-zA-Z0-9]{20,}\b/g,
+    regex: /\bsk-(?!ant-)(?:proj-|svcacct-)?[a-zA-Z0-9_-]{20,}\b/g,
     mask: maskKey,
   },
   // Anthropic API keys
@@ -178,7 +178,7 @@ export function scanForSecrets(text: string): SecretMatch[] {
   }
 
   // Sort by position
-  matches.sort((a, b) => a.start - b.start)
+  matches.sort((a, b) => a.start - b.start || b.end - a.end)
 
   // Remove overlapping matches (keep the first/longer one)
   const filtered: SecretMatch[] = []

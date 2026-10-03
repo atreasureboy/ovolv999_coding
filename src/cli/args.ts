@@ -41,7 +41,8 @@ export function parseArgs(argv: string[]): Args {
   let help = false
   let version = false
   let loop = false
-  let loopMaxIters = 12
+  let loopMaxIters = parseInt(process.env.OVOGO_LOOP_MAX_ITERS ?? '12', 10)
+  if (isNaN(loopMaxIters) || loopMaxIters <= 0) loopMaxIters = 12
   let continueSession = false
   let resumeSession: string | undefined
   let ink = false

@@ -1093,7 +1093,11 @@ export class ExecutionEngine {
       } catch (failure) {
         this.renderer.warn('Run state could not be persisted: ' + String(failure))
       }
-      const status = turnAbortController.signal.aborted ? 'cancelled' : 'failed'
+      const status =
+        turnAbortController.signal.aborted &&
+        !String(turnAbortController.signal.reason).startsWith('timeout:')
+          ? 'cancelled'
+          : 'failed'
       return {
         result: {
           stopped: true,

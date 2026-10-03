@@ -1,7 +1,10 @@
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs'
+import { mkdtempSync, readdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { EventEmitter } from 'node:events'
+import { PassThrough } from 'node:stream'
+import { Renderer as TerminalRenderer } from '../../src/ui/renderer.js'
 import { runPlanMode, runRepl } from '../../src/cli/repl.js'
 import type { CliSessionState } from '../../src/cli/sessionState.js'
 import { ExecutionEngine } from '../../src/core/engine.js'
@@ -20,10 +23,13 @@ import {
 const io = vi.hoisted(() => ({
   readLine: vi.fn(),
   close: vi.fn(),
+  readlines: [] as EventEmitter[],
 }))
 
 vi.mock('../../src/ui/input.js', () => ({
   InputHandler: class {
+    readline = new EventEmitter()
+    constructor() { io.readlines.push(this.readline) }
     close = io.close
     readLine = io.readLine
     getLine(): string {
@@ -51,8 +57,10 @@ afterEach(() => {
       process.off('SIGINT', listener as (...args: unknown[]) => void)
   }
   vi.restoreAllMocks()
+  vi.useRealTimers()
   io.close.mockReset()
   io.readLine.mockReset()
+  io.readlines.length = 0
   for (const session of sessions.splice(0)) releaseSessionOwnership(session)
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
@@ -75,6 +83,64 @@ function setup() {
 }
 
 describe('terminal session resource ownership', () => {
+  it('reports blocked outcomes without a successful Done message', async () => {
+    const { cwd, config, engine, state } = setup()
+    const chunks: string[] = []
+    const stream = new PassThrough()
+    stream.on('data', (chunk: Buffer) => chunks.push(chunk.toString()))
+    const renderer = new TerminalRenderer({ stream })
+    vi.spyOn(engine, 'runTurn').mockResolvedValue({ result: { stopped: true, reason: 'stop_sequence', status: 'blocked', output: '' }, newHistory: [] })
+    io.readLine.mockResolvedValueOnce({ text: 'start', eof: false }).mockResolvedValueOnce({ text: '', eof: true })
+    await runRepl(state, engine, config, renderer, cwd, new Map(), { runUserPromptSubmit: () => {} })
+    expect(chunks.join('')).toContain('blocked in')
+    expect(chunks.join('')).not.toContain('Done in')
+    renderer.destroy(); stream.end(); await engine.dispose()
+  })
+  it('routes raw readline SIGINT to cancellation and releases the listener', async () => {
+    const { cwd, config, renderer, engine, state } = setup()
+    const abort = vi.spyOn(engine, 'abort')
+    vi.spyOn(engine, 'runTurn').mockImplementation(() => {
+      io.readlines[0].emit('SIGINT')
+      return Promise.resolve({ result: { stopped: true, reason: 'stop_sequence', status: 'completed', output: 'cancelled fixture' }, newHistory: [] })
+    })
+    io.readLine.mockResolvedValueOnce({ text: 'start', eof: false }).mockResolvedValueOnce({ text: '', eof: true })
+    await runRepl(state, engine, config, renderer, cwd, new Map(), { runUserPromptSubmit: () => {} })
+    expect(abort).toHaveBeenCalledOnce()
+    expect(io.readlines[0].listenerCount('SIGINT')).toBe(0)
+    await engine.dispose()
+  })
+  it('continues from the history settled after a deadline', async () => {
+    vi.useFakeTimers()
+    const { cwd, config, renderer, engine, state } = setup()
+    const partial = [{ role: 'user' as const, content: 'partial turn' }, { role: 'assistant' as const, content: 'saved progress' }]
+    let settle!: () => void
+    const turn = vi.spyOn(engine, 'runTurn')
+      .mockImplementationOnce(() => new Promise((resolve) => { settle = () => resolve({ result: { stopped: true, reason: 'interrupted', output: '', status: 'interrupted' }, newHistory: partial }) }))
+      .mockResolvedValueOnce({ result: { stopped: true, reason: 'stop_sequence', output: 'done', status: 'completed' }, newHistory: partial })
+    vi.spyOn(engine, 'abort').mockImplementation(() => { settle() })
+    io.readLine.mockResolvedValueOnce({ text: 'start', eof: false }).mockResolvedValueOnce({ text: 'continue', eof: false }).mockResolvedValueOnce({ text: '', eof: true })
+    const running = runRepl(state, engine, config, renderer, cwd, new Map(), { runUserPromptSubmit: () => {} })
+    await vi.advanceTimersByTimeAsync(600_001)
+    await running
+    expect(turn).toHaveBeenCalledTimes(2)
+    expect(turn.mock.calls[1][1]).toEqual(partial)
+    await engine.dispose()
+  })
+
+  it('releases a failed resume claim without releasing the active session', async () => {
+    const { cwd, config, renderer, engine, state } = setup()
+    const original = createSessionDir(cwd)
+    const broken = createSessionDir(cwd)
+    sessions.push(original, broken)
+    saveSession(original, [{ role: 'user', content: 'original' }])
+    releaseSessionOwnership(broken)
+    writeFileSync(join(broken, 'history.json'), '{invalid JSON}\n')
+    registerBuiltinCommands()
+    io.readLine.mockResolvedValueOnce({ text: `/resume ${basename(broken)}`, eof: false }).mockResolvedValueOnce({ text: '', eof: true })
+    await runRepl(state, engine, config, renderer, cwd, new Map(), { runUserPromptSubmit: () => {} }, undefined, original, [{ role: 'user', content: 'original' }])
+    expect(readdirSync(join(broken, 'writer.lock.owners'))).toEqual([])
+    await engine.dispose()
+  })
   it('saves subsequent turns and slash context to the resumed session', async () => {
     const { cwd, config, renderer, engine, state } = setup()
     const original = createSessionDir(cwd)
@@ -179,5 +245,15 @@ describe('terminal session resource ownership', () => {
     await runPlanMode('make a plan', engine, config, renderer, new InputHandler(), [], cwd)
     expect(dispose).toHaveBeenCalledTimes(1)
     expect(dispose.mock.instances[0]).not.toBe(engine)
+  })
+
+  it('does not ask to execute a failed planning turn and resets progress to idle', async () => {
+    const { cwd, config, renderer, engine } = setup()
+    vi.spyOn(ExecutionEngine.prototype, 'runTurn').mockResolvedValue({ result: { stopped: true, reason: 'error', status: 'failed', output: '' }, newHistory: [] })
+    io.readLine.mockResolvedValue({ text: 'yes', eof: false })
+    await runPlanMode('make a plan', engine, config, renderer, new InputHandler(), [], cwd)
+    expect(io.readLine).not.toHaveBeenCalled()
+    expect(JSON.parse(readFileSync(join(cwd, 'ovogo_progress.json'), 'utf8')).current_step).toBe('idle')
+    await engine.dispose()
   })
 })

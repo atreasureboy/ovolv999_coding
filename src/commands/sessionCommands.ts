@@ -312,7 +312,7 @@ export const sessionCommands: Command[] = [
         clearHistory,
       } = await import('../core/commandHistory.js')
       const path = getProjectHistoryPath(ctx.cwd)
-      const parts = args.trim().split(/\s+/)
+      const parts = args.trim().split(/\s+/).filter(Boolean)
       const sub = parts[0] ?? 'recent'
       if (sub === 'stats') {
         const store = loadHistory(path)

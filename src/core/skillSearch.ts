@@ -9,6 +9,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import { loadSkills, type Skill } from '../skills/loader.js'
+import { isRecord } from './persistedData.js'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -35,8 +36,14 @@ export function loadUsageStats(): Map<string, SkillUsageStats> {
   const path = getUsageStatsPath()
   if (!existsSync(path)) return new Map()
   try {
-    const data = JSON.parse(readFileSync(path, 'utf8')) as SkillUsageStats[]
-    return new Map(data.map(s => [s.skillName, s]))
+    const data: unknown = JSON.parse(readFileSync(path, 'utf8'))
+    if (!Array.isArray(data)) return new Map()
+    const valid = data.filter((entry): entry is SkillUsageStats => isRecord(entry)
+      && typeof entry.skillName === 'string' && typeof entry.lastUsed === 'string'
+      && Number.isSafeInteger(entry.useCount) && Number(entry.useCount) >= 0
+      && typeof entry.successRate === 'number' && Number.isFinite(entry.successRate)
+      && entry.successRate >= 0 && entry.successRate <= 1)
+    return new Map(valid.map(s => [s.skillName, s]))
   } catch {
     return new Map()
   }

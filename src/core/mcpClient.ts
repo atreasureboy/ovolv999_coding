@@ -165,7 +165,8 @@ export class McpStdioClient {
       jsonrpc: '2.0',
       method: 'tools/list',
     }, DEFAULT_TIMEOUT_MS, signal)) as { tools?: unknown } | null
-    const tools = (result?.tools ?? []) as unknown[]
+    if (!Array.isArray(result?.tools)) throw new Error('Invalid MCP tool listing')
+    const tools = result.tools as unknown[]
     return tools
       .filter((t): t is Record<string, unknown> => typeof t === 'object' && t !== null)
       .map((t) => ({
@@ -200,13 +201,14 @@ export class McpStdioClient {
   }
 
   /** List resources exposed by the server. */
-  async listResources(): Promise<McpResourceInfo[]> {
+  async listResources(signal?: AbortSignal): Promise<McpResourceInfo[]> {
     try {
       const result = (await this.request({
         jsonrpc: '2.0',
         method: 'resources/list',
-      })) as { resources?: unknown } | null
-      const resources = (result?.resources ?? []) as unknown[]
+      }, DEFAULT_TIMEOUT_MS, signal)) as { resources?: unknown } | null
+      if (!Array.isArray(result?.resources)) throw new Error('Invalid MCP resource listing')
+      const resources = result.resources as unknown[]
       return resources
         .filter((r): r is Record<string, unknown> => typeof r === 'object' && r !== null)
         .map((r) => ({
@@ -216,18 +218,19 @@ export class McpStdioClient {
           mimeType: typeof r.mimeType === 'string' ? r.mimeType : undefined,
         }))
         .filter((r) => r.uri.length > 0)
-    } catch {
-      return []
+    } catch (error) {
+      if ((error as { code?: unknown } | null)?.code === -32601) return []
+      throw error
     }
   }
 
   /** Read a resource by URI. */
-  async readResource(uri: string): Promise<McpResourceContent[]> {
+  async readResource(uri: string, signal?: AbortSignal): Promise<McpResourceContent[]> {
     const result = (await this.request({
       jsonrpc: '2.0',
       method: 'resources/read',
       params: { uri },
-    })) as { contents?: unknown } | null
+    }, DEFAULT_TIMEOUT_MS, signal)) as { contents?: unknown } | null
 
     const rawContents = result?.contents
     const arr: unknown[] = Array.isArray(rawContents) ? rawContents : []
@@ -242,13 +245,14 @@ export class McpStdioClient {
   }
 
   /** List prompts exposed by the server. */
-  async listPrompts(): Promise<McpPromptInfo[]> {
+  async listPrompts(signal?: AbortSignal): Promise<McpPromptInfo[]> {
     try {
       const result = (await this.request({
         jsonrpc: '2.0',
         method: 'prompts/list',
-      })) as { prompts?: unknown } | null
-      const prompts = (result?.prompts ?? []) as unknown[]
+      }, DEFAULT_TIMEOUT_MS, signal)) as { prompts?: unknown } | null
+      if (!Array.isArray(result?.prompts)) throw new Error('Invalid MCP prompt listing')
+      const prompts = result.prompts as unknown[]
       return prompts
         .filter((p): p is Record<string, unknown> => typeof p === 'object' && p !== null)
         .map((p) => ({
@@ -257,8 +261,9 @@ export class McpStdioClient {
           arguments: Array.isArray(p.arguments) ? (p.arguments as Array<{ name: string; description?: string; required?: boolean }>) : undefined,
         }))
         .filter((p) => p.name.length > 0)
-    } catch {
-      return []
+    } catch (error) {
+      if ((error as { code?: unknown } | null)?.code === -32601) return []
+      throw error
     }
   }
 
@@ -347,10 +352,14 @@ export class McpStdioClient {
       clearTimeout(pending.timer)
       pending.cleanup()
       this.pending.delete(msg.id)
+      if (msg.jsonrpc !== '2.0' || Object.hasOwn(msg, 'error') === Object.hasOwn(msg, 'result')) {
+        pending.reject(new Error('Invalid MCP JSON-RPC response'))
+        return
+      }
       if (msg.error !== undefined) {
         const e = msg.error as Record<string, unknown> | null
         const errMsg = e && typeof e.message === 'string' ? e.message : JSON.stringify(msg.error)
-        pending.reject(new Error(`MCP error: ${errMsg}`))
+        pending.reject(Object.assign(new Error(`MCP error: ${errMsg}`), { code: e?.code }))
       } else {
         pending.resolve(msg.result)
       }
@@ -401,7 +410,7 @@ export class McpStdioClient {
         reject(new Error(`MCP server "${this.server.name}": not connected`))
         return
       }
-      if (signal?.aborted) { reject(new Error('MCP request cancelled')); return }
+      if (signal?.aborted) { reject(signal.reason instanceof Error && signal.reason.name !== 'AbortError' ? signal.reason : new Error('MCP request cancelled')); return }
       if (this.pending.size >= (this.server.limits?.maxPending ?? 64)) { reject(new Error('MCP pending request capacity exceeded')); return }
       const id = this.nextId++
       const abort = () => {
@@ -410,7 +419,7 @@ export class McpStdioClient {
         clearTimeout(pending.timer)
         pending.cleanup()
         this.pending.delete(id)
-        reject(new Error('MCP request cancelled'))
+        reject(signal?.reason instanceof Error && signal.reason.name !== 'AbortError' ? signal.reason : new Error('MCP request cancelled'))
       }
       const cleanup = () => signal?.removeEventListener('abort', abort)
       const timer = setTimeout(() => {

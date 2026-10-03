@@ -107,6 +107,7 @@ function readFiles(rootDir: string, files: string[]): FileContent[] {
 
 function extractApi(files: FileContent[]): DocSection {
   const routes: Array<{ method: string; path: string; file: string; line: number }> = []
+  const seen = new Set<string>()
   const patterns: Array<{ regex: RegExp; method: string }> = [
     { regex: /(?:app|router|server)\.(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s*\(\s*['"`]([^'"`]+)['"`]/gi, method: '$1' },
     { regex: /@(Get|Post|Put|Delete|Patch)\s*\(\s*['"`]([^'"`]+)['"`]/gi, method: '$1' }, // NestJS decorators
@@ -119,10 +120,12 @@ function extractApi(files: FileContent[]): DocSection {
     for (let i = 0; i < lines.length; i++) {
       for (const { regex } of patterns) {
         regex.lastIndex = 0
-        const match = regex.exec(lines[i])
-        if (match) {
+        for (const match of lines[i].matchAll(regex)) {
           const method = match[1].toUpperCase()
           const path = match[2]
+          const key = `${file.path}:${i}:${match.index + match[0].length}:${method}:${path}`
+          if (seen.has(key)) continue
+          seen.add(key)
           routes.push({ method, path, file: file.path, line: i + 1 })
         }
       }
@@ -434,6 +437,22 @@ function extractOverview(files: FileContent[], rootDir: string): DocSection {
   }
 }
 
+function extractTests(files: FileContent[]): DocSection {
+  const entries: Array<{ kind: string; name: string; file: string; line: number }> = []
+  const pattern = /\b(describe|it|test)(?:\.(?:only|skip|todo))?\s*\(\s*(['"`])([^'"`]+)\2/g
+  for (const file of files) {
+    for (const [index, line] of file.content.split('\n').entries()) {
+      for (const match of line.matchAll(pattern)) entries.push({ kind: match[1] === 'describe' ? 'suite' : 'test', name: match[3], file: file.path, line: index + 1 })
+    }
+  }
+  return {
+    type: 'tests',
+    title: 'Test Patterns',
+    content: entries.length === 0 ? 'No test patterns detected.' : [`Found ${entries.length} test construct(s):`, '', ...entries.slice(0, 100).map(entry => `- ${entry.kind}: ${entry.name} — ${entry.file}:${entry.line}`)].join('\n'),
+    sourceFiles: [...new Set(entries.map(entry => entry.file))],
+  }
+}
+
 // ── Main Extraction ─────────────────────────────────────────────────────────
 
 export function extractDocs(options: MagicDocsOptions): MagicDocsResult {
@@ -461,7 +480,7 @@ export function extractDocs(options: MagicDocsOptions): MagicDocsResult {
   const totalLines = contents.reduce((sum, f) => sum + f.lines, 0)
 
   // Extract sections
-  const wantedSections = options.sections ?? ['overview', 'api', 'models', 'config', 'decisions', 'patterns', 'dependencies']
+  const wantedSections = options.sections ?? ['overview', 'api', 'models', 'config', 'decisions', 'patterns', 'dependencies', 'tests']
   const sections: DocSection[] = []
 
   for (const sectionType of wantedSections) {
@@ -474,6 +493,7 @@ export function extractDocs(options: MagicDocsOptions): MagicDocsResult {
         case 'decisions': sections.push(extractDecisions(contents)); break
         case 'patterns': sections.push(extractPatterns(contents)); break
         case 'dependencies': sections.push(extractDependencies(contents)); break
+        case 'tests': sections.push(extractTests(contents)); break
       }
     } catch (err) {
       warnings.push(`Failed to extract ${sectionType}: ${(err as Error).message}`)

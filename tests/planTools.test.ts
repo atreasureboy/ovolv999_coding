@@ -50,10 +50,10 @@ describe('EnterPlanModeTool', () => {
     expect(result.content).toContain('Entered plan mode')
   })
 
-  it('gracefully handles missing callback (sub-agent/piped mode)', async () => {
+  it('reports that plan mode is unavailable without an engine callback', async () => {
     const result = await tool.execute({}, makeCtx())
-    expect(result.isError).toBe(false)
-    expect(result.content).toContain('Entered plan mode')
+    expect(result.isError).toBe(true)
+    expect(result.content).toContain('unavailable')
   })
 
   it('returns error when callback throws', async () => {

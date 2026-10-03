@@ -1,5 +1,7 @@
 # Architecture remediation baseline
 
+Historical record for the 2026-09-28 architecture batch starting at `bb5ed63c66636d790f6a2cc9707fc2c7d73cd0cd`. Its final failures are retained as evidence; current audit results are in [the 2026-10-03 file audit](docs/file-audit.md).
+
 - Audit SHA / actual starting HEAD: `bb5ed63c66636d790f6a2cc9707fc2c7d73cd0cd`.
 - Remote: `https://github.com/atreasureboy/ovolv999_coding.git`.
 - Initial working tree: clean. All remediation changes remain uncommitted until explicitly recorded otherwise.

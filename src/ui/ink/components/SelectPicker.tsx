@@ -42,15 +42,14 @@ export function SelectPicker<T>({
   }, [items.length])
 
   useInput((_input, key) => {
+    if (key.escape) { onCancel(); return }
     if (items.length === 0) return
     if (key.upArrow) {
       setSelected((s) => (s - 1 + items.length) % items.length)
     } else if (key.downArrow) {
       setSelected((s) => (s + 1) % items.length)
     } else if (key.return) {
-      onSelect(items[selected].value)
-    } else if (key.escape) {
-      onCancel()
+      onSelect(items[Math.min(selected, items.length - 1)].value)
     }
   })
 

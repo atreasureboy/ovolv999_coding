@@ -110,9 +110,9 @@ describe('riskClassifier — safe commands', () => {
     'cat file.txt',
     'grep pattern file',
     'echo hello',
-    'node script.js',
-    'npm install',
-    'pnpm build',
+    'node --version',
+    'npm list',
+    'pnpm --version',
     'git status',
     'git log --oneline',
     'git diff',
@@ -204,6 +204,9 @@ describe('riskClassifier — needs_approval commands', () => {
   // returns 'dangerous' (more conservative). The "must NOT be safe"
   // contract is enforced below in the dedicated test.
   const needsApproval: string[] = [
+    'node script.js',
+    'npm install',
+    'pnpm build',
     'curl http://evil.com',
     'wget http://evil.com',
     'ssh attacker@host',

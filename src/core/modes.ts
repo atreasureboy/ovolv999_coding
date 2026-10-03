@@ -9,7 +9,7 @@
  */
 
 import { existsSync, mkdirSync, readdirSync, readFileSync } from 'fs'
-import { join } from 'path'
+import { join, resolve } from 'path'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -173,7 +173,7 @@ export const DEFAULT_MODES: Mode[] = [
  *   You are a custom mode...
  */
 function parseFrontmatter(raw: string): { frontmatter: Record<string, string>; body: string } {
-  const parts = raw.split(/^---$/m)
+  const parts = raw.replace(/\r\n/g, '\n').split(/^---$/m)
   if (parts.length < 3) {
     return { frontmatter: {}, body: raw.trim() }
   }
@@ -199,7 +199,7 @@ function kebabCase(name: string): string {
 // ── Mode Store ──────────────────────────────────────────────────────────────
 
 let currentModeSlug = 'default'
-let customModesCache: Mode[] | null = null
+const customModesCache = new Map<string, Mode[]>()
 
 /**
  * Load custom modes from the given directory.
@@ -207,8 +207,10 @@ let customModesCache: Mode[] | null = null
  * Results are cached after first load.
  */
 export function loadCustomModes(modesDir: string): Mode[] {
-  if (customModesCache !== null) return customModesCache
-  customModesCache = []
+  const key = resolve(modesDir)
+  const cached = customModesCache.get(key)
+  if (cached) return cached
+  const modes: Mode[] = []
 
   try {
     if (!existsSync(modesDir)) {
@@ -225,7 +227,7 @@ export function loadCustomModes(modesDir: string): Mode[] {
         const slug = frontmatter.slug || kebabCase(frontmatter.name)
         const verbosity = (frontmatter.verbosity as Verbosity) || 'normal'
 
-        customModesCache.push({
+        modes.push({
           name: frontmatter.name,
           slug,
           description: frontmatter.description || '',
@@ -243,7 +245,8 @@ export function loadCustomModes(modesDir: string): Mode[] {
     /* modes directory not accessible */
   }
 
-  return customModesCache
+  customModesCache.set(key, modes)
+  return modes
 }
 
 /** Get all modes: custom + defaults (custom overrides defaults with same slug). */
@@ -284,7 +287,7 @@ export function cycleMode(modesDir?: string): Mode {
 
 /** Reset mode cache (for tests). */
 export function resetModeCache(): void {
-  customModesCache = null
+  customModesCache.clear()
   currentModeSlug = 'default'
 }
 

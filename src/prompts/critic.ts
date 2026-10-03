@@ -51,7 +51,10 @@ export function formatMessagesForCritic(messages: OpenAIMessage[]): string {
           const calls = toolCalls
             .map((tc) => {
               let args: Record<string, unknown>
-              try { args = JSON.parse(tc.function.arguments) as Record<string, unknown> } catch { args = {} }
+              try {
+                const parsed: unknown = JSON.parse(tc.function.arguments)
+                args = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {}
+              } catch { args = {} }
               const truncated = Object.fromEntries(
                 Object.entries(args).map(([k, v]) => [
                   k,

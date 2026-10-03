@@ -25,6 +25,7 @@
     "ovolv999": "./dist/bin/ovogogogo.js"
   },
   "scripts": {
+    "setup:local": "node scripts/setup.mjs",
     "build": "node scripts/build.mjs",
     "start": "node dist/bin/ovogogogo.js",
     "dev": "tsx bin/ovogogogo.ts",

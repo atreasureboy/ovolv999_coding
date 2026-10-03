@@ -1,6 +1,29 @@
 import type { Command } from './index.js'
 import { text } from './results.js'
-import { join } from 'path'
+import { basename } from 'path'
+import type { OpenAIMessage } from '../core/types.js'
+import type { TranscriptMessage } from '../core/sessionTranscript.js'
+
+function transcriptMessage(message: OpenAIMessage, timestamp: string): TranscriptMessage {
+  const content = typeof message.content === 'string'
+    ? message.content
+    : Array.isArray(message.content)
+      ? message.content.map((part) => part.type === 'text' ? part.text : '[image]').join('\n')
+      : ''
+  const toolCalls = message.tool_calls?.map((call) => {
+    let input: Record<string, unknown>
+    try {
+      const parsed: unknown = JSON.parse(call.function.arguments)
+      input = parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : { arguments: call.function.arguments }
+    } catch {
+      input = { arguments: call.function.arguments }
+    }
+    return { name: call.function.name, input }
+  })
+  return { role: message.role, content, timestamp, ...(toolCalls ? { toolCalls } : {}) }
+}
 
 export const transcriptCommands: Command[] = [
   {
@@ -10,7 +33,7 @@ export const transcriptCommands: Command[] = [
       if (ctx.history.length === 0) {
         return text('No conversation to export.')
       }
-      const parts = args.trim().split(/\s+/)
+      const parts = args.trim().split(/\s+/).filter(Boolean)
       const formatArg = parts[0]?.toLowerCase()
       const { exportSession, exportSessionToFile, defaultFilename } =
         await import('../utils/sessionExport.js')
@@ -51,18 +74,18 @@ export const transcriptCommands: Command[] = [
       }
       const { maskSecrets } = await import('../utils/secretScanner.js')
       const { exportSessionToFile, defaultFilename } = await import('../utils/sessionExport.js')
-      const format = args.trim() || 'markdown'
-      const maskedHistory = ctx.history.map((msg) => {
-        if (typeof msg.content === 'string') {
-          return { ...msg, content: maskSecrets(msg.content).masked }
-        }
-        return msg
-      })
-      const filename = defaultFilename(format as 'markdown' | 'json' | 'text')
-      const exportPath = ctx.sessionDir ? join(ctx.sessionDir, filename) : join(ctx.cwd, filename)
+      const requestedFormat = args.trim() || 'markdown'
+      const format = requestedFormat === 'md' ? 'markdown' : requestedFormat
+      if (!['markdown', 'json', 'text', 'transcript'].includes(format)) {
+        return text('Usage: /share [markdown|json|text|transcript]')
+      }
+      const maskedHistory = JSON.parse(JSON.stringify(ctx.history), (_key, value: unknown) =>
+        typeof value === 'string' ? maskSecrets(value).masked : value,
+      ) as OpenAIMessage[]
+      const filename = defaultFilename(format as 'markdown' | 'json' | 'text' | 'transcript')
       try {
-        exportSessionToFile(maskedHistory, ctx.cwd, filename, {
-          format: format as 'markdown' | 'json' | 'text',
+        const exportPath = exportSessionToFile(maskedHistory, ctx.sessionDir ?? ctx.cwd, filename, {
+          format: format as 'markdown' | 'json' | 'text' | 'transcript',
           includeReasoning: false,
         })
         return text(
@@ -81,44 +104,22 @@ export const transcriptCommands: Command[] = [
       const transcriptModule = await import('../core/sessionTranscript.js')
       const { buildTranscript, exportTranscript, getTranscriptStats, formatStats } =
         transcriptModule
-      const parts = args.trim().split(/\s+/)
+      const parts = args.trim().split(/\s+/).filter(Boolean)
       const formatArg = parts[0] ?? 'markdown'
       const format = (['markdown', 'json', 'text'].includes(formatArg) ? formatArg : 'markdown') as
         | 'markdown'
         | 'json'
         | 'text'
-      if (parts.includes('stats')) {
-        const sessionId = ctx.sessionDir ?? 'current'
-        const transcript = buildTranscript(
-          {
-            sessionId,
-            startTime: new Date().toISOString(),
-          },
-          [],
-        )
-        return text(formatStats(getTranscriptStats(transcript)))
-      }
-      const messages =
-        (
-          ctx as {
-            messages?: Array<{
-              role: string
-              content: string
-            }>
-          }
-        ).messages ?? []
+      const timestamp = new Date().toISOString()
       const transcript = buildTranscript(
         {
-          sessionId: ctx.sessionDir ?? `session-${Date.now()}`,
-          startTime: new Date().toISOString(),
+          sessionId: ctx.sessionDir ? basename(ctx.sessionDir) : `session-${Date.now()}`,
+          startTime: timestamp,
           cwd: ctx.cwd,
         },
-        messages.map((m) => ({
-          role: m.role as 'user' | 'assistant',
-          content: m.content,
-          timestamp: new Date().toISOString(),
-        })),
+        ctx.history.map((message) => transcriptMessage(message, timestamp)),
       )
+      if (parts.includes('stats')) return text(formatStats(getTranscriptStats(transcript)))
       const path = exportTranscript(transcript, format)
       return text(
         `Transcript exported to: ${path}\n\nStats:\n${formatStats(getTranscriptStats(transcript))}`,

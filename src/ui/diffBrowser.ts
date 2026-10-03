@@ -89,6 +89,8 @@ export function parseGitDiff(diffOutput: string): StructuredDiff {
 
     // File header: diff --git a/path b/path
     if (line.startsWith('diff --git ')) {
+      if (currentHunk && currentFile) currentFile.hunks.push(currentHunk)
+      currentHunk = null
       if (currentFile) files.push(currentFile)
       currentFile = parseFileHeader(line, lines, i)
       // Skip ahead past mode/index lines
@@ -96,14 +98,14 @@ export function parseGitDiff(diffOutput: string): StructuredDiff {
     }
 
     // Old file path: --- a/path
-    if (line.startsWith('--- ') && currentFile) {
+    if (line.startsWith('--- ') && currentFile && !currentHunk) {
       const path = line.slice(4)
       currentFile.oldPath = path === '/dev/null' ? '/dev/null' : path.replace(/^a\//, '')
       continue
     }
 
     // New file path: +++ b/path
-    if (line.startsWith('+++ ') && currentFile) {
+    if (line.startsWith('+++ ') && currentFile && !currentHunk) {
       const path = line.slice(4)
       currentFile.newPath = path === '/dev/null' ? '/dev/null' : path.replace(/^b\//, '')
       continue

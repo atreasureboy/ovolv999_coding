@@ -38,6 +38,7 @@ import {
   createSessionDir,
   findLatestSession,
   loadSession,
+  releaseSessionOwnership,
   saveSession,
 } from '../src/core/sessionManager.js'
 import type { AgentChildEngineFactory, EngineConfig, OpenAIMessage } from '../src/core/types.js'
@@ -458,12 +459,14 @@ async function main(): Promise<void> {
       } catch (error) {
         renderer.warn('Session cleanup: ' + (error as Error).message)
       }
+      let resourcesSettled = true
       try {
         await settleWithin(
           Promise.resolve().then(() => engine.dispose()),
           3000,
         )
       } catch (error) {
+        resourcesSettled = false
         process.exitCode = 2
         updateProgressLog(cwd, 'blocked', 'Cleanup did not finish; resources need attention')
         recordBackgroundOutcome('blocked')
@@ -476,8 +479,14 @@ async function main(): Promise<void> {
         }
       }
       const costTracker = engine.getCostTracker()
-      if (costTracker.getTotalAPICalls() > 0)
-        process.stdout.write('\n' + costTracker.formatSummary() + '\n')
+      try {
+        if (costTracker.getTotalAPICalls() > 0)
+          process.stdout.write('\n' + costTracker.formatSummary() + '\n')
+      } finally {
+        sessionState.saveOnExit = null
+        if (resourcesSettled) releaseSessionOwnership(sessionDir)
+        renderer.destroy()
+      }
     })()
     return cleanupPromise
   }

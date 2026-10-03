@@ -129,7 +129,7 @@ export class SlashSuggester {
         return
       }
       // Schedule on next tick so the readline buffer has been updated.
-      setImmediate(() => this.refresh())
+      setImmediate(() => { if (this.attached) this.refresh() })
     }
     process.stdin.on('keypress', this.keypressListener)
   }

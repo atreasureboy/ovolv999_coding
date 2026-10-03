@@ -89,7 +89,7 @@ export class MessageBus extends EventEmitter {
     }
   }
 
-  send(from: string, to: string, content: string, type: AgentMessage['type'] = 'message', metadata?: Record<string, unknown>): AgentMessage | null {
+  send(from: string, to: string, content: string, type: AgentMessage['type'] = 'message', metadata?: Record<string, unknown>, replyTo?: string): AgentMessage | null {
     if (!this.agents.has(from)) return null
     if (!this.agents.has(to)) return null
 
@@ -101,6 +101,7 @@ export class MessageBus extends EventEmitter {
       timestamp: new Date().toISOString(),
       type,
       metadata,
+      ...(replyTo ? { replyTo } : {}),
     }
 
     this.messages.push(message)
@@ -111,6 +112,7 @@ export class MessageBus extends EventEmitter {
     const queue = this.queues.get(to)
     if (queue) {
       queue.push(message)
+      if (queue.length > this.maxMessages) queue.splice(0, queue.length - this.maxMessages)
       this.emit(`message:${to}`, message)
     }
 
@@ -127,12 +129,12 @@ export class MessageBus extends EventEmitter {
     const original = this.messages.find(m => m.id === originalMessageId)
     if (!original) return null
 
-    const message = this.send(from, original.from, content, type)
-    if (message) message.replyTo = originalMessageId
-    return message
+    return this.send(from, original.from, content, type, undefined, originalMessageId)
   }
 
-  receive(agentId: string, timeout = 0): AgentMessage | null {
+  receive(agentId: string): AgentMessage | null
+  receive(agentId: string, timeout: number): AgentMessage | null | Promise<AgentMessage | null>
+  receive(agentId: string, timeout = 0): AgentMessage | null | Promise<AgentMessage | null> {
     const queue = this.queues.get(agentId)
     if (!queue) return null
 
@@ -147,15 +149,15 @@ export class MessageBus extends EventEmitter {
           resolve(null)
         }, timeout)
 
-        const handler = (msg: AgentMessage) => {
+        const handler = () => {
+          const msg = this.queues.get(agentId)?.shift()
+          if (!msg) return
           clearTimeout(timer)
           this.off(`message:${agentId}`, handler)
-          const q = this.queues.get(agentId)
-          if (q && q.length > 0) resolve(q.shift()!)
-          else resolve(msg)
+          resolve(msg)
         }
-        this.once(`message:${agentId}`, handler)
-      }) as unknown as AgentMessage | null
+        this.on(`message:${agentId}`, handler)
+      })
     }
 
     return null

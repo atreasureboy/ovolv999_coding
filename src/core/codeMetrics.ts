@@ -96,8 +96,9 @@ export function detectLanguage(filePath: string): string {
 export function analyzeFile(filePath: string): FileMetrics | null {
   if (!existsSync(filePath)) return null
 
-  const content = readFileSync(filePath, 'utf8')
   const stats = statSync(filePath)
+  if (!stats.isFile()) return null
+  const content = readFileSync(filePath, 'utf8')
   const language = detectLanguage(filePath)
   const lines = content.split('\n')
 
@@ -106,7 +107,7 @@ export function analyzeFile(filePath: string): FileMetrics | null {
   let commentLines = 0
   let blankLines = 0
 
-  let inBlockComment = false
+  let blockCommentEnd: string | undefined
   const lineLengths: number[] = []
 
   for (const line of lines) {
@@ -119,20 +120,19 @@ export function analyzeFile(filePath: string): FileMetrics | null {
     }
 
     // Check for block comment end
-    if (inBlockComment) {
+    if (blockCommentEnd) {
       commentLines++
-      if (trimmed.includes('*/') || trimmed.includes('"""') && inBlockComment) {
-        inBlockComment = false
-      }
+      if (trimmed.includes(blockCommentEnd)) blockCommentEnd = undefined
       continue
     }
 
     // Check for block comment start
-    if (trimmed.startsWith('/*') || trimmed.startsWith('"""') || trimmed.startsWith("'''")) {
+    const delimiter = trimmed.startsWith('/*') ? '*/'
+      : language === 'python' && trimmed.startsWith('"""') ? '"""'
+      : language === 'python' && trimmed.startsWith("'''") ? "'''" : undefined
+    if (delimiter) {
       commentLines++
-      if (!trimmed.includes('*/') && !trimmed.endsWith('"""') && !trimmed.endsWith("'''")) {
-        inBlockComment = true
-      }
+      if (!trimmed.slice(delimiter === '*/' ? 2 : 3).includes(delimiter)) blockCommentEnd = delimiter
       continue
     }
 
@@ -149,7 +149,7 @@ export function analyzeFile(filePath: string): FileMetrics | null {
     codeLines++
   }
 
-  const longestLine = Math.max(...lineLengths, 0)
+  const longestLine = lineLengths.reduce((longest, length) => Math.max(longest, length), 0)
   const averageLineLength = lineLengths.length > 0
     ? Math.round(lineLengths.reduce((a, b) => a + b, 0) / lineLengths.length)
     : 0

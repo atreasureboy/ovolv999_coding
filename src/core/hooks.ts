@@ -128,6 +128,7 @@ function matchInputPattern(pattern: string, toolInput?: Record<string, unknown>)
   const candidates = [
     toolInput.command,
     toolInput.filePath,
+    toolInput.file_path,
     toolInput.path,
     toolInput.pattern,
     JSON.stringify(toolInput),

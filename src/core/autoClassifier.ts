@@ -19,6 +19,8 @@ export interface ClassificationResult {
 
 // ── Pattern Definitions ─────────────────────────────────────────────────────
 
+import { classifyCommandRisk } from './riskClassifier.js'
+
 interface RiskPattern {
   regex: RegExp
   level: SafetyLevel
@@ -118,6 +120,11 @@ export function classifyBashCommand(command: string): ClassificationResult {
     matchedPatterns.push('Unknown command')
   }
 
+  const risk = classifyCommandRisk(trimmed)
+  if (risk !== 'safe' && compareSafety(highestLevel, 'medium-risk') < 0) {
+    highestLevel = 'medium-risk'
+    matchedPatterns.push('Command may have side effects')
+  }
   const autoApprove = shouldAutoApprove(highestLevel)
   const confidence = calculateConfidence(matchedPatterns.length, highestLevel)
 
@@ -135,7 +142,7 @@ export function classifyFileWrite(path: string): ClassificationResult {
   let highestLevel: SafetyLevel = 'safe'
 
   for (const pattern of FILE_WRITE_PATTERNS) {
-    if (pattern.regex.test(path)) {
+    if (pattern.regex.test(path.replace(/\\/g, '/'))) {
       matchedPatterns.push(pattern.reason)
       if (compareSafety(pattern.level, highestLevel) > 0) {
         highestLevel = pattern.level

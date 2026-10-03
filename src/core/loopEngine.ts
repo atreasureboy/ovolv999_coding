@@ -6,6 +6,7 @@ import type { Renderer } from '../ui/renderer.js'
 import { normalizeOutcome } from './outcome.js'
 import type { OutcomeStatus, VerificationEvidence } from './outcome.js'
 import { createVerificationPlan, detectVerifyCommands, executeVerification, captureArtifactVersion } from './verification.js'
+import { withWorkspaceAccess } from './runContext.js'
 
 interface LoopConfig {
   cwd: string
@@ -100,7 +101,15 @@ export async function runLoop(engine: ExecutionEngine, renderer: Renderer, confi
         renderer.error('Frozen goal or acceptance definition changed during execution.')
         return finish('blocked', iter)
       }
-      verification = await executeVerification({ cwd, plan, signal, runId, artifactVersion: await captureArtifactVersion(cwd, plan.excludedPaths) })
+      try {
+        verification = await withWorkspaceAccess(cwd, runId, true, signal ?? new AbortController().signal, async () =>
+          executeVerification({ cwd, plan, signal, runId, executionProfile: engine.getConfig?.().executionProfile, artifactVersion: await captureArtifactVersion(cwd, plan.excludedPaths, { signal }) }),
+        )
+      } catch (error) {
+        verification = { ...verification, status: 'not_run', output: String(error) }
+        if (signal?.aborted) return finish('cancelled', iter)
+        return finish((error as Error).name === 'WorkspaceUnavailableError' ? 'blocked' : 'failed', iter)
+      }
       renderer.info(verification.output)
       if (signal?.aborted) return finish('cancelled', iter)
       if (verification.status === 'passed') {

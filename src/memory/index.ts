@@ -10,15 +10,7 @@ import { existsSync, readFileSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import { createHash } from 'crypto'
-
-interface SemanticEntry {
-  id: string
-  content: string
-  tags: string[]
-  source: string
-  timestamp: string
-  confidence: number
-}
+import { isSemanticMemoryEntry, type SemanticMemoryEntry } from '../core/semanticMemory.js'
 
 /**
  * Compute the project slug. Must match bin/ovogogogo.ts so the memory
@@ -46,16 +38,19 @@ export function getMemoryDir(cwd: string): string {
 }
 
 /** Read all semantic memory entries from disk */
-function readSemanticEntries(memoryDir: string): SemanticEntry[] {
+function readSemanticEntries(memoryDir: string): SemanticMemoryEntry[] {
   const filePath = join(memoryDir, 'semantic.jsonl')
   if (!existsSync(filePath)) return []
   try {
     const lines = readFileSync(filePath, 'utf8').trim().split('\n').filter(Boolean)
     return lines
       .map((l) => {
-        try { return JSON.parse(l) as SemanticEntry } catch { return null }
+        try {
+          const entry = JSON.parse(l) as unknown
+          return isSemanticMemoryEntry(entry) ? entry : null
+        } catch { return null }
       })
-      .filter((e): e is SemanticEntry => e !== null)
+      .filter((e): e is SemanticMemoryEntry => e !== null)
   } catch {
     return []
   }

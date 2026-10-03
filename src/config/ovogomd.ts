@@ -16,7 +16,7 @@
  */
 
 import { readFileSync, existsSync } from 'fs'
-import { join, dirname, parse } from 'path'
+import { join, dirname, parse, resolve } from 'path'
 import { homedir } from 'os'
 import { execSync } from 'child_process'
 
@@ -69,12 +69,14 @@ function getGitRoot(cwd: string): string {
 /** Collect directories from cwd up to (and including) gitRoot */
 function dirsUpToRoot(cwd: string, gitRoot: string): string[] {
   const dirs: string[] = []
-  let current = cwd
-  const { root } = parse(cwd)
+  let current = resolve(cwd)
+  const boundary = resolve(gitRoot)
+  const samePath = (left: string, right: string): boolean => process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right
+  const { root } = parse(current)
 
   while (true) {
     dirs.push(current)
-    if (current === gitRoot) break
+    if (samePath(current, boundary)) break
     const parent = dirname(current)
     if (parent === current || parent === root) break // filesystem root
     current = parent

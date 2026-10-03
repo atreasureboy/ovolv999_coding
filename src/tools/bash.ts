@@ -1,4 +1,6 @@
-import { spawnManaged } from '../core/executionBackend.js'
+import { registerPhysicalResource, spawnManaged } from '../core/executionBackend.js'
+import { captureProcessIdentity } from '../core/processIdentity.js'
+import { captureOwnedProcessTree, stopOwnedProcessTree } from '../core/processTree.js'
 /**
  * BashTool — shell command execution with proper abort + process-group cleanup.
  *
@@ -338,10 +340,14 @@ export class BashTool implements Tool {
       }
       // Prevent ENOENT crash — spawn emits async 'error' if shell binary is missing
       child.on('error', () => {})
-      if (track) track(new Promise<void>(resolve => {
-        child.once('close', () => resolve())
-        child.once('error', () => { if (child.pid === undefined) resolve() })
-      }))
+      let releasePhysical!: () => void
+      const physical = new Promise<void>(resolvePhysical => { releasePhysical = resolvePhysical })
+      registerPhysicalResource(physical)
+      track?.(physical)
+      let stopping = false
+      const identity = child.pid !== undefined ? captureProcessIdentity(child.pid) : Promise.resolve(null)
+      child.once('close', () => { if (!stopping) releasePhysical() })
+      child.once('error', () => { if (child.pid === undefined) releasePhysical() })
 
       // Wire the abort signal to the background child. Without this, an
       // outer cancel would leave the child + its subprocess tree running
@@ -352,25 +358,32 @@ export class BashTool implements Tool {
       // fires (single-shot) OR when the child closes (process exit).
       const bgChild = child
       const onBgAbort = () => {
-        if (process.platform === 'win32') {
-          try {
-            execSync(`taskkill /F /T /PID ${bgChild.pid}`, { stdio: 'ignore', timeout: 5000 })
-          } catch { /* best-effort */ }
-        } else {
-          // Negative pid = process group; valid because detached:true.
-          if (bgChild.pid !== undefined) {
-            try { process.kill(-bgChild.pid, 'SIGTERM') } catch { /* ESRCH if already gone */ }
-          }
-        }
+        if (stopping) return
+        stopping = true
+        void identity.then(async processIdentity => {
+          if (!processIdentity) return
+          const tree = await captureOwnedProcessTree(processIdentity, true)
+          if ((await stopOwnedProcessTree(tree, this.sigkillGraceMs)).stopped) releasePhysical()
+        }).catch(() => undefined)
       }
       if (context.signal) {
         context.signal.addEventListener('abort', onBgAbort, { once: true })
         // Drop the listener the moment the child exits so we don't keep
         // a dead signal-handler pinned to a live parent.
-        bgChild.on('exit', () => {
+        const removeAbort = (): void => {
           if (context.signal) context.signal.removeEventListener('abort', onBgAbort)
-        })
+        }
+        bgChild.once('close', removeAbort)
+        bgChild.once('error', removeAbort)
+        if (context.signal.aborted) onBgAbort()
       }
+
+      const startupError = await new Promise<Error | undefined>(resolveStart => {
+        bgChild.once('spawn', () => resolveStart(undefined))
+        bgChild.once('error', resolveStart)
+      })
+      if (startupError) return { content: `Failed to start background command: ${startupError.message}`, isError: true }
+      if (context.signal?.aborted) return { content: 'Command cancelled during background startup.', isError: true, status: 'cancelled' }
 
       const redirectInfo = alreadyRedirected ? '' : `\nOutput redirected to: ${logFile}`
       return {
@@ -452,7 +465,7 @@ export class BashTool implements Tool {
         if (IS_WIN_CMD) {
           actualCommand = `${command} 1>"${followLogFile}" 2>&1`
         } else {
-          actualCommand = `{ ${command}; } 2>&1 | tee -a "${followLogFile}"`
+          actualCommand = `{ ${command}; } 2>&1 | tee -a "${followLogFile}"; exit \${PIPESTATUS[0]}`
         }
 
         // Launch a tmux session with tail -f for user viewing

@@ -33,7 +33,7 @@ const DANGEROUS_PATTERNS: RegExp[] = [
   /\bchmod\s+(-R\s+)?[0-7]*7[0-7]*\s+\//,                         // chmod 777 on root
   /\bchown\s+-R\s+.*\s+\//,                                       // chown -R on root
   // Git destructive (ported from Claude Code destructiveCommandWarning.ts)
-  /\bgit\s+push\s+.*--force.*\b(main|master)\b/,                  // force push to main
+  /\bgit\s+push\b(?=[^\n]*--force)(?=[^\n]*\b(?:main|master)\b)/,
   /\bgit\s+reset\s+--hard/,                                       // git reset --hard
   /\bgit\s+clean\s+(-[a-zA-Z]*[fd])/,                             // git clean -fd
   /\bgit\s+checkout\s+\./,                                        // git checkout . (discard all)
@@ -60,8 +60,6 @@ const SAFE_PREFIXES: Set<string> = new Set([
   'echo', 'wc', 'file', 'stat', 'du', 'df', 'date', 'uname', 'hostname',
   'env', 'printenv', 'id', 'which', 'type', 'readlink', 'basename',
   'dirname', 'realpath', 'test', 'true', 'false', 'tree',
-  'node', 'npx', 'npm', 'pnpm', 'yarn', 'bun', 'deno', 'python', 'python3',
-  'tsc', 'eslint', 'prettier', 'vitest', 'jest', 'cargo', 'go', 'rustc',
   'git',
 ])
 
@@ -86,6 +84,10 @@ function classifySegment(segment: string): RiskLevel {
 
   const firstWord = extractFirstWord(segment)
   if (!firstWord) return 'needs_approval'
+  if (firstWord === 'env' && segment.trim() !== 'env') return 'needs_approval'
+  if (/\$\(|`|[<>]|-exec\b|-delete\b/.test(segment)) return 'needs_approval'
+  if (/^(?:node|npm|pnpm|yarn|bun|deno|python3?|tsc|eslint|prettier|vitest|jest|cargo|go|rustc)\s+(?:--version|-v|--help|-h)\s*$/.test(segment)) return 'safe'
+  if (/^(?:npm|pnpm|yarn)\s+(?:list|ls|outdated|view)\b/.test(segment)) return 'safe'
 
   // Safe prefixes
   if (SAFE_PREFIXES.has(firstWord)) {
@@ -106,8 +108,18 @@ function classifySegment(segment: string): RiskLevel {
 
 function classifyGit(segment: string): RiskLevel {
   const tokens = segment.split(/\s+/)
-  for (const token of tokens.slice(1)) {
+  for (let index = 1; index < tokens.length; index++) {
+    const token = tokens[index]
     if (!token.startsWith('-')) {
+      const args = tokens.slice(index + 1)
+      if (token === 'branch' || token === 'tag') {
+        if (args.some(arg => /^-(?:d|D|m|M|c|C|f)$|^--(?:delete|move|copy|force|set-upstream|unset-upstream)/.test(arg))) return 'needs_approval'
+        if (args.some(arg => !arg.startsWith('-')) && !args.includes('--list') && !args.includes('-l')) return 'needs_approval'
+      }
+      if (token === 'remote' && args.length && !['-v', '--verbose', 'show', 'get-url'].includes(args[0])) return 'needs_approval'
+      if (token === 'stash' && args.length && !['list', 'show'].includes(args[0])) return 'needs_approval'
+      if (token === 'stash' && !args.length) return 'needs_approval'
+      if (token === 'config' && !args.some(arg => ['--get', '--get-all', '--get-regexp', '--list', '-l'].includes(arg))) return 'needs_approval'
       return SAFE_GIT_SUBCOMMANDS.has(token) ? 'safe' : 'needs_approval'
     }
   }

@@ -18,6 +18,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
+import { isRecord } from './persistedData.js'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -126,18 +127,28 @@ function getLogPath(): string {
 }
 
 let eventBuffer: TelemetryEvent[] = []
-let bufferLoaded = false
+let bufferLoadedPath: string | undefined
 
 function loadBuffer(): void {
-  if (bufferLoaded) return
-  bufferLoaded = true
   const path = getLogPath()
+  if (bufferLoadedPath === path) return
+  bufferLoadedPath = path
+  eventBuffer = []
   if (!existsSync(path)) return
   try {
-    eventBuffer = JSON.parse(readFileSync(path, 'utf8')) as TelemetryEvent[]
+    const data: unknown = JSON.parse(readFileSync(path, 'utf8'))
+    eventBuffer = Array.isArray(data) ? data.filter(isTelemetryEvent) : []
   } catch {
     eventBuffer = []
   }
+}
+
+function isTelemetryEvent(value: unknown): value is TelemetryEvent {
+  if (!isRecord(value) || typeof value.type !== 'string' || typeof value.timestamp !== 'string') return false
+  for (const key of ['durationMs', 'tokensIn', 'tokensOut', 'cost']) {
+    if (value[key] !== undefined && (typeof value[key] !== 'number' || !Number.isFinite(value[key]))) return false
+  }
+  return ['tool', 'model', 'error'].every(key => value[key] === undefined || typeof value[key] === 'string')
 }
 
 function flushBuffer(): void {
@@ -232,10 +243,10 @@ export function getAggregates(): TelemetryAggregates {
     totalErrors: 0,
     totalCompacts: 0,
     totalDurationMs: 0,
-    toolCallCounts: {},
-    errorCounts: {},
-    modelUsage: {},
-    eventsByType: {},
+    toolCallCounts: Object.create(null) as TelemetryAggregates['toolCallCounts'],
+    errorCounts: Object.create(null) as TelemetryAggregates['errorCounts'],
+    modelUsage: Object.create(null) as TelemetryAggregates['modelUsage'],
+    eventsByType: Object.create(null) as TelemetryAggregates['eventsByType'],
     firstEventAt: events[0]?.timestamp ?? new Date().toISOString(),
     lastEventAt: events[events.length - 1]?.timestamp ?? new Date().toISOString(),
   }

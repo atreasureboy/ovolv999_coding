@@ -16,9 +16,9 @@
  * (~/.ssh/config), key-based auth, and jump hosts (ProxyJump).
  */
 
-import { execSync } from 'child_process'
+import { execFileSync } from 'child_process'
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
-import { join } from 'path'
+import { join, posix } from 'path'
 import { homedir } from 'os'
 
 // ── Types ───────────────────────────────────────────────────────────────────
@@ -78,7 +78,8 @@ export function loadProfiles(): SshProfile[] {
   const path = getProfilesPath()
   if (!existsSync(path)) return []
   try {
-    return JSON.parse(readFileSync(path, 'utf8')) as SshProfile[]
+    const profiles: unknown = JSON.parse(readFileSync(path, 'utf8'))
+    return Array.isArray(profiles) ? profiles.filter(isSshProfile) : []
   } catch {
     return []
   }
@@ -113,6 +114,7 @@ export function removeProfile(name: string): boolean {
 // ── SSH Command Building ────────────────────────────────────────────────────
 
 export function buildSshArgs(profile: SshProfile, remoteCommand?: string): string[] {
+  if (!isSshProfile(profile)) throw new Error('Invalid SSH profile')
   const args: string[] = []
 
   if (profile.port) args.push('-p', String(profile.port))
@@ -126,7 +128,7 @@ export function buildSshArgs(profile: SshProfile, remoteCommand?: string): strin
 
   // Target
   const target = profile.user ? `${profile.user}@${profile.host}` : profile.host
-  args.push(target)
+  args.push('--', target)
 
   if (remoteCommand) args.push(remoteCommand)
 
@@ -142,16 +144,16 @@ function buildRsyncArgs(
   const args: string[] = ['-avz', '--delete']
 
   // Rsync uses -e to specify the remote shell
-  const sshArgs = buildSshArgs(profile).filter((a) => a !== targetStr(profile))
-  args.push('-e', `ssh ${sshArgs.join(' ')}`)
+  const sshArgs = buildSshArgs(profile).slice(0, -2)
+  args.push('-e', `ssh ${sshArgs.map(shellQuote).join(' ')}`, '--')
 
   const remoteTarget = targetStr(profile)
   const remoteBase = profile.remoteBase ?? '~/ovolv999-remote'
 
   if (direction === 'up') {
-    args.push(src + '/', `${remoteTarget}:${join(remoteBase, dst)}`)
+    args.push(src + '/', `${remoteTarget}:${posix.join(remoteBase, dst)}`)
   } else {
-    args.push(`${remoteTarget}:${join(remoteBase, src)}/`, dst)
+    args.push(`${remoteTarget}:${posix.join(remoteBase, src)}/`, dst)
   }
 
   return args
@@ -167,7 +169,7 @@ export function testConnection(profile: SshProfile): SshConnectionTest {
   const start = Date.now()
   try {
     const args = buildSshArgs(profile, 'echo "__OVOGV999_SSH_OK__"; node --version 2>/dev/null || echo "no-node"')
-    const result = execSync(`ssh ${args.map(shellQuote).join(' ')}`, {
+    const result = execFileSync('ssh', args, {
       encoding: 'utf8',
       stdio: 'pipe',
       timeout: profile.timeoutMs ?? 10000,
@@ -200,16 +202,18 @@ export function execRemote(profile: SshProfile, command: string, options: SshExe
   // Build the remote command with optional cwd + env
   let remoteCmd = command
   if (options.cwd) {
-    remoteCmd = `cd ${shellQuote(options.cwd)} && ${remoteCmd}`
+    remoteCmd = `cd ${remotePathQuote(options.cwd)} && ${remoteCmd}`
   }
   if (options.env) {
+    if (Object.entries(options.env).some(([key, value]) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || typeof value !== 'string')) {
+      return { exitCode: 1, stdout: '', stderr: 'Invalid remote environment variable', duration: Date.now() - start }
+    }
     const envPrefix = Object.entries(options.env)
       .map(([k, v]) => `${k}=${shellQuote(v)}`)
       .join(' ')
-    remoteCmd = `${envPrefix} ${remoteCmd}`
+    if (envPrefix) remoteCmd = `export ${envPrefix}; ${remoteCmd}`
   }
 
-  const args = buildSshArgs(profile, remoteCmd)
   const execOptions = {
     encoding: 'utf8' as const,
     stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
@@ -217,7 +221,7 @@ export function execRemote(profile: SshProfile, command: string, options: SshExe
   }
 
   try {
-    const stdout = execSync(`ssh ${args.map(shellQuote).join(' ')}`, execOptions)
+    const stdout = execFileSync('ssh', buildSshArgs(profile, remoteCmd), execOptions)
 
     // Stream lines if callbacks provided
     if (options.onStdout) {
@@ -233,16 +237,18 @@ export function execRemote(profile: SshProfile, command: string, options: SshExe
       duration: Date.now() - start,
     }
   } catch (err) {
-    const e = err as { status?: number; stdout?: string; stderr?: string; message: string }
+    const e = err as { status?: number; stdout?: string | Buffer; stderr?: string | Buffer; message: string }
+    const stdout = e.stdout?.toString() ?? ''
+    const stderr = e.stderr?.toString() ?? e.message
     if (options.onStderr && e.stderr) {
-      for (const line of e.stderr.split('\n')) {
+      for (const line of stderr.split('\n')) {
         if (line) options.onStderr(line)
       }
     }
     return {
       exitCode: e.status ?? 1,
-      stdout: e.stdout ?? '',
-      stderr: e.stderr ?? e.message,
+      stdout,
+      stderr,
       duration: Date.now() - start,
     }
   }
@@ -253,10 +259,9 @@ export function execRemote(profile: SshProfile, command: string, options: SshExe
 export function syncUp(profile: SshProfile, localPath: string, remoteSubdir: string = '.'): boolean {
   const remoteBase = profile.remoteBase ?? '~/ovolv999-remote'
   // Ensure remote base exists
-  execRemote(profile, `mkdir -p ${shellQuote(remoteBase)}`)
-  const args = buildRsyncArgs(profile, localPath, remoteSubdir, 'up')
+  if (execRemote(profile, `mkdir -p ${remotePathQuote(remoteBase)}`).exitCode !== 0) return false
   try {
-    execSync(`rsync ${args.map(shellQuote).join(' ')}`, {
+    execFileSync('rsync', buildRsyncArgs(profile, localPath, remoteSubdir, 'up'), {
       encoding: 'utf8',
       stdio: 'pipe',
       timeout: 120000,
@@ -268,9 +273,8 @@ export function syncUp(profile: SshProfile, localPath: string, remoteSubdir: str
 }
 
 export function syncDown(profile: SshProfile, remoteSubdir: string, localPath: string): boolean {
-  const args = buildRsyncArgs(profile, remoteSubdir, localPath, 'down')
   try {
-    execSync(`rsync ${args.map(shellQuote).join(' ')}`, {
+    execFileSync('rsync', buildRsyncArgs(profile, remoteSubdir, localPath, 'down'), {
       encoding: 'utf8',
       stdio: 'pipe',
       timeout: 120000,
@@ -313,6 +317,7 @@ export function runRemoteAgent(profile: SshProfile, options: RemoteAgentOptions)
   // Sync up
   if (options.syncBefore) {
     syncedUp = syncUp(profile, '.', '.')
+    if (!syncedUp) return { success: false, output: 'Remote upload failed; agent was not started', duration: Date.now() - start, syncedUp, syncedDown }
   }
 
   // Build the remote ovolv999 command
@@ -334,8 +339,8 @@ export function runRemoteAgent(profile: SshProfile, options: RemoteAgentOptions)
   }
 
   return {
-    success: result.exitCode === 0,
-    output: result.stdout + (result.stderr ? '\n' + result.stderr : ''),
+    success: result.exitCode === 0 && (!options.syncAfter || syncedDown),
+    output: result.stdout + (result.stderr ? '\n' + result.stderr : '') + (options.syncAfter && !syncedDown ? '\nRemote download failed' : ''),
     duration: Date.now() - start,
     syncedUp,
     syncedDown,
@@ -391,4 +396,20 @@ function shellQuote(s: string): string {
   if (s === '') return "''"
   if (/^[A-Za-z0-9_:.@/=-]+$/.test(s)) return s
   return `'${s.replace(/'/g, "'\\''")}'`
+}
+
+function remotePathQuote(path: string): string {
+  if (path === '~') return '"$HOME"'
+  if (path.startsWith('~/')) return `"$HOME"/${shellQuote(path.slice(2))}`
+  return shellQuote(path)
+}
+
+function isSshProfile(value: unknown): value is SshProfile {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const profile = value as Record<string, unknown>
+  if (typeof profile.name !== 'string' || !profile.name.trim() || typeof profile.host !== 'string' || !profile.host || /^-|\s/.test(profile.host) || [...profile.host].some(char => char.charCodeAt(0) < 32)) return false
+  if (profile.user !== undefined && (typeof profile.user !== 'string' || !profile.user || /^-|\s|@/.test(profile.user) || [...profile.user].some(char => char.charCodeAt(0) < 32))) return false
+  if (profile.port !== undefined && (!Number.isInteger(profile.port) || Number(profile.port) < 1 || Number(profile.port) > 65535)) return false
+  if (profile.timeoutMs !== undefined && (typeof profile.timeoutMs !== 'number' || !Number.isFinite(profile.timeoutMs) || profile.timeoutMs < 1000)) return false
+  return ['identityFile', 'proxyJump', 'remoteBase', 'knownHostFingerprint'].every(key => profile[key] === undefined || typeof profile[key] === 'string')
 }

@@ -412,6 +412,7 @@ function substituteVars(text: string): string {
 // ── Sample writer (for /workflow init) ──────────────────────────────────────
 
 export function writeSampleWorkflow(cwd: string, name: string): string {
+  if (typeof name !== 'string' || !name.trim() || /[\\/\0:]/.test(name) || name === '.' || name === '..') throw new Error('Invalid workflow name')
   const dir = join(resolve(cwd), WORKFLOW_DIR)
   mkdirSync(dir, { recursive: true })
   const filePath = join(dir, `${name}.json`)

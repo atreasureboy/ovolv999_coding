@@ -13,6 +13,7 @@ import {
 import { join } from 'path'
 import { createHash, randomBytes, randomUUID } from 'crypto'
 import { acquirePersistenceLease, withPersistenceLock } from './persistenceLock.js'
+import { isRecord, isStringArray } from './persistedData.js'
 
 export interface MemoryProvenance {
   status: 'unverified' | 'verified'
@@ -35,6 +36,16 @@ export interface SemanticMemoryEntry {
 export interface SemanticMemoryWriteResult extends SemanticMemoryEntry {
   persistence: 'persisted' | 'failed'
   persistenceError?: string
+}
+
+export function isSemanticMemoryEntry(value: unknown): value is SemanticMemoryEntry {
+  if (!isRecord(value) || typeof value.id !== 'string' || !value.id || typeof value.content !== 'string' || !value.content
+    || !isStringArray(value.tags) || typeof value.source !== 'string' || typeof value.timestamp !== 'string'
+    || typeof value.confidence !== 'number' || !Number.isFinite(value.confidence) || value.confidence < 0 || value.confidence > 1) return false
+  const provenance = value.provenance
+  return provenance === undefined || (isRecord(provenance) && typeof provenance.status === 'string' && ['unverified', 'verified'].includes(provenance.status)
+    && typeof provenance.claimedSource === 'string' && (provenance.references === undefined || isStringArray(provenance.references))
+    && (provenance.outcome === undefined || typeof provenance.outcome === 'string') && (provenance.verification === undefined || typeof provenance.verification === 'string'))
 }
 
 const SOURCE_PRIORITY = new Map([
@@ -106,14 +117,8 @@ export class SemanticMemory {
       const entries = new Map<string, SemanticMemoryEntry>()
       for (const line of raw.split('\n').filter(Boolean)) {
         try {
-          const entry = JSON.parse(line) as SemanticMemoryEntry
-          if (
-            typeof entry.id !== 'string' ||
-            typeof entry.content !== 'string' ||
-            !Array.isArray(entry.tags)
-          )
-            continue
-          entry.tags = entry.tags.filter((tag) => typeof tag === 'string')
+          const entry: unknown = JSON.parse(line)
+          if (!isSemanticMemoryEntry(entry)) continue
           entry.provenance = {
             ...entry.provenance,
             status: 'unverified',
@@ -170,6 +175,7 @@ export class SemanticMemory {
       provenance: { ...entry.provenance, status: 'unverified', claimedSource: entry.source },
     }
     try {
+      if (!isSemanticMemoryEntry(full)) throw new Error('Invalid semantic memory metadata; write was not committed')
       return guard(() => {
         if (!this.ensureLoaded(true))
           throw new Error('Memory could not be read; write was not committed')

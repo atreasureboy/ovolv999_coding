@@ -124,7 +124,7 @@ Operations:
 
     // Validate each item
     for (const item of todos) {
-      if (!item.id || !item.content || !item.status || !item.priority) {
+      if (!item || typeof item !== 'object' || typeof item.id !== 'string' || !item.id || typeof item.content !== 'string' || !item.content || !['pending', 'in_progress', 'completed'].includes(item.status) || !['high', 'medium', 'low'].includes(item.priority) || item.activeForm !== undefined && typeof item.activeForm !== 'string') {
         return Promise.resolve({
           content: `Error: each todo must have id, content, status, and priority. Got: ${JSON.stringify(item)}`,
           isError: true,
@@ -137,7 +137,7 @@ Operations:
     const incomingIds = new Set(todos.map(t => t.id))
     const allExistingCovered = todoList.every(t => incomingIds.has(t.id))
 
-    if (todoList.length === 0 || allExistingCovered) {
+    if (todos.length === 0 || todoList.length === 0 || allExistingCovered) {
       // Full replace
       todoList = todos.map(t => ({ ...t }))
     } else {
@@ -148,6 +148,7 @@ Operations:
           existing.status = updated.status
           existing.priority = updated.priority
           existing.content = updated.content
+          existing.activeForm = updated.activeForm
         } else {
           todoList.push({ ...updated })
         }

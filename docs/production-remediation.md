@@ -1,5 +1,7 @@
 # Production reliability implementation and evidence
 
+Historical record for the 2026-09-28 production batch starting at `183cb2b2a8be3ba47fcc519cb554559dae1ba526`. Its batch-specific scope and results remain unchanged; subsequent corrections and current evidence are in [the file audit](file-audit.md).
+
 ## Identity and scope
 
 Repository: `atreasureboy/ovolv999_coding`. Implementation baseline: `183cb2b2a8be3ba47fcc519cb554559dae1ba526`, 2026-09-28. This batch follows `codex_production_prompt.md` and `production_audit.md` supplied from the user's local `ovocoding` directory. It preserves the prior permission, outcome, worktree and cancellation contracts. Changes and rollback commits are local; this batch does not push, publish packages, change credentials, or configure remote branch protection.

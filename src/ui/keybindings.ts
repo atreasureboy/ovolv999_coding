@@ -151,7 +151,7 @@ export function matchCombo(
     if (key.meta && !combo.alt) return false
     if (key.shift && !combo.shift) return false
     // Convert input control char back to letter for comparison
-    const letter = ctrlCharToLetter(input)
+    const letter = ctrlCharToLetter(input) ?? (input.length === 1 ? input.toLowerCase() : null)
     if (letter === null) return false
     return letter === combo.key
   }

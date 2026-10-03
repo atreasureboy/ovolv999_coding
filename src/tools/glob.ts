@@ -5,6 +5,8 @@
 
 import { glob } from 'glob'
 import { stat } from 'fs/promises'
+import { resolve } from 'path'
+import { resolveWorkspacePath } from '../core/workspacePath.js'
 import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/types.js'
 import { GLOB_DESCRIPTION } from '../prompts/tools.js'
 
@@ -46,16 +48,19 @@ export class GlobTool implements Tool {
       return { content: 'Error: pattern is required', isError: true }
     }
 
-    const cwd = searchPath ?? context.cwd
-
     try {
+      context.signal?.throwIfAborted()
+      const cwd = resolveWorkspacePath(context, searchPath ?? '.')
+      resolveWorkspacePath(context, resolve(cwd, pattern))
       const files = await glob(pattern, {
         cwd,
         absolute: true,
         nodir: true,
         dot: false,
         ignore: ['**/node_modules/**', '**/.git/**', '**/dist/**'],
+        signal: context.signal,
       })
+      for (const file of files) resolveWorkspacePath(context, file)
 
       if (files.length === 0) {
         return { content: `No files found matching: ${pattern} in ${cwd}. Tip: try a broader pattern (e.g. "**/*.ts"), check the path, or omit 'path' to search cwd.`, isError: false }

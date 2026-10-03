@@ -8,6 +8,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
 import { join, resolve } from 'path'
 import { homedir } from 'os'
+import { isRecord } from './persistedData.js'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -92,14 +93,18 @@ export function getConfigPath(scope: ConfigScope, cwd?: string): string {
 }
 
 export function loadConfig(scope: ConfigScope, cwd?: string): ConfigSchema {
+  return mergeConfig(DEFAULT_CONFIG, readConfigOverrides(scope, cwd))
+}
+
+function readConfigOverrides(scope: ConfigScope, cwd?: string): Partial<ConfigSchema> {
   const path = getConfigPath(scope, cwd)
-  if (!existsSync(path)) return mergeConfig(DEFAULT_CONFIG, {})
+  if (!existsSync(path)) return {}
   try {
     const raw: unknown = JSON.parse(readFileSync(path, 'utf8'))
     const result = validateConfig(raw)
-    return result.valid ? result.config : mergeConfig(DEFAULT_CONFIG, {})
+    return result.valid ? raw as Partial<ConfigSchema> : {}
   } catch {
-    return mergeConfig(DEFAULT_CONFIG, {})
+    return {}
   }
 }
 
@@ -116,7 +121,13 @@ export function mergeConfig(base: ConfigSchema, overrides: Partial<ConfigSchema>
   return {
     version: overrides.version ?? base.version,
     provider: { ...base.provider, ...overrides.provider },
-    permissions: { ...base.permissions, ...overrides.permissions },
+    permissions: {
+      ...base.permissions,
+      ...overrides.permissions,
+      ...((overrides.permissions?.rules ?? base.permissions.rules) !== undefined
+        ? { rules: (overrides.permissions?.rules ?? base.permissions.rules)?.map(rule => ({ ...rule })) }
+        : {}),
+    },
     ui: { ...base.ui, ...overrides.ui },
     model: { ...base.model, ...overrides.model },
     behavior: { ...base.behavior, ...overrides.behavior },
@@ -126,7 +137,7 @@ export function mergeConfig(base: ConfigSchema, overrides: Partial<ConfigSchema>
 
 export function mergeAllConfigs(cwd?: string): ConfigSchema {
   const global = loadConfig('global')
-  const project = loadConfig('project', cwd)
+  const project = readConfigOverrides('project', cwd)
   return mergeConfig(global, project)
 }
 
@@ -136,57 +147,98 @@ export function validateConfig(config: unknown): ConfigValidationResult {
   const errors: Array<{ path: string; message: string }> = []
   const c = config as Partial<ConfigSchema>
 
-  if (typeof c !== 'object' || c === null) {
+  if (!isRecord(config)) {
     return { valid: false, errors: [{ path: '', message: 'Config must be an object' }] }
+  }
+
+  for (const key of ['provider', 'permissions', 'ui', 'model', 'behavior', 'env']) {
+    if (config[key] !== undefined && !isRecord(config[key])) {
+      errors.push({ path: key, message: 'Must be an object' })
+    }
+  }
+  if (errors.length) return { valid: false, errors }
+  if (c.version !== undefined && (!Number.isInteger(c.version) || c.version < 0)) {
+    errors.push({ path: 'version', message: 'Must be a nonnegative integer' })
   }
 
   // Provider validation
   if (c.provider) {
-    if (typeof c.provider.name !== 'string') {
+    if (c.provider.name !== undefined && typeof c.provider.name !== 'string') {
       errors.push({ path: 'provider.name', message: 'Must be a string' })
     }
     if (c.provider.baseUrl !== undefined && typeof c.provider.baseUrl !== 'string') {
       errors.push({ path: 'provider.baseUrl', message: 'Must be a string' })
+    }
+    for (const key of ['model', 'apiKeyEnv'] as const) {
+      if (c.provider[key] !== undefined && typeof c.provider[key] !== 'string') {
+        errors.push({ path: `provider.${key}`, message: 'Must be a string' })
+      }
     }
   }
 
   // Permissions validation
   if (c.permissions) {
     const validModes = ['default', 'acceptEdits', 'bypassPermissions', 'plan']
-    if (c.permissions.defaultMode && !validModes.includes(c.permissions.defaultMode)) {
+    if (c.permissions.defaultMode !== undefined && !validModes.includes(c.permissions.defaultMode)) {
       errors.push({ path: 'permissions.defaultMode', message: `Must be one of: ${validModes.join(', ')}` })
+    }
+    if (c.permissions.rules !== undefined && (!Array.isArray(c.permissions.rules)
+      || c.permissions.rules.some(rule => !isRecord(rule) || typeof rule.tool !== 'string'
+        || typeof rule.pattern !== 'string' || typeof rule.decision !== 'string' || !['allow', 'deny', 'ask'].includes(rule.decision)))) {
+      errors.push({ path: 'permissions.rules', message: 'Must contain tool, pattern, and allow/deny/ask rules' })
     }
   }
 
   // UI validation
   if (c.ui) {
     const validThemes = ['dark', 'light', 'system']
-    if (c.ui.theme && !validThemes.includes(c.ui.theme)) {
+    if (c.ui.theme !== undefined && !validThemes.includes(c.ui.theme)) {
       errors.push({ path: 'ui.theme', message: `Must be one of: ${validThemes.join(', ')}` })
     }
     if (c.ui.showTokens !== undefined && typeof c.ui.showTokens !== 'boolean') {
       errors.push({ path: 'ui.showTokens', message: 'Must be a boolean' })
+    }
+    for (const key of ['showCost', 'vimMode'] as const) {
+      if (c.ui[key] !== undefined && typeof c.ui[key] !== 'boolean') {
+        errors.push({ path: `ui.${key}`, message: 'Must be a boolean' })
+      }
+    }
+    if (c.ui.accentColor !== undefined && typeof c.ui.accentColor !== 'string') {
+      errors.push({ path: 'ui.accentColor', message: 'Must be a string' })
     }
   }
 
   // Model validation
   if (c.model) {
     if (c.model.temperature !== undefined) {
-      if (typeof c.model.temperature !== 'number' || c.model.temperature < 0 || c.model.temperature > 2) {
+      if (typeof c.model.temperature !== 'number' || !Number.isFinite(c.model.temperature) || c.model.temperature < 0 || c.model.temperature > 2) {
         errors.push({ path: 'model.temperature', message: 'Must be a number between 0 and 2' })
       }
     }
-    if (c.model.maxTokens !== undefined && (typeof c.model.maxTokens !== 'number' || c.model.maxTokens < 1)) {
+    if (c.model.maxTokens !== undefined && (!Number.isInteger(c.model.maxTokens) || c.model.maxTokens < 1)) {
       errors.push({ path: 'model.maxTokens', message: 'Must be a positive number' })
+    }
+    if (c.model.contextWindow !== undefined && (!Number.isInteger(c.model.contextWindow) || c.model.contextWindow < 1)) {
+      errors.push({ path: 'model.contextWindow', message: 'Must be a positive integer' })
     }
   }
 
   // Behavior validation
   if (c.behavior) {
     if (c.behavior.compactThreshold !== undefined) {
-      if (typeof c.behavior.compactThreshold !== 'number' || c.behavior.compactThreshold < 0 || c.behavior.compactThreshold > 1) {
+      if (typeof c.behavior.compactThreshold !== 'number' || !Number.isFinite(c.behavior.compactThreshold) || c.behavior.compactThreshold < 0 || c.behavior.compactThreshold > 1) {
         errors.push({ path: 'behavior.compactThreshold', message: 'Must be between 0 and 1' })
       }
+    }
+    for (const key of ['autoCompact', 'memoryExtract', 'suggestions'] as const) {
+      if (c.behavior[key] !== undefined && typeof c.behavior[key] !== 'boolean') {
+        errors.push({ path: `behavior.${key}`, message: 'Must be a boolean' })
+      }
+    }
+  }
+  if (c.env) {
+    for (const [key, value] of Object.entries(c.env)) {
+      if (typeof value !== 'string') errors.push({ path: `env.${key}`, message: 'Must be a string' })
     }
   }
 

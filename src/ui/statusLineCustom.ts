@@ -60,7 +60,10 @@ export function loadConfig(): StatusLineConfig | null {
   const path = getConfigPath()
   if (!existsSync(path)) return null
   try {
-    return JSON.parse(readFileSync(path, 'utf8')) as StatusLineConfig
+    const config: unknown = JSON.parse(readFileSync(path, 'utf8'))
+    if (Array.isArray(config) && config.every((segment: unknown) => segment !== null && typeof segment === 'object' && 'type' in segment && typeof segment.type === 'string')) return config as StatusSegment[]
+    if (config && typeof config === 'object' && 'script' in config && typeof config.script === 'string') return config as StatusLineConfig
+    return null
   } catch {
     return null
   }
@@ -277,6 +280,7 @@ function runScript(script: string, ctx: StatusLineContext): string {
 
   try {
     const output = execSync(script, {
+      cwd: ctx.cwd,
       encoding: 'utf8',
       timeout: 2000,
       env: { ...process.env, ...env },

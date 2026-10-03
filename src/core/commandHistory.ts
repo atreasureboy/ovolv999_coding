@@ -8,9 +8,10 @@
  * .ovolv999/command-history.json (project-level).
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, writeFileSync } from 'fs'
 import { join, resolve } from 'path'
 import { homedir } from 'os'
+import { isRecord, isStringArray, readPersistedRows } from './persistedData.js'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -59,15 +60,15 @@ export function getProjectHistoryPath(cwd: string): string {
 }
 
 export function loadHistory(path: string): HistoryStore {
-  if (!existsSync(path)) {
-    return { entries: [] }
-  }
-  try {
-    const raw = readFileSync(path, 'utf8')
-    return JSON.parse(raw) as HistoryStore
-  } catch {
-    return { entries: [] }
-  }
+  return { entries: readPersistedRows(path, 'entries', isHistoryEntry) }
+}
+
+function isHistoryEntry(value: unknown): value is HistoryEntry {
+  if (!isRecord(value)) return false
+  return typeof value.text === 'string' && typeof value.cwd === 'string'
+    && typeof value.timestamp === 'string'
+    && typeof value.type === 'string' && ['prompt', 'command', 'pipe'].includes(value.type)
+    && (value.tags === undefined || isStringArray(value.tags))
 }
 
 export function saveHistory(path: string, store: HistoryStore): void {
@@ -130,6 +131,8 @@ export function clearHistory(path: string): number {
  * Matches substrings, word boundaries, and fuzzy character sequences.
  */
 export function searchHistory(store: HistoryStore, query: string, options: SearchOptions = {}): HistoryEntry[] {
+  const limit = options.limit ?? (query.trim() ? 20 : 50)
+  if (!Number.isInteger(limit) || limit <= 0) return []
   if (!query.trim()) {
     // Return all entries (filtered)
     let results = store.entries
@@ -137,10 +140,9 @@ export function searchHistory(store: HistoryStore, query: string, options: Searc
     if (options.tags?.length) {
       results = results.filter(e => options.tags!.some(t => e.tags?.includes(t)))
     }
-    return results.slice(-(options.limit ?? 50)).reverse()
+    return results.slice(-limit).reverse()
   }
 
-  const limit = options.limit ?? 20
   const lowerQuery = options.caseSensitive ? query : query.toLowerCase()
 
   // Score each entry by relevance
@@ -208,6 +210,7 @@ export function fuzzyMatch(text: string, query: string): boolean {
  * Get unique texts from history (for autocomplete suggestions).
  */
 export function getUniqueTexts(store: HistoryStore, prefix: string = '', limit = 20): string[] {
+  if (!Number.isInteger(limit) || limit <= 0) return []
   const seen = new Set<string>()
   const results: string[] = []
   const lower = prefix.toLowerCase()

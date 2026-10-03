@@ -5,8 +5,9 @@
  * Persisted to .ovolv999/timers.json.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, writeFileSync } from 'fs'
 import { join, resolve } from 'path'
+import { isRecord, isStringArray, readPersistedRows } from './persistedData.js'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -42,13 +43,18 @@ export function getTimerPath(cwd: string): string {
 }
 
 export function loadTimers(cwd: string): TimerStore {
-  const path = getTimerPath(cwd)
-  if (!existsSync(path)) return { timers: [] }
-  try {
-    return JSON.parse(readFileSync(path, 'utf8')) as TimerStore
-  } catch {
-    return { timers: [] }
-  }
+  return { timers: readPersistedRows(getTimerPath(cwd), 'timers', isTimer) }
+}
+
+function isTimer(value: unknown): value is TimerEntry {
+  if (!isRecord(value)) return false
+  return typeof value.id === 'string' && typeof value.name === 'string'
+    && typeof value.startedAt === 'string' && Number.isFinite(Date.parse(value.startedAt))
+    && (value.stoppedAt === null || typeof value.stoppedAt === 'string')
+    && typeof value.accumulatedMs === 'number' && Number.isFinite(value.accumulatedMs) && value.accumulatedMs >= 0
+    && typeof value.running === 'boolean'
+    && (value.category === undefined || typeof value.category === 'string')
+    && (value.tags === undefined || isStringArray(value.tags))
 }
 
 export function saveTimers(cwd: string, store: TimerStore): void {
@@ -186,8 +192,8 @@ export function getTimerStats(cwd: string): TimerStats {
   const stopped = timers.filter(t => !t.running && t.stoppedAt)
 
   let totalTime = 0
-  const byCategory: Record<string, number> = {}
-  const byTag: Record<string, number> = {}
+  const byCategory = Object.create(null) as Record<string, number>
+  const byTag = Object.create(null) as Record<string, number>
 
   const times = timers.map(t => {
     const ms = getElapsedMs(t)
@@ -307,6 +313,7 @@ function findTimer(store: TimerStore, idOrName: string): TimerEntry | undefined 
 }
 
 function matchesTimer(timer: TimerEntry, idOrName: string): boolean {
+  if (!idOrName.trim()) return false
   if (timer.id === idOrName) return true
   // Also match by name (case-insensitive)
   return timer.name.toLowerCase().includes(idOrName.toLowerCase())

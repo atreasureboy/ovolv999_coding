@@ -15,7 +15,7 @@
 
 import { existsSync, readFileSync, statSync } from 'fs'
 import { join, resolve, extname, basename, relative } from 'path'
-import { execSync } from 'child_process'
+import { execFileSync } from 'child_process'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -85,14 +85,14 @@ export const DEFAULT_OPTIONS: Required<DetectionOptions> = {
  * Detect file references in a text prompt.
  */
 export function detectFileReferences(text: string, options: DetectionOptions = {}): FileReference[] {
-  const opts = { ...DEFAULT_OPTIONS, ...options }
+  const opts = { ...DEFAULT_OPTIONS, cwd: process.cwd(), ...options }
   const refs: FileReference[] = []
 
   // Pattern 1: Path with line range — file.ext:10-20 or file.ext:10
-  const lineRangePattern = /\b([\w./-]+\.\w+):(\d+)(?:-(\d+))?\b/g
+  const lineRangePattern = /(?<=[\s'"`(]|^)((?:[A-Za-z]:)?[\w./\\-]+\.\w+):(\d+)(?:-(\d+))?\b/g
 
   // Pattern 2: Path-like strings — src/path/file.ext or /abs/path/file.ext
-  const pathPattern = /(?<=[\s'"`(]|^)(\.?\/?[\w-]+(?:\/[\w-]+)+\.\w+)/g
+  const pathPattern = /(?<=[\s'"`(]|^)((?:[A-Za-z]:)?(?:\.{0,2}[/\\])?[\w.-]+(?:[/\\][\w.-]+)+\.\w+)/g
 
   // Pattern 3: Bare filenames — file.ext (at word boundaries)
   const bareNamePattern = /\b([\w-]+\.\w{1,10})\b/g
@@ -245,11 +245,11 @@ function getGitFiles(cwd: string): string[] {
   }
 
   try {
-    const output = execSync('git ls-files', {
+    const output = execFileSync('git', ['ls-files', '-z'], {
       cwd, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'],
       timeout: 3000,
-    }).trim()
-    const files = output ? output.split('\n') : []
+    })
+    const files = output.split('\0').filter(Boolean)
     gitFilesCache = { cwd, files, time: Date.now() }
     return files
   } catch {

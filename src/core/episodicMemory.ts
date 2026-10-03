@@ -110,7 +110,7 @@ export function isValidEpisode(value: unknown): value is EpisodicMemoryEntry {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const v = value as Record<string, unknown>
   if (typeof v.id !== 'string' || v.id.length === 0) return false
-  if (typeof v.turn !== 'number' || !Number.isFinite(v.turn)) return false
+  if (typeof v.turn !== 'number' || !Number.isInteger(v.turn)) return false
   if (typeof v.toolName !== 'string') return false
   if (typeof v.inputSummary !== 'string') return false
   if (typeof v.resultSummary !== 'string') return false
@@ -315,6 +315,7 @@ export class EpisodicMemory {
 
   /** Read the most recent N episodes */
   recent(limit = 20): EpisodicMemoryEntry[] {
+    if (!Number.isSafeInteger(limit) || limit <= 0) return []
     const all = this.readAll()
     return all.slice(-limit)
   }
@@ -362,6 +363,7 @@ export class EpisodicMemory {
 
   /** Search episodes by tool name */
   findByTool(toolName: string, limit = 10): EpisodicMemoryEntry[] {
+    if (!Number.isSafeInteger(limit) || limit <= 0) return []
     const all = this.readAll()
     return all.filter((e) => e.toolName === toolName).slice(-limit)
   }

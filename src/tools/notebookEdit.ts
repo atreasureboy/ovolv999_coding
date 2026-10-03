@@ -15,8 +15,9 @@
 import { readFileSync } from 'fs'
 import { extname } from 'path'
 import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/types.js'
-import { atomicWrite } from '../core/atomicWrite.js'
 import { resolveWorkspacePath } from '../core/workspacePath.js'
+import { getFileState } from '../core/fileState.js'
+import { persistFileMutation, prepareFileMutation } from './fileOperations.js'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -144,9 +145,15 @@ NotebookEdit({
     if (editMode === 'insert' && !cellType) {
       return { content: 'Error: cell_type is required when edit_mode=insert', isError: true }
     }
+    if (cellType !== undefined && cellType !== 'code' && cellType !== 'markdown') {
+      return { content: 'Error: cell_type must be code or markdown', isError: true }
+    }
+    if (cellId !== undefined && typeof cellId !== 'string') {
+      return { content: 'Error: cell_id must be a string', isError: true }
+    }
 
     // For delete, new_source is not needed but the schema requires it — relax
-    if (editMode !== 'delete' && !newSource) {
+    if (editMode !== 'delete' && typeof newSource !== 'string') {
       return { content: 'Error: new_source is required for replace/insert', isError: true }
     }
 
@@ -157,6 +164,13 @@ NotebookEdit({
     } catch {
       return { content: `Error: cannot read file: ${fullPath}`, isError: true }
     }
+    const fileState = getFileState(ctx)
+    if (!fileState.hasFileBeenRead(fullPath)) {
+      return { content: `Error: You must Read ${fullPath} before editing it.`, isError: true }
+    }
+    if (fileState.hasFileChanged(fullPath, content)) {
+      return { content: `Error: ${fullPath} has been modified since you last read it. Read the notebook again before editing.`, isError: true }
+    }
 
     let notebook: NotebookContent
     try {
@@ -165,8 +179,11 @@ NotebookEdit({
       return { content: 'Error: notebook is not valid JSON', isError: true }
     }
 
-    if (!notebook.cells || !Array.isArray(notebook.cells)) {
+    if (!notebook || typeof notebook !== 'object' || !Array.isArray(notebook.cells)) {
       return { content: 'Error: notebook has no cells array', isError: true }
+    }
+    if (notebook.cells.some(cell => !cell || typeof cell !== 'object' || !['code', 'markdown', 'raw'].includes(cell.cell_type))) {
+      return { content: 'Error: notebook contains an invalid cell', isError: true }
     }
 
     // Find cell index
@@ -180,8 +197,8 @@ NotebookEdit({
       cellIndex = notebook.cells.findIndex((c) => c.id === cellId)
       if (cellIndex === -1) {
         // Try numeric index
-        const parsed = parseInt(cellId, 10)
-        if (!isNaN(parsed) && parsed >= 0 && parsed < notebook.cells.length) {
+        const parsed = /^\d+$/.test(cellId) ? Number(cellId) : NaN
+        if (Number.isSafeInteger(parsed) && parsed >= 0 && parsed < notebook.cells.length) {
           cellIndex = parsed
         } else {
           return { content: `Error: cell "${cellId}" not found in notebook`, isError: true }
@@ -231,15 +248,13 @@ NotebookEdit({
     }
 
     // Back up before modifying (undo/checkpoint support)
-    const backup = ctx.fileHistory?.trackEdit(fullPath)
-    if (backup?.status === 'failed')
-      return { content: `Backup failed; notebook was not changed: ${backup.error}`, isError: true }
-    ctx.signal?.throwIfAborted()
+    const preparationError = prepareFileMutation(fullPath, ctx)
+    if (preparationError) return preparationError
 
     // Write back — atomic so a crash mid-write cannot leave a half-
     // written notebook on disk (which Jupyter would refuse to open).
     try {
-      await atomicWrite(fullPath, JSON.stringify(notebook, null, 1), { encoding: 'utf8' })
+      await persistFileMutation({ filePath: fullPath, fileState }, JSON.stringify(notebook, null, 1))
     } catch (err) {
       return { content: `Error writing notebook: ${(err as Error).message}`, isError: true }
     }

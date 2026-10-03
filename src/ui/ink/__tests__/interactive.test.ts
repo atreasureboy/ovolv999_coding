@@ -92,11 +92,8 @@ describe('UIStore interactive overlays', () => {
   it('only one overlay active at a time (last one wins in state)', () => {
     const store = new UIStore()
     void store.showPlanApproval('plan1')
-    // In practice the UI prevents concurrent overlays, but the store
-    // tracks all three state fields independently. hasOverlay returns
-    // true if ANY is active.
     void store.showPermissionDialog({ toolName: 'T', preview: '', riskLevel: 'safe' })
-    expect(store.getState().pendingPlan).not.toBeNull()
+    expect(store.getState().pendingPlan).toBeNull()
     expect(store.getState().pendingPermission).not.toBeNull()
     expect(store.hasOverlay()).toBe(true)
   })

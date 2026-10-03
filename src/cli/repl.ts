@@ -2,7 +2,7 @@ import { dispatchSlashCommand, listCommands, type SlashCommandContext } from '..
 import { getProjectSettingsPath, saveProjectSettings } from '../config/settings.js'
 import { ExecutionEngine } from '../core/engine.js'
 import type { EpisodicMemory } from '../core/episodicMemory.js'
-import { settleWithin } from '../core/outcome.js'
+import { normalizeOutcome, settleWithin } from '../core/outcome.js'
 import type { SemanticMemory } from '../core/semanticMemory.js'
 import {
   AmbiguousSessionError,
@@ -40,16 +40,26 @@ export async function runPlanMode(
   updateProgressLog(cwd, 'planning', task.slice(0, 100))
   const planEngine = new ExecutionEngine(planConfig, renderer)
   try {
-    await planEngine.runTurn(task, [...history])
+    const { result } = await planEngine.runTurn(task, [...history])
+    const status = normalizeOutcome(result)
+    if (status !== 'completed') {
+      renderer.warn(`Planning ${status}: ${result.reason}`)
+      updateProgressLog(cwd, 'idle', 'waiting for next task')
+      return
+    }
   } catch (err: unknown) {
     renderer.error(`Plan error: ${(err as Error).message}`)
+    updateProgressLog(cwd, 'idle', 'waiting for next task')
     return
   } finally {
     await planEngine.dispose()
   }
   renderer.planConfirmPrompt()
   const { text: answer, eof } = await input.readLine('')
-  if (eof) return
+  if (eof) {
+    updateProgressLog(cwd, 'idle', 'waiting for next task')
+    return
+  }
   const confirmed = answer.trim().toLowerCase()
   if (confirmed === 'y' || confirmed === 'yes') {
     renderer.info('Executing plan...')
@@ -61,7 +71,7 @@ export async function runPlanMode(
       history.length = 0
       history.push(...trimHistoryForNextTurn(newHistory))
       const elapsed = ((Date.now() - startMs) / 1000).toFixed(1)
-      renderer.info(`Done in ${elapsed}s · ${result.reason}`)
+      renderer.info(`${normalizeOutcome(result)} in ${elapsed}s · ${result.reason}`)
     } catch (err: unknown) {
       renderer.error(`Execution error: ${(err as Error).message}`)
     }
@@ -213,6 +223,7 @@ export async function runRepl(
     process.exit(130)
   }
   process.on('SIGINT', onSigint)
+  input.readline?.on('SIGINT', onSigint)
   async function runTask(
     prompt: string,
     taskHistory: OpenAIMessage[],
@@ -223,13 +234,7 @@ export async function runRepl(
     let currentHistory = taskHistory
     try {
       while (true) {
-        let result: {
-          result: {
-            reason: string
-            output: string
-          }
-          newHistory: OpenAIMessage[]
-        }
+        let result: Awaited<ReturnType<ExecutionEngine['runTurn']>>
         let deadlineExceeded = false
         const dl = runWithDeadline(() => engine.runTurn(currentPrompt, currentHistory), {
           deadlineMs: HARD_TURN_DEADLINE_MS,
@@ -261,6 +266,7 @@ export async function runRepl(
               history.length = 0
               history.push(...trimHistoryForNextTurn(settled.value.newHistory))
             }
+            currentHistory = [...history]
             saveCurrentSession(null)
             renderer.writeInterruptPrompt()
             awaitingInput = true
@@ -269,8 +275,8 @@ export async function runRepl(
             if (eof) break
             const trimmedFeedback = feedback.trim()
             currentPrompt = trimmedFeedback
-              ? `[User Interrupt]\n${trimmedFeedback}\n\nThe previous turn exceeded a safety deadline. Adjust your actions and continue.`
-              : '[Resume] The previous turn hit a safety deadline. Try a simpler approach.'
+              ? `[User Interrupt]\n${trimmedFeedback}\n\n${deadlineExceeded ? 'The previous turn exceeded a safety deadline. ' : ''}Adjust your actions and continue.`
+              : deadlineExceeded ? '[Resume] The previous turn hit a safety deadline. Try a simpler approach.' : '[Resume] Continue the interrupted task.'
             continue
           }
           throw err
@@ -301,7 +307,7 @@ export async function runRepl(
           continue
         }
         const elapsed = ((Date.now() - startMs) / 1000).toFixed(1)
-        renderer.info(`Done in ${elapsed}s · ${result.result.reason}`)
+        renderer.info(`${normalizeOutcome(result.result)} in ${elapsed}s · ${result.result.reason}`)
         break
       }
     } catch (err: unknown) {
@@ -482,6 +488,7 @@ export async function runRepl(
   } finally {
     process.stdin.off('keypress', onKeypress)
     process.off('SIGINT', onSigint)
+    input.readline?.off('SIGINT', onSigint)
     slashSuggester.detach()
     try {
       sessionState.saveOnExit?.()

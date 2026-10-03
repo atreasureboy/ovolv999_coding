@@ -248,7 +248,7 @@ export function getTranscriptStats(transcript: SessionTranscript): {
   totalCost: number
   durationMs: number
 } {
-  const toolNames: Record<string, number> = {}
+  const toolNames = Object.create(null) as Record<string, number>
   let toolCalls = 0
   let userMessages = 0
   let assistantMessages = 0

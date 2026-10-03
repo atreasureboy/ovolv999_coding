@@ -114,9 +114,9 @@ export class FileWriteTool implements Tool {
       await persistFileMutation(operation, content)
 
       // Line count: strip one trailing newline so "hello\n" = 1 line, not 2
-      const lines = content.endsWith('\n') ? content.slice(0, -1).split('\n').length : content.split('\n').length
+      const lines = content === '' ? 0 : content.endsWith('\n') ? content.slice(0, -1).split('\n').length : content.split('\n').length
       return {
-        content: `File written: ${file_path} (${lines} lines, ${content.length} bytes)`,
+        content: `File written: ${file_path} (${lines} lines, ${Buffer.byteLength(content, 'utf8')} bytes)`,
         isError: false,
       }
     } catch (err: unknown) {

@@ -23,7 +23,7 @@ export const resourcesCommands: Command[] = [
         applyPreset,
         BUDGET_PRESETS,
       } = await import('../core/budget.js')
-      const parts = args.trim().split(/\s+/)
+      const parts = args.trim().split(/\s+/).filter(Boolean)
       const sub = parts[0] ?? 'list'
       if (sub === 'set') {
         const [name, type, period, limitStr] = parts.slice(1)
@@ -125,7 +125,7 @@ export const resourcesCommands: Command[] = [
         formatProfileList,
         formatEffectiveConfig,
       } = await import('../core/profiles.js')
-      const parts = args.trim().split(/\s+/)
+      const parts = args.trim().split(/\s+/).filter(Boolean)
       const sub = parts[0] ?? 'list'
       if (sub === 'create' || sub === 'add') {
         const name = parts[1]
@@ -206,7 +206,7 @@ export const resourcesCommands: Command[] = [
         formatVaultStatus,
         getPassphraseFromEnv,
       } = keychainModule
-      const parts = args.trim().split(/\s+/)
+      const parts = args.trim().split(/\s+/).filter(Boolean)
       const sub = parts[0] ?? 'status'
       if (sub === 'status') {
         const pass = getPassphraseFromEnv()
@@ -263,36 +263,27 @@ export const resourcesCommands: Command[] = [
     name: 'sandbox',
     description:
       'Sandbox configuration. Usage: /sandbox [status | on | off | strict | standard | add-writable <path> | deny <path>]',
-    handler: async (args) => {
+    handler: async (args, ctx) => {
       const sandbox = await import('../core/sandbox.js')
-      const parts = args.trim().split(/\s+/)
-      const sub = parts[0] ?? 'status'
+      const { assertExecutionProfile } = await import('../core/executionBackend.js')
+      const parts = args.trim().split(/\s+/).filter(Boolean)
+      const sub = parts[0] || 'status'
+      const active = ctx.engine.getConfig().executionProfile
       if (sub === 'status') {
         return text(
-          sandbox.formatConfig(sandbox.loadConfig()) +
-            '\n\n' +
-            sandbox.formatProfile(sandbox.getCachedProfile(process.cwd())),
+          `Execution mode: ${active?.mode ?? 'trusted-local'}\nProcess isolation is unavailable; saved sandbox path preferences are not enforced.\n\n` + sandbox.formatConfig(sandbox.loadConfig()),
         )
       }
-      if (sub === 'on' || sub === 'enable') {
-        const cfg = sandbox.updateConfig({ enabled: true })
-        sandbox.invalidateProfileCache()
-        return text('Sandbox enabled.\n' + sandbox.formatConfig(cfg))
+      if (sub === 'on' || sub === 'enable' || sub === 'strict' || sub === 'standard') {
+        try { assertExecutionProfile({ ...active, mode: 'isolated-worker' }) }
+        catch (error) { return text(`Cannot enable sandbox: ${error instanceof Error ? error.message : String(error)}`) }
+        return text('Sandbox activation requires a supported execution backend.')
       }
       if (sub === 'off' || sub === 'disable') {
         sandbox.updateConfig({ enabled: false })
+        ctx.engine.getConfig().executionProfile = { ...active, mode: 'trusted-local' }
         sandbox.invalidateProfileCache()
         return text('Sandbox disabled.')
-      }
-      if (sub === 'strict') {
-        const cfg = sandbox.updateConfig({ enabled: true, level: 'strict', allowNetwork: false })
-        sandbox.invalidateProfileCache()
-        return text('Sandbox set to strict mode.\n' + sandbox.formatConfig(cfg))
-      }
-      if (sub === 'standard') {
-        const cfg = sandbox.updateConfig({ enabled: true, level: 'standard', allowNetwork: true })
-        sandbox.invalidateProfileCache()
-        return text('Sandbox set to standard mode.\n' + sandbox.formatConfig(cfg))
       }
       if (sub === 'add-writable') {
         const path = parts[1]
@@ -301,7 +292,7 @@ export const resourcesCommands: Command[] = [
         cfg.writablePaths.push(path)
         sandbox.saveConfig(cfg)
         sandbox.invalidateProfileCache()
-        return text(`Added writable path: ${path}`)
+        return text(`Saved writable path preference: ${path}\nProcess isolation is unavailable; path restrictions are not active.`)
       }
       if (sub === 'deny') {
         const path = parts[1]
@@ -310,7 +301,7 @@ export const resourcesCommands: Command[] = [
         cfg.deniedPaths.push(path)
         sandbox.saveConfig(cfg)
         sandbox.invalidateProfileCache()
-        return text(`Denied path: ${path}`)
+        return text(`Saved denied path preference: ${path}\nProcess isolation is unavailable; path restrictions are not active.`)
       }
       return text(sandbox.formatConfig(sandbox.loadConfig()))
     },
@@ -321,7 +312,7 @@ export const resourcesCommands: Command[] = [
       'Settings sync. Usage: /sync [status | push-file <path> | pull-file <path> [passphrase] | push-git <repo> | pull-git <repo> [passphrase]]',
     handler: async (args) => {
       const sync = await import('../core/settingsSync.js')
-      const parts = args.trim().split(/\s+/)
+      const parts = args.trim().split(/\s+/).filter(Boolean)
       const sub = parts[0] ?? 'status'
       if (sub === 'status') {
         return text(sync.formatSyncStatus(sync.getSyncStatus()))
@@ -372,7 +363,7 @@ export const resourcesCommands: Command[] = [
     description: 'Usage analytics. Usage: /telemetry [stats | on | off | export | clear]',
     handler: async (args) => {
       const tel = await import('../core/telemetry.js')
-      const parts = args.trim().split(/\s+/)
+      const parts = args.trim().split(/\s+/).filter(Boolean)
       const sub = parts[0] ?? 'stats'
       if (sub === 'stats') {
         return text(tel.formatAggregates(tel.getAggregates()))

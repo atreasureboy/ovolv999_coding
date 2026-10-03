@@ -148,7 +148,11 @@ export class FileHistory {
       }
       const validBackups = backups
         .filter((n) => /^v\d+_/.test(n) && !n.endsWith(SIDECAR_SUFFIX))
-        .sort()
+        .sort((a, b) => {
+          const aCounter = Number(/_(\d+)$/.exec(a)?.[1])
+          const bCounter = Number(/_(\d+)$/.exec(b)?.[1])
+          return aCounter - bCounter || a.localeCompare(b)
+        })
       if (validBackups.length === 0) continue
 
       for (const name of validBackups) {

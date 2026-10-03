@@ -351,12 +351,12 @@ function handleOperatorMotion(state: VimState, input: string): VimResult {
     const le = text.indexOf('\n', cursor)
     const realEnd = le === -1 ? text.length : le + 1
     const deleted = text.slice(ls, realEnd)
-    const newText = text.slice(0, ls) + text.slice(realEnd)
+    const newText = op === 'y' ? text : text.slice(0, ls) + text.slice(realEnd)
     return {
       state: {
         ...state,
         text: newText,
-        cursor: Math.min(ls, newText.length - 1),
+        cursor: op === 'y' ? cursor : Math.max(0, Math.min(ls, newText.length - 1)),
         register: deleted,
         registerLinewise: true,
         pendingOperator: undefined,
@@ -478,7 +478,7 @@ function handleInsertMode(state: VimState, input: string, key: { ctrl?: boolean;
       state: {
         ...state,
         text: text.slice(0, cursor) + input + text.slice(cursor),
-        cursor: cursor + 1,
+        cursor: cursor + input.length,
       },
       handled: true,
     }
@@ -503,16 +503,22 @@ export function handleVimKey(
     return { state, handled: false }
   }
 
+  let result: VimResult
   switch (state.mode) {
     case 'normal':
-      return handleNormalMode(state, input)
+      result = handleNormalMode(state, input)
+      break
     case 'insert':
-      return handleInsertMode(state, input, key)
+      result = handleInsertMode(state, input, key)
+      break
     case 'visual':
-      return handleVisualMode(state, input)
+      result = handleVisualMode(state, input)
+      break
     default:
       return { state, handled: false }
   }
+  result.state = { ...result.state, cursor: Math.max(0, Math.min(result.state.cursor, result.state.text.length)) }
+  return result
 }
 
 /** Create initial vim state */

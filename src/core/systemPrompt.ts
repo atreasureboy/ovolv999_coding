@@ -48,9 +48,13 @@ export function getGitStatusInfo(cwd: string): GitStatusInfo {
     cwd, encoding: 'utf8', timeout: 5000, stdio: ['pipe', 'pipe', 'ignore'],
   })
   try {
-    info.branch = git(['rev-parse', '--abbrev-ref', 'HEAD']).trim()
+    try {
+      info.branch = git(['symbolic-ref', '--short', 'HEAD']).trim()
+    } catch {
+      info.branch = git(['rev-parse', '--abbrev-ref', 'HEAD']).trim()
+    }
 
-    info.userName = git(['config', 'user.name']).trim() || null
+    try { info.userName = git(['config', 'user.name']).trim() || null } catch (error) { void error }
 
     const status = git(['status', '--porcelain=v1', '-z'])
 

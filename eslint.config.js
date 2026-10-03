@@ -32,6 +32,14 @@ export default tseslint.config(
     },
   },
   {
+    ...tseslint.configs.disableTypeChecked,
+    files: ['tests/**/*.mjs'],
+    languageOptions: {
+      ...tseslint.configs.disableTypeChecked.languageOptions,
+      globals: { process: 'readonly', Buffer: 'readonly', console: 'readonly', setTimeout: 'readonly' },
+    },
+  },
+  {
     ignores: ['dist/', 'node_modules/', 'tests/fixtures/'],
   },
 )

@@ -288,9 +288,12 @@ export function withVCR<T>(
   options: Partial<VCRConfig> = {},
 ): () => Promise<T> {
   return async () => {
-    const vcr = createVCRFromEnv()
-    // Apply overrides
-    Object.assign(vcr, { config: { ...vcr, ...options } })
+    const vcr = new VCR({
+      mode: (process.env.VCR_MODE ?? 'replay') as VCRMode,
+      fixtureDir: process.env.VCR_DIR ?? 'tests/fixtures/api',
+      strict: process.env.VCR_STRICT !== '0',
+      ...options,
+    })
     return fn(vcr)
   }
 }

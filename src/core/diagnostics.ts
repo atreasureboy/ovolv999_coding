@@ -15,7 +15,7 @@
 
 import { execSync, type ExecSyncOptions } from 'child_process'
 import { existsSync } from 'fs'
-import { join, extname, relative } from 'path'
+import { join, extname, relative, resolve } from 'path'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -143,9 +143,14 @@ function exec(cmd: string, cwd: string, timeout = 60_000): { stdout: string; std
 }
 
 function runTsc(cwd: string): Diagnostic[] {
-  const { stdout, stderr } = exec('npx tsc --noEmit --pretty false', cwd)
-  const output = stdout + stderr
-  return parseTscOutput(output, cwd)
+  return executeDiagnostic('npx tsc --noEmit --pretty false', cwd, 'tsc', output => parseTscOutput(output, cwd))
+}
+
+function executeDiagnostic(command: string, cwd: string, source: string, parse: (output: string) => Diagnostic[], includeStderr = true): Diagnostic[] {
+  const result = exec(command, cwd)
+  const diagnostics = parse(result.stdout + (includeStderr ? result.stderr : ''))
+  if (result.exitCode !== 0 && diagnostics.length === 0) diagnostics.push({ filePath: '<checker>', line: 1, column: 1, severity: 'error', source, message: `${source} checker failed (${result.exitCode ?? 'no exit code'}): ${(result.stderr || result.stdout || 'No diagnostic output was produced').trim().slice(0, 2000)}` })
+  return diagnostics
 }
 
 export function parseTscOutput(output: string, cwd: string): Diagnostic[] {
@@ -161,7 +166,7 @@ export function parseTscOutput(output: string, cwd: string): Diagnostic[] {
     if (m) {
       const [, file, lineStr, colStr, severity, code, message] = m
       diagnostics.push({
-        filePath: relative(cwd, file),
+        filePath: relative(cwd, resolve(cwd, file)),
         line: parseInt(lineStr, 10),
         column: parseInt(colStr, 10),
         severity: severity as DiagnosticSeverity,
@@ -176,8 +181,7 @@ export function parseTscOutput(output: string, cwd: string): Diagnostic[] {
 }
 
 function runEslint(cwd: string): Diagnostic[] {
-  const { stdout } = exec('npx eslint --format json .', cwd)
-  return parseEslintJson(stdout, cwd)
+  return executeDiagnostic('npx eslint --format json .', cwd, 'eslint', output => parseEslintJson(output, cwd), false)
 }
 
 export function parseEslintJson(json: string, _cwd: string): Diagnostic[] {
@@ -215,8 +219,7 @@ export function parseEslintJson(json: string, _cwd: string): Diagnostic[] {
 }
 
 function runBiome(cwd: string): Diagnostic[] {
-  const { stdout } = exec('npx biome check --json 2>/dev/null || npx biome check', cwd)
-  return parseBiomeOutput(stdout, cwd)
+  return executeDiagnostic('npx biome check --json 2>/dev/null || npx biome check', cwd, 'biome', output => parseBiomeOutput(output, cwd), false)
 }
 
 export function parseBiomeOutput(output: string, _cwd: string): Diagnostic[] {
@@ -252,8 +255,7 @@ export function parseBiomeOutput(output: string, _cwd: string): Diagnostic[] {
 }
 
 function runRuff(cwd: string): Diagnostic[] {
-  const { stdout } = exec('ruff check --output-format json .', cwd)
-  return parseRuffJson(stdout, cwd)
+  return executeDiagnostic('ruff check --output-format json .', cwd, 'ruff', output => parseRuffJson(output, cwd), false)
 }
 
 export function parseRuffJson(json: string, _cwd: string): Diagnostic[] {

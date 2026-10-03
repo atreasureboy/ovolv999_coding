@@ -7,6 +7,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { join, resolve } from 'path'
+import { isRecord } from './persistedData.js'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -73,16 +74,38 @@ export function getBudgetPath(cwd: string): string {
   return join(resolve(cwd), '.ovolv999', 'budgets.json')
 }
 
+function dictionary<T>(entries: Iterable<readonly [string, T]> = []): Record<string, T> {
+  return Object.assign(Object.create(null) as Record<string, T>, Object.fromEntries(entries))
+}
+
+function emptyStore(): BudgetStore {
+  return { budgets: dictionary(), usage: dictionary(), resets: dictionary() }
+}
+
 export function loadBudgetStore(cwd: string): BudgetStore {
   const path = getBudgetPath(cwd)
   if (!existsSync(path)) {
-    return { budgets: {}, usage: {}, resets: {} }
+    return emptyStore()
   }
   try {
-    return JSON.parse(readFileSync(path, 'utf8')) as BudgetStore
+    const data: unknown = JSON.parse(readFileSync(path, 'utf8'))
+    if (!isRecord(data)) return emptyStore()
+    const budgets = dictionary(Object.entries(isRecord(data.budgets) ? data.budgets : {}).filter(([name, value]) => isBudgetConfig(value) && value.name === name)) as Record<string, BudgetConfig>
+    const usage = dictionary(Object.entries(isRecord(data.usage) ? data.usage : {}).filter(([, value]) => isRecord(value)).map(([name, value]) => [name, dictionary(Object.entries(value as Record<string, unknown>).filter(([, amount]) => typeof amount === 'number' && Number.isFinite(amount) && amount >= 0))])) as Record<string, Record<string, number>>
+    const resets = dictionary(Object.entries(isRecord(data.resets) ? data.resets : {}).filter(([, value]) => typeof value === 'string')) as Record<string, string>
+    return { budgets, usage, resets }
   } catch {
-    return { budgets: {}, usage: {}, resets: {} }
+    return emptyStore()
   }
+}
+
+function isBudgetConfig(value: unknown): value is BudgetConfig {
+  return isRecord(value) && typeof value.name === 'string' && !!value.name.trim() &&
+    typeof value.type === 'string' && ['tokens', 'cost', 'requests'].includes(value.type) &&
+    typeof value.period === 'string' && ['session', 'daily', 'weekly', 'monthly'].includes(value.period) &&
+    typeof value.limit === 'number' && Number.isFinite(value.limit) && value.limit >= 0 &&
+    typeof value.enforced === 'boolean' && typeof value.enabled === 'boolean' &&
+    typeof value.warningThreshold === 'number' && Number.isFinite(value.warningThreshold) && value.warningThreshold >= 0 && value.warningThreshold <= 1
 }
 
 export function saveBudgetStore(cwd: string, store: BudgetStore): void {
@@ -164,6 +187,7 @@ export function setBudget(
     warningThreshold: config.warningThreshold ?? 0.8,
     enabled: config.enabled ?? true,
   }
+  if (!isBudgetConfig(budget)) throw new Error('Invalid budget configuration')
   store.budgets[budget.name] = budget
   saveBudgetStore(cwd, store)
   return budget
@@ -197,13 +221,16 @@ export function recordUsage(
   amount: number,
   date = new Date(),
 ): BudgetUsage | null {
+  if (!Number.isFinite(amount) || amount < 0) throw new Error('Budget usage amount must be finite and non-negative')
   const store = loadBudgetStore(cwd)
   const config = store.budgets[budgetName]
   if (!config || !config.enabled) return null
 
   const periodKey = getPeriodKey(config.period, date)
   if (!store.usage[budgetName]) store.usage[budgetName] = {}
-  store.usage[budgetName][periodKey] = (store.usage[budgetName][periodKey] ?? 0) + amount
+  const spent = (store.usage[budgetName][periodKey] ?? 0) + amount
+  if (!Number.isFinite(spent)) throw new Error('Budget usage amount exceeds supported range')
+  store.usage[budgetName][periodKey] = spent
 
   // Track reset
   if (!store.resets[budgetName]) {

@@ -90,7 +90,7 @@ function htmlToText(html: string): string {
  * Returns the decoded UTF-8 string. Throws ResponseTooLargeError if cap is
  * hit, or the underlying read error otherwise.
  */
-async function readBodyWithCap(
+export async function readBodyWithCap(
   response: Response,
   signal: AbortSignal | undefined,
   cap: number,
@@ -125,8 +125,12 @@ async function readBodyWithCap(
       // Explicit type — `reader.read()` is typed loosely under our minimal
       // lib config; without this every access on `value` triggers
       // `@typescript-eslint/no-unsafe-*`.
-      const readResult: { value: Uint8Array | undefined; done: boolean } =
-        await reader.read()
+      const readResult: { value: Uint8Array | undefined; done: boolean } = await new Promise((resolve, reject) => {
+        const onAbort = (): void => reject(signal?.reason instanceof Error ? signal.reason : new Error('aborted'))
+        signal?.addEventListener('abort', onAbort, { once: true })
+        reader.read().then(resolve, reject).finally(() => signal?.removeEventListener('abort', onAbort)).catch(() => undefined)
+        if (signal?.aborted) onAbort()
+      })
       const { value, done } = readResult
       if (done) break
       if (!value) continue
@@ -200,6 +204,9 @@ Large pages are truncated — use start_index to paginate.`,
 
     const maxLen = typeof max_length === 'number' ? Math.min(max_length, MAX_CONTENT_LENGTH) : MAX_CONTENT_LENGTH
     const startIdx = typeof start_index === 'number' ? start_index : 0
+    if (!Number.isSafeInteger(maxLen) || maxLen <= 0 || !Number.isSafeInteger(startIdx) || startIdx < 0) {
+      return { content: 'Error: max_length must be a positive integer and start_index a non-negative integer', isError: true }
+    }
 
     // Compose a single AbortController that fires on timeout OR user cancel.
     // Both call-sites MUST abort with a real Error — see the comment at
@@ -236,9 +243,8 @@ Large pages are truncated — use start_index to paginate.`,
         redirect: 'follow',
       })
 
-      clearTimeout(timer)
-
       if (!response.ok) {
+        await response.body?.cancel().catch(() => undefined)
         const status = response.status
         let hint = ''
         if (status === 401 || status === 403) hint = ' Hint: the resource may require authentication or a different User-Agent.'
@@ -258,6 +264,7 @@ Large pages are truncated — use start_index to paginate.`,
       if (contentLengthHeader) {
         const declared = Number(contentLengthHeader)
         if (Number.isFinite(declared) && declared > MAX_CONTENT_LENGTH_HEADER) {
+          await response.body?.cancel().catch(() => undefined)
           return {
             content: `Response too large: Content-Length ${declared} bytes exceeds ${MAX_CONTENT_LENGTH_HEADER} byte cap for ${url}.`,
             isError: true,

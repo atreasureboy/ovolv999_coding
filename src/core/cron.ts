@@ -16,8 +16,9 @@
  * Special: @hourly, @daily, @weekly, @monthly, @yearly, @every <duration>
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, writeFileSync } from 'fs'
 import { join, resolve } from 'path'
+import { isRecord, readPersistedRows } from './persistedData.js'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -77,15 +78,14 @@ const DOW_NAMES: Record<string, number> = {
 }
 
 function parseFieldValue(value: string, name: CronField['name']): number {
-  const numeric = parseInt(value, 10)
-  if (!isNaN(numeric)) return numeric
+  if (/^\d+$/.test(value)) return Number(value)
   const names = name === 'month' ? MONTH_NAMES : name === 'dow' ? DOW_NAMES : undefined
   return names?.[value.toUpperCase()] ?? NaN
 }
 
 function parsePositiveStep(value: string, field: string, name: CronField['name']): number {
-  const step = parseInt(value, 10)
-  if (!Number.isSafeInteger(step) || step <= 0) {
+  const step = Number(value)
+  if (!/^\d+$/.test(value) || !Number.isSafeInteger(step) || step <= 0) {
     throw new CronParseError(`Invalid step in "${field}" for ${name}`)
   }
   return step
@@ -112,16 +112,20 @@ export function parseField(
   const values: number[] = []
 
   for (const part of field.split(',')) {
+    if (part.split('/').length > 2 || part.endsWith('/')) {
+      throw new CronParseError(`Invalid step in "${field}" for ${name}`)
+    }
     // Handle step (e.g., "1-10/2")
     const [rangePart, stepPart] = part.split('/')
     const step = stepPart ? parsePositiveStep(stepPart, field, name) : 1
 
     if (rangePart.includes('-')) {
+      if (rangePart.split('-').length !== 2) throw new CronParseError(`Invalid range "${rangePart}" for ${name}`)
       const [startStr, endStr] = rangePart.split('-')
       const start = parseFieldValue(startStr, name)
       const end = parseFieldValue(endStr, name)
 
-      if (isNaN(start) || isNaN(end)) {
+      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < min || end > (name === 'dow' ? 7 : max)) {
         throw new CronParseError(`Invalid range "${rangePart}" for ${name}`)
       }
       if (start > end) {
@@ -133,7 +137,7 @@ export function parseField(
       }
     } else {
       const val = parseFieldValue(rangePart, name)
-      if (isNaN(val)) {
+      if (!Number.isSafeInteger(val)) {
         throw new CronParseError(`Invalid value "${rangePart}" for ${name}`)
       }
       values.push(val)
@@ -217,6 +221,9 @@ export function parseEveryDuration(expr: string): number {
   }
 
   const durationStr = trimmed.replace(/^@every\s+/i, '').trim()
+  if (!/^(?:\d+[hmsd])+$/i.test(durationStr) && !/^\d+$/.test(durationStr)) {
+    throw new CronParseError(`Invalid duration: ${expr}`)
+  }
   let totalSeconds = 0
   const partRegex = /(\d+)([hmsd])/gi
   let match: RegExpExecArray | null
@@ -240,7 +247,7 @@ export function parseEveryDuration(expr: string): number {
     if (!isNaN(n) && n > 0) totalSeconds = n
   }
 
-  if (totalSeconds <= 0) {
+  if (!Number.isSafeInteger(totalSeconds) || totalSeconds <= 0 || totalSeconds > Number.MAX_SAFE_INTEGER / 1000) {
     throw new CronParseError(`Duration must be positive: ${expr}`)
   }
 
@@ -253,16 +260,17 @@ export function parseEveryDuration(expr: string): number {
  * Calculate the next time a cron expression will fire after `from`.
  */
 export function getNextRun(parsed: ParsedCron, from: Date = new Date()): Date {
+  if (!Number.isFinite(from.getTime())) throw new CronParseError('Invalid starting date')
+  const weekdays = [...new Set(parsed.dow.map(value => value === 7 ? 0 : value))]
   const result = new Date(from)
   result.setSeconds(0, 0)
   result.setMinutes(result.getMinutes() + 1) // Start from next minute
 
   // Determine if dom/dow are restricted (not full range)
   const domRestricted = parsed.dom.length !== 31 // 1-31
-  const dowRestricted = parsed.dow.length !== 7   // 0-6
+  const dowRestricted = weekdays.length !== 7   // 0-6
 
-  // Brute force search (max 1 year ahead)
-  const maxIterations = 366 * 24 * 60 // minutes in a year
+  const maxIterations = 8 * 366 * 24 * 60
   for (let i = 0; i < maxIterations; i++) {
     const minute = result.getMinutes()
     const hour = result.getHours()
@@ -271,28 +279,29 @@ export function getNextRun(parsed: ParsedCron, from: Date = new Date()): Date {
     const dow = result.getDay()
 
     // Check standard fields
-    if (!parsed.minute.includes(minute)) { result.setMinutes(result.getMinutes() + 1); continue }
-    if (!parsed.hour.includes(hour)) { result.setMinutes(result.getMinutes() + 1); continue }
-    if (!parsed.month.includes(month)) { result.setMinutes(result.getMinutes() + 1); continue }
+    if (!parsed.month.includes(month)) { result.setDate(result.getDate() + 1); result.setHours(0, 0, 0, 0); continue }
 
     // DOM/DOW logic (standard cron behavior):
     // If BOTH are restricted: match if EITHER matches
     // If only ONE is restricted: only that one needs to match
     // If NEITHER is restricted: always matches (both are *)
     if (domRestricted && dowRestricted) {
-      if (!parsed.dom.includes(dom) && !parsed.dow.includes(dow)) {
-        result.setMinutes(result.getMinutes() + 1); continue
+      if (!parsed.dom.includes(dom) && !weekdays.includes(dow)) {
+        result.setDate(result.getDate() + 1); result.setHours(0, 0, 0, 0); continue
       }
     } else if (domRestricted) {
-      if (!parsed.dom.includes(dom)) { result.setMinutes(result.getMinutes() + 1); continue }
+      if (!parsed.dom.includes(dom)) { result.setDate(result.getDate() + 1); result.setHours(0, 0, 0, 0); continue }
     } else if (dowRestricted) {
-      if (!parsed.dow.includes(dow)) { result.setMinutes(result.getMinutes() + 1); continue }
+      if (!weekdays.includes(dow)) { result.setDate(result.getDate() + 1); result.setHours(0, 0, 0, 0); continue }
     }
+
+    if (!parsed.hour.includes(hour)) { result.setHours(result.getHours() + 1, 0, 0, 0); continue }
+    if (!parsed.minute.includes(minute)) { result.setMinutes(result.getMinutes() + 1); continue }
 
     return result
   }
 
-  throw new CronParseError('Could not find next run within 1 year')
+  throw new CronParseError('Could not find next run within 8 years')
 }
 
 // ── Store ───────────────────────────────────────────────────────────────────
@@ -302,16 +311,15 @@ export function getSchedulesPath(cwd: string): string {
 }
 
 export function loadSchedules(cwd: string): ScheduleStore {
-  const path = getSchedulesPath(cwd)
-  if (!existsSync(path)) {
-    return { tasks: [] }
-  }
-  try {
-    const raw = readFileSync(path, 'utf8')
-    return JSON.parse(raw) as ScheduleStore
-  } catch {
-    return { tasks: [] }
-  }
+  return { tasks: readPersistedRows(getSchedulesPath(cwd), 'tasks', isScheduledTask) }
+}
+
+function isScheduledTask(value: unknown): value is ScheduledTask {
+  return isRecord(value)
+    && ['id', 'name', 'cron', 'prompt', 'createdAt'].every(key => typeof value[key] === 'string')
+    && ['lastRun', 'nextRun', 'lastResult'].every(key => value[key] === null || typeof value[key] === 'string')
+    && typeof value.enabled === 'boolean'
+    && Number.isSafeInteger(value.runCount) && (value.runCount as number) >= 0
 }
 
 export function saveSchedules(cwd: string, store: ScheduleStore): void {

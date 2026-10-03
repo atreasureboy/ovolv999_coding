@@ -11,7 +11,7 @@
  *   - kitty terminal notifications
  */
 
-import { execSync, type ExecSyncOptions } from 'child_process'
+import { execFileSync, execSync } from 'child_process'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -108,10 +108,10 @@ export function notifyMacOS(opts: NotificationOptions): NotifyResult {
   }
 
   try {
-    execSync(`osascript -e '${parts.join(' ')}'`, {
+    execFileSync('osascript', ['-e', parts.join(' ')], {
       stdio: 'pipe',
       timeout: 5000,
-    } as ExecSyncOptions)
+    })
     return { channel: 'macos', success: true }
   } catch (err) {
     return { channel: 'macos', success: false, error: (err as Error).message }
@@ -128,18 +128,17 @@ function escapeAppleString(s: string): string {
 export function notifyLinux(opts: NotificationOptions): NotifyResult {
   const args = [
     '--app-name=ovolv999',
-    `"${escapeShell(opts.title)}"`,
-    `"${escapeShell(opts.body)}"`,
   ]
   if (opts.subtitle) {
-    args.push(`--hint=string:category:"${escapeShell(opts.subtitle)}"`)
+    args.push(`--hint=string:category:${opts.subtitle}`)
   }
+  args.push('--', opts.title, opts.body)
 
   try {
-    execSync(`notify-send ${args.join(' ')}`, {
+    execFileSync('notify-send', args, {
       stdio: 'pipe',
       timeout: 5000,
-    } as ExecSyncOptions)
+    })
     return { channel: 'linux', success: true }
   } catch (err) {
     return { channel: 'linux', success: false, error: (err as Error).message }
@@ -161,10 +160,10 @@ export function notifyWindows(opts: NotificationOptions): NotifyResult {
   `.trim()
 
   try {
-    execSync(`powershell -NoProfile -Command "${escapePSString(script)}"`, {
+    execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
       stdio: 'pipe',
       timeout: 10000,
-    } as ExecSyncOptions)
+    })
     return { channel: 'windows', success: true }
   } catch (err) {
     return { channel: 'windows', success: false, error: (err as Error).message }
@@ -172,7 +171,7 @@ export function notifyWindows(opts: NotificationOptions): NotifyResult {
 }
 
 function escapePSString(s: string): string {
-  return s.replace(/'/g, "''").replace(/"/g, '`"')
+  return s.replace(/'/g, "''")
 }
 
 /**
@@ -201,10 +200,6 @@ export function notifyKitty(opts: NotificationOptions): NotifyResult {
 export function notifyBell(_opts: NotificationOptions): NotifyResult {
   process.stdout.write('\x07')
   return { channel: 'bell', success: true }
-}
-
-function escapeShell(s: string): string {
-  return s.replace(/["$`\\]/g, '\\$&')
 }
 
 // ── Main Entry Point ────────────────────────────────────────────────────────

@@ -4,11 +4,15 @@ import type { ToolContext } from '../src/core/types.js'
 import { writeFileSync, readFileSync, mkdirSync, rmSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
+import { FileReadState } from '../src/core/fileState.js'
 
 const TEST_DIR = join(tmpdir(), `ovolv999_nb_test_${Date.now()}`)
 
 function makeCtx(): ToolContext {
-  return { cwd: TEST_DIR, permissionMode: 'auto' }
+  const fileState = new FileReadState()
+  const path = join(TEST_DIR, 'test.ipynb')
+  fileState.markFileRead(path, readFileSync(path, 'utf8'))
+  return { cwd: TEST_DIR, permissionMode: 'auto', fileState }
 }
 
 /** Create a test notebook with N code cells */

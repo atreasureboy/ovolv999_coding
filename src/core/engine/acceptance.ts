@@ -87,7 +87,11 @@ export async function acceptRunResult({
         }
       }
     } catch (error) {
-      status = turnAbortController.signal.aborted ? 'cancelled' : 'failed'
+      status =
+        turnAbortController.signal.aborted &&
+        !String(turnAbortController.signal.reason).startsWith('timeout:')
+          ? 'cancelled'
+          : 'failed'
       verification = {
         status: 'failed',
         workspace: config.cwd,

@@ -103,7 +103,7 @@ export function analyzeSession(messages: OpenAIMessage[]): SessionStats {
     estimatedOutputTokens: 0,
     totalTokens: 0,
     totalToolCalls: 0,
-    toolCallsByName: {},
+    toolCallsByName: Object.create(null) as Record<string, number>,
     toolErrors: 0,
     toolSuccessRate: 0,
     filesRead: [],

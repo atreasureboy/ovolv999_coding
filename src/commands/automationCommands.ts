@@ -1,8 +1,9 @@
-import type { Command } from './index.js'
+import { dispatchSlashCommand, type Command, type SlashCommandContext } from './index.js'
 import { text } from './results.js'
 import { ClaudeCodeWorkerManager } from '../core/claudeCodeWorkerManager.js'
 
 let workerManager: ClaudeCodeWorkerManager = new ClaudeCodeWorkerManager()
+const activeWorkflows = new WeakMap<SlashCommandContext, Set<string>>()
 
 export function setWorkerManager(manager: ClaudeCodeWorkerManager): void {
   workerManager = manager
@@ -96,10 +97,35 @@ export const automationCommands: Command[] = [
     aliases: ['wf'],
     description: 'Run or list workflows. Usage: /workflow [list|run <name>|init <name>]',
     handler: async (args, ctx) => {
-      const parts = args.trim().split(/\s+/)
+      const parts = args.trim().split(/\s+/).filter(Boolean)
       const subcommand = parts[0] ?? 'list'
       const { loadWorkflows, loadWorkflow, executeWorkflow, writeSampleWorkflow } =
         await import('../core/workflow.js')
+      const execute = async (workflow: Parameters<typeof executeWorkflow>[0]) => {
+        const active = activeWorkflows.get(ctx) ?? new Set<string>()
+        const key = `${ctx.cwd}\0${workflow.name}`
+        if (active.has(key)) throw new Error(`Recursive workflow: ${workflow.name}`)
+        activeWorkflows.set(ctx, active)
+        active.add(key)
+        try {
+          const result = await executeWorkflow(workflow, {
+            cwd: ctx.cwd,
+            runSlash: async (cmd: string) => {
+              const result = await dispatchSlashCommand(cmd, ctx)
+              if (!result) throw new Error(`Unknown slash command: ${cmd}`)
+              if (result.type === 'text') return result.value
+              if (result.type === 'clear-history') ctx.setHistory([])
+              if (result.type === 'prompt' || result.type === 'exit') throw new Error(`Command ${cmd} requires an interactive turn`)
+              return `(executed: ${cmd})`
+            },
+          })
+          if (!result.success && active.size > 1) throw new Error(result.steps.find(step => !step.success)?.error ?? `Workflow ${workflow.name} failed`)
+          return result
+        } finally {
+          active.delete(key)
+          if (!active.size) activeWorkflows.delete(ctx)
+        }
+      }
       if (subcommand === 'list' || subcommand === '' || !subcommand) {
         const workflows = loadWorkflows(ctx.cwd)
         if (workflows.size === 0) {
@@ -134,21 +160,7 @@ export const automationCommands: Command[] = [
             `Workflow "${name}" not found.${names.length ? `\nAvailable: ${names.join(', ')}` : ''}`,
           )
         }
-        const result = await executeWorkflow(wf, {
-          cwd: ctx.cwd,
-          runSlash: async (cmd: string) => {
-            const dispatch = (
-              ctx as unknown as {
-                dispatchSlash?: (s: string) => Promise<boolean>
-              }
-            ).dispatchSlash
-            if (typeof dispatch === 'function') {
-              await dispatch(cmd)
-              return `(executed: ${cmd})`
-            }
-            return `(slash not available: ${cmd})`
-          },
-        })
+        const result = await execute(wf)
         const lines: string[] = [
           `Workflow "${result.workflowName}" ${result.success ? '✓ completed' : '✗ failed'} (${result.durationMs}ms)`,
           '',
@@ -165,9 +177,9 @@ export const automationCommands: Command[] = [
       }
       const wf = loadWorkflow(ctx.cwd, subcommand)
       if (wf) {
-        const result = await executeWorkflow(wf, { cwd: ctx.cwd })
+        const result = await execute(wf)
         return text(
-          `Workflow "${result.workflowName}" ${result.success ? '✓' : '✗'} — ${result.steps.length} steps in ${result.durationMs}ms`,
+          `Workflow "${result.workflowName}" ${result.success ? '✓ completed' : '✗ failed'} — ${result.steps.length} steps in ${result.durationMs}ms\n${result.steps.map(step => `  ${step.name}: ${step.output || step.error || ''}`).join('\n')}`,
         )
       }
       return text(
@@ -180,7 +192,7 @@ export const automationCommands: Command[] = [
     description: 'Test desktop notification. Usage: /notify [title] [body]',
     handler: async (args) => {
       const { notify } = await import('../utils/notifier.js')
-      const parts = args.trim().split(/\s+/)
+      const parts = args.trim().split(/\s+/).filter(Boolean)
       const title = parts[0] ?? 'ovolv999'
       const body = parts.slice(1).join(' ') || 'Notification test'
       const result = notify({ title, body, sound: true })
@@ -196,7 +208,7 @@ export const automationCommands: Command[] = [
     description:
       'Manage scheduled tasks. Usage: /schedule [list|create <cron> <prompt>|remove <id>|enable <id>|disable <id>]',
     handler: async (args, ctx) => {
-      const parts = args.trim().split(/\s+/)
+      const parts = args.trim().split(/\s+/).filter(Boolean)
       const subcommand = parts[0] ?? 'list'
       const {
         loadSchedules,
@@ -215,7 +227,7 @@ export const automationCommands: Command[] = [
       }
       if (subcommand === 'create' || subcommand === 'add') {
         const remaining = args.trim().slice(parts[0].length).trim()
-        const cronMatch = remaining.match(/^(@\w+|"[^"]+"|\S+)\s+(.*)$/)
+        const cronMatch = remaining.match(/^(@every\s+\S+|@\w+|"[^"]+"|\S+)\s+(.*)$/)
         if (!cronMatch) {
           return text(
             'Usage: /schedule create <cron> <prompt>\nExample: /schedule create "0 9 * * 1-5" "run tests"',
@@ -281,7 +293,7 @@ export const automationCommands: Command[] = [
         formatTimerList,
         formatTimerStats,
       } = await import('../core/taskTimer.js')
-      const parts = args.trim().split(/\s+/)
+      const parts = args.trim().split(/\s+/).filter(Boolean)
       const sub = parts[0] ?? 'list'
       if (sub === 'start') {
         const name = parts.slice(1).join(' ')
@@ -352,7 +364,7 @@ export const automationCommands: Command[] = [
         formatGoalList,
         deleteGoal,
       } = await import('../core/goals.js')
-      const parts = args.trim().split(/\s+/)
+      const parts = args.trim().split(/\s+/).filter(Boolean)
       const sub = parts[0] ?? 'list'
       if (sub === 'list' || sub === 'ls') {
         return text(formatGoalList(listGoals()))

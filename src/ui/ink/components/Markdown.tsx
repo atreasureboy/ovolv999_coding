@@ -341,29 +341,14 @@ import { useMemo, useRef } from 'react'
  */
 function splitStableBlocks(text: string): { stableText: string; growingText: string } {
   const lines = text.split('\n')
-  // Walk backward to find a safe split point — a blank line or before a
-  // block-level delimiter (```, #, >, ---, list marker)
   let splitLine = 0
-  for (let i = lines.length - 1; i > 0; i--) {
+  let inFence = false
+  for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
-    const prevLine = lines[i - 1]
-    // Split before a blank line that's followed by content
-    if (prevLine.trim() === '' && line.trim() !== '') {
-      splitLine = i
-      break
-    }
-    // Split before a code block start
-    if (line.trim().startsWith('```')) {
-      splitLine = i
-      break
-    }
-    // Split before a header
-    if (/^#{1,4}\s/.test(line)) {
-      splitLine = i
-      break
-    }
+    const fence = line.trim().startsWith('```')
+    if (!inFence && i > 0 && (fence || /^#{1,4}\s/.test(line) || (lines[i - 1].trim() === '' && line.trim() !== ''))) splitLine = i
+    if (fence) inFence = !inFence
   }
-
   if (splitLine === 0) {
     return { stableText: '', growingText: text }
   }

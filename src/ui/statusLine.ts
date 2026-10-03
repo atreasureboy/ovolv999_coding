@@ -4,7 +4,7 @@
  * Rich status bar showing model, tokens, cost, git branch, mode, and more.
  */
 
-import { ansiLength, truncate, ANSI } from '../utils/ansi.js'
+import { ansiLength, truncateAnsi, ANSI } from '../utils/ansi.js'
 import { getActiveTheme } from './theme.js'
 
 // ── Types ───────────────────────────────────────────────────────────────────
@@ -156,8 +156,8 @@ function fitSegments(
   if (totalWidth > maxWidth && result.length > 0) {
     const overflow = totalWidth - maxWidth
     const last = result[result.length - 1]
-    const newWidth = Math.max(4, last.width - overflow)
-    last.text = truncate(last.text, newWidth)
+    const newWidth = Math.max(0, last.width - overflow)
+    last.text = truncateAnsi(last.text, newWidth)
     last.width = newWidth
   }
 

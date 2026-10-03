@@ -14,9 +14,10 @@
  *   - attempts: iteration count
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
+import { existsSync, writeFileSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
+import { isRecord, isStringArray, readPersistedRows } from './persistedData.js'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -53,6 +54,7 @@ export interface GoalStore {
 
 const goals = new Map<string, Goal>()
 let initialized = false
+let loadedPath: string | undefined
 
 function getStorePath(): string {
   const override = process.env.OVOLV999_TEST_STORE_DIR
@@ -61,17 +63,33 @@ function getStorePath(): string {
 }
 
 function loadStore(): void {
-  if (initialized) return
-  initialized = true
   const path = getStorePath()
+  if (initialized && loadedPath === path) return
+  goals.clear()
+  loadedPath = path
+  initialized = true
   if (!existsSync(path)) return
   try {
-    const raw = readFileSync(path, 'utf8')
-    const store = JSON.parse(raw) as GoalStore
-    for (const g of store.goals ?? []) {
+    for (const g of readPersistedRows(path, 'goals', isGoal)) {
       goals.set(g.id, g)
     }
   } catch { /* corrupt store */ }
+}
+
+function isGoal(value: unknown): value is Goal {
+  if (!isRecord(value)) return false
+  return typeof value.id === 'string' && typeof value.objective === 'string'
+    && typeof value.status === 'string' && ['pending', 'in_progress', 'completed', 'failed', 'paused'].includes(value.status)
+    && Array.isArray(value.subtasks) && value.subtasks.every(task => isRecord(task)
+      && typeof task.id === 'string' && typeof task.description === 'string'
+      && typeof task.status === 'string' && ['pending', 'in_progress', 'done', 'skipped', 'failed'].includes(task.status)
+      && Number.isSafeInteger(task.attempts) && Number(task.attempts) >= 0)
+    && isStringArray(value.context) && isStringArray(value.tags)
+    && Number.isSafeInteger(value.attempts) && Number(value.attempts) >= 0
+    && Number.isSafeInteger(value.maxAttempts) && Number(value.maxAttempts) > 0
+    && typeof value.priority === 'string' && ['low', 'medium', 'high', 'critical'].includes(value.priority)
+    && typeof value.createdAt === 'string' && typeof value.updatedAt === 'string'
+    && (value.completedAt === undefined || typeof value.completedAt === 'string')
 }
 
 function saveStore(): void {
@@ -85,6 +103,7 @@ function saveStore(): void {
 export function resetGoalStore(): void {
   goals.clear()
   initialized = false
+  loadedPath = undefined
   // In test mode, also clear the store file so tests start fresh
   if (process.env.OVOLV999_TEST_STORE_DIR) {
     try {
@@ -130,6 +149,7 @@ export function createGoal(
     tags: options.tags ?? [],
   }
 
+  if (!isGoal(goal)) throw new Error('Invalid goal configuration')
   goals.set(id, goal)
   saveStore()
   return goal
@@ -160,7 +180,10 @@ export function updateGoal(id: string, updates: Partial<Goal>): Goal | undefined
   loadStore()
   const goal = goals.get(id)
   if (!goal) return undefined
-  Object.assign(goal, updates, { updatedAt: new Date().toISOString() })
+  const provided = Object.fromEntries(Object.entries(updates).filter(([, value]) => value !== undefined))
+  const updated = { ...goal, ...provided, id: goal.id, createdAt: goal.createdAt, updatedAt: new Date().toISOString() }
+  if (!isGoal(updated)) return undefined
+  Object.assign(goal, updated)
   goals.set(id, goal)
   saveStore()
   return goal
@@ -200,8 +223,12 @@ export function updateSubtask(
   if (!goal) return undefined
   const subtask = goal.subtasks.find(s => s.id === subtaskId)
   if (!subtask) return undefined
-  Object.assign(subtask, updates)
-  subtask.attempts = (updates.status && updates.status !== subtask.status) ? subtask.attempts + 1 : subtask.attempts
+  const enteringAttempt = updates.status === 'in_progress' && subtask.status !== 'in_progress'
+  const provided = Object.fromEntries(Object.entries(updates).filter(([, value]) => value !== undefined))
+  const updated = { ...subtask, ...provided, id: subtask.id }
+  if (!isGoal({ ...goal, subtasks: goal.subtasks.map(task => task === subtask ? updated : task) })) return undefined
+  Object.assign(subtask, updated)
+  if (enteringAttempt && updates.attempts === undefined) subtask.attempts++
   goal.updatedAt = new Date().toISOString()
   goals.set(goalId, goal)
   saveStore()

@@ -7,7 +7,8 @@
 
 import { execSync } from 'child_process'
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
-import { join } from 'path'
+import { dirname, join } from 'path'
+import { fileURLToPath } from 'url'
 import { homedir } from 'os'
 
 // ── Types ───────────────────────────────────────────────────────────────────
@@ -34,19 +35,35 @@ export type UpdateChannel = 'latest' | 'beta' | 'next'
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
-const PACKAGE_NAME = 'ovolv999'
+const PACKAGE_NAME = 'ovogogogo'
 const REGISTRY_URL = 'https://registry.npmjs.org'
 
 // ── Version Helpers ─────────────────────────────────────────────────────────
 
+export function getPackageRoot(startDirectory = dirname(fileURLToPath(import.meta.url))): string | null {
+  let directory = startDirectory
+  while (true) {
+    try {
+      const pkgPath = join(directory, 'package.json')
+      if (existsSync(pkgPath)) {
+        const pkg: unknown = JSON.parse(readFileSync(pkgPath, 'utf8'))
+        if (pkg && typeof pkg === 'object' && 'name' in pkg && pkg.name === PACKAGE_NAME) return directory
+      }
+    } catch (error) { void error }
+    const parent = dirname(directory)
+    if (parent === directory) break
+    directory = parent
+  }
+  return null
+}
+
 export function getCurrentVersion(): string {
+  const directory = getPackageRoot()
+  if (!directory) return '0.0.0'
   try {
-    const pkgPath = join(process.cwd(), 'package.json')
-    if (existsSync(pkgPath)) {
-      const pkg: unknown = JSON.parse(readFileSync(pkgPath, 'utf8'))
-      if (pkg && typeof pkg === 'object' && 'version' in pkg && typeof pkg.version === 'string') return pkg.version
-    }
-  } catch { /* ignore */ }
+    const pkg: unknown = JSON.parse(readFileSync(join(directory, 'package.json'), 'utf8'))
+    if (pkg && typeof pkg === 'object' && 'version' in pkg && typeof pkg.version === 'string') return pkg.version
+  } catch (error) { void error }
   return '0.0.0'
 }
 
@@ -70,7 +87,20 @@ export function compareVersions(a: string, b: string): number {
   // Prerelease versions are LOWER than non-prerelease
   if (va.prerelease && !vb.prerelease) return -1
   if (!va.prerelease && vb.prerelease) return 1
-  if (va.prerelease && vb.prerelease) return va.prerelease.localeCompare(vb.prerelease)
+  if (va.prerelease && vb.prerelease) {
+    const left = va.prerelease.split('.')
+    const right = vb.prerelease.split('.')
+    for (let index = 0; index < Math.max(left.length, right.length); index++) {
+      if (left[index] === undefined) return -1
+      if (right[index] === undefined) return 1
+      if (left[index] === right[index]) continue
+      const numericLeft = /^\d+$/.test(left[index])
+      const numericRight = /^\d+$/.test(right[index])
+      if (numericLeft && numericRight) return Number(left[index]) - Number(right[index])
+      if (numericLeft !== numericRight) return numericLeft ? -1 : 1
+      return left[index] < right[index] ? -1 : 1
+    }
+  }
   return 0
 }
 

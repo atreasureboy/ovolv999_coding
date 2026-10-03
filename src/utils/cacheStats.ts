@@ -60,7 +60,12 @@ function loadEntries(): void {
   const path = getCachePath()
   if (!existsSync(path)) return
   try {
-    entries = JSON.parse(readFileSync(path, 'utf8')) as CacheEntry[]
+    const stored: unknown = JSON.parse(readFileSync(path, 'utf8'))
+    entries = Array.isArray(stored) ? stored.filter((entry: unknown): entry is CacheEntry =>
+      entry !== null && typeof entry === 'object' && 'timestamp' in entry && typeof entry.timestamp === 'string' &&
+      'model' in entry && typeof entry.model === 'string' && 'cacheHit' in entry && typeof entry.cacheHit === 'boolean' &&
+      ['cacheReadTokens', 'cacheWriteTokens', 'inputTokens', 'outputTokens', 'costSaved'].every(field => Number.isFinite((entry as Record<string, unknown>)[field])),
+    ).slice(-MAX_ENTRIES) : []
   } catch {
     entries = []
   }
@@ -125,7 +130,7 @@ export function getCacheStats(timeWindowMs?: number): CacheStats {
     relevant = entries.filter(e => new Date(e.timestamp).getTime() >= cutoff)
   }
 
-  const byModel: Record<string, ModelCacheStats> = {}
+  const byModel: Record<string, ModelCacheStats> = Object.create(null) as Record<string, ModelCacheStats>
   let totalRequests = 0
   let cacheHits = 0
   let cacheMisses = 0

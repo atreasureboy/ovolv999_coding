@@ -7,7 +7,7 @@
  */
 
 import { spawnSync } from 'child_process'
-import { writeFileSync, readFileSync, unlinkSync, existsSync } from 'fs'
+import { writeFileSync, readFileSync, unlinkSync, existsSync, rmdirSync } from 'fs'
 import { mkdtempSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -26,6 +26,8 @@ import { join } from 'path'
  */
 export function openInEditor(initialContent?: string): string | null {
   const editor = process.env.VISUAL || process.env.EDITOR || 'vi'
+  const command = existsSync(editor) ? [editor] : (editor.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? []).map(part => part.replace(/(["'])(.*?)\1/g, '$2'))
+  if (command.length === 0) return null
 
   // Create temp file
   const tmpDir = mkdtempSync(join(tmpdir(), 'ovolv999-edit-'))
@@ -36,7 +38,7 @@ export function openInEditor(initialContent?: string): string | null {
 
     // Spawn editor synchronously — the calling code must have already
     // disabled raw mode so the editor can take over the terminal.
-    const result = spawnSync(editor, [tmpFile], {
+    const result = spawnSync(command[0], [...command.slice(1), tmpFile], {
       stdio: 'inherit',
       env: process.env,
     })
@@ -54,7 +56,7 @@ export function openInEditor(initialContent?: string): string | null {
   } finally {
     try {
       if (existsSync(tmpFile)) unlinkSync(tmpFile)
-      unlinkSync(tmpDir)
+      rmdirSync(tmpDir)
     } catch {
       // Best-effort cleanup
     }

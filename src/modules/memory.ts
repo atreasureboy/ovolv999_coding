@@ -12,7 +12,6 @@ import type { Tool, ToolDefinition, ToolResult } from '../core/types.js'
 import type { AgentModule, ModuleBootContext, ModuleBootResult } from '../core/module.js'
 import type { SemanticMemory } from '../core/semanticMemory.js'
 import type { EpisodicMemory } from '../core/episodicMemory.js'
-import { getMemoryDir, buildMemorySystemSection } from '../memory/index.js'
 import { str } from '../core/strings.js'
 
 // (Source priority lives in semanticMemory.ts — single source of truth)
@@ -305,8 +304,14 @@ export class MemoryModule implements AgentModule {
 
     // Fallback: if no user message or no relevant entries, use confidence-based injection
     if (!section) {
-      const memoryDir = getMemoryDir(ctx.cwd)
-      section = buildMemorySystemSection(memoryDir)
+      const top = [...allEntries].sort((a, b) => b.confidence - a.confidence).slice(0, 20)
+      if (top.length > 0) {
+        const lines = top.map(entry => {
+          const tags = entry.tags.length > 0 ? ` [${entry.tags.join(', ')}]` : ''
+          return `- (claimed ${entry.source}; ${entry.provenance?.status ?? 'unverified'}) ${entry.content}${tags}`
+        })
+        section = `## Memory — Cross-Turn Knowledge\n\nThe following knowledge entries were saved from previous sessions. Use them as context, but verify if uncertain.\n\n${lines.join('\n')}`
+      }
     }
 
     return {

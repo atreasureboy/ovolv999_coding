@@ -46,7 +46,7 @@ const GROUPS: ShortcutGroup[] = [
       { key: '/resume', desc: 'Interactive session resume' },
       { key: '/compact', desc: 'Compact conversation context' },
       { key: '/clear', desc: 'Clear conversation history' },
-      { key: '/snip N', desc: 'Snip old messages (keep N recent)' },
+      { key: '/snippet', desc: 'Manage saved code snippets (/snip alias)' },
       { key: '/copy', desc: 'Copy last reply to clipboard' },
       { key: '/retry', desc: 'Retry last user prompt' },
       { key: '/plan', desc: 'Enter plan mode (read-only analysis)' },

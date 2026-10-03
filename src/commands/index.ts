@@ -67,11 +67,20 @@ export interface Command {
 // ── Registry ────────────────────────────────────────────────────────────────
 
 const registry = new Map<string, Command>()
+const registryOwners = new Map<string, string>()
 
 export function registerCommand(cmd: Command): void {
+  for (const [name, owner] of registryOwners) {
+    if (owner === cmd.name) {
+      registry.delete(name)
+      registryOwners.delete(name)
+    }
+  }
   registry.set(cmd.name, cmd)
+  registryOwners.set(cmd.name, cmd.name)
   for (const alias of cmd.aliases ?? []) {
     registry.set(alias, { ...cmd, name: alias })
+    registryOwners.set(alias, cmd.name)
   }
 }
 
@@ -94,6 +103,7 @@ export function listCommands(): Command[] {
 
 export function clearRegistry(): void {
   registry.clear()
+  registryOwners.clear()
 }
 
 // ── Dispatcher ──────────────────────────────────────────────────────────────

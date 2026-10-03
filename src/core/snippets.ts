@@ -5,8 +5,9 @@
  * Supports categories, tags, variables/placeholders, and search.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, writeFileSync } from 'fs'
 import { join, resolve } from 'path'
+import { isRecord, isStringArray, readPersistedRows } from './persistedData.js'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -48,13 +49,20 @@ export function getSnippetPath(cwd: string): string {
 }
 
 export function loadSnippets(cwd: string): SnippetStore {
-  const path = getSnippetPath(cwd)
-  if (!existsSync(path)) return { snippets: [] }
-  try {
-    return JSON.parse(readFileSync(path, 'utf8')) as SnippetStore
-  } catch {
-    return { snippets: [] }
-  }
+  return { snippets: readPersistedRows(getSnippetPath(cwd), 'snippets', isSnippet) }
+}
+
+function isSnippet(value: unknown): value is Snippet {
+  if (!isRecord(value)) return false
+  return typeof value.id === 'string' && typeof value.name === 'string'
+    && typeof value.language === 'string' && typeof value.body === 'string'
+    && isStringArray(value.variables) && typeof value.favorite === 'boolean'
+    && typeof value.useCount === 'number' && Number.isFinite(value.useCount)
+    && typeof value.createdAt === 'string'
+    && (value.lastUsed === null || typeof value.lastUsed === 'string')
+    && (value.description === undefined || typeof value.description === 'string')
+    && (value.category === undefined || typeof value.category === 'string')
+    && (value.tags === undefined || isStringArray(value.tags))
 }
 
 export function saveSnippets(cwd: string, store: SnippetStore): void {
@@ -76,7 +84,7 @@ export function extractVariables(body: string): string[] {
 }
 
 export function fillSnippet(body: string, values: Record<string, string>): string {
-  return body.replace(/\{\{(\w+)\}\}/g, (_, name: string) => values[name] ?? `{{${name}}}`)
+  return body.replace(/\{\{(\w+)\}\}/g, (_, name: string) => Object.hasOwn(values, name) ? values[name] : `{{${name}}}`)
 }
 
 // ── CRUD ────────────────────────────────────────────────────────────────────
@@ -247,9 +255,9 @@ export function getSnippetStats(cwd: string): SnippetStats {
   const store = loadSnippets(cwd)
   const snippets = store.snippets
 
-  const byCategory: Record<string, number> = {}
-  const byLanguage: Record<string, number> = {}
-  const byTag: Record<string, number> = {}
+  const byCategory = Object.create(null) as Record<string, number>
+  const byLanguage = Object.create(null) as Record<string, number>
+  const byTag = Object.create(null) as Record<string, number>
 
   for (const s of snippets) {
     if (s.category) byCategory[s.category] = (byCategory[s.category] ?? 0) + 1

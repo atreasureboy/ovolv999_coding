@@ -13,17 +13,14 @@
  *   4. TmuxSession({ action: "capture", session: "python", lines: 10 })
  */
 
-import { exec as execCb } from 'child_process'
-import { promisify } from 'util'
 import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/types.js'
 import { str } from '../core/strings.js'
-
-const exec = promisify(execCb)
+import { assertExecutionProfile, execManaged } from '../core/executionBackend.js'
 
 /** Run a tmux sub-command and return stdout+stderr */
-async function tmux(args: string): Promise<string> {
+async function tmux(args: string[], context: ToolContext): Promise<string> {
   try {
-    const { stdout, stderr } = await exec(`tmux ${args}`)
+    const { stdout, stderr } = await execManaged('tmux', args, { cwd: context.cwd, profile: context.executionProfile, signal: context.signal, timeoutMs: 5000 })
     return (stdout + stderr).trim()
   } catch (e: unknown) {
     const err = e as { stdout?: string; stderr?: string; message?: string }
@@ -33,18 +30,13 @@ async function tmux(args: string): Promise<string> {
 }
 
 /** Check if a tmux session exists */
-async function sessionExists(name: string): Promise<boolean> {
+async function sessionExists(name: string, context: ToolContext): Promise<boolean> {
   try {
-    await exec(`tmux has-session -t ${shellEsc(name)} 2>/dev/null`)
+    await tmux(['has-session', '-t', name], context)
     return true
   } catch {
     return false
   }
-}
-
-/** Shell-escape a single argument (wrap in single quotes, escape internal single quotes) */
-function shellEsc(s: string): string {
-  return `'${s.replace(/'/g, "'\\''")}'`
 }
 
 /** Split text into ≤50-char chunks for safe send-keys paste */
@@ -58,7 +50,7 @@ function chunkText(text: string, size = 50): string[] {
 
 export class TmuxSessionTool implements Tool {
   name = 'TmuxSession'
-  metadata = { mutatesState: true, concurrencySafe: true, longRunning: true }
+  metadata = { mutatesState: true, concurrencySafe: false, longRunning: true }
 
   definition: ToolDefinition = {
     type: 'function',
@@ -140,14 +132,21 @@ TmuxSession({ action: "capture", session: "py", lines: 5 })
   }
 
   async execute(input: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+    try {
+      context.signal?.throwIfAborted()
+      assertExecutionProfile(context.executionProfile)
+      if (context.executionProfile?.envAllowlist) throw new Error('Persistent tmux environment cannot be verified against an allowlist; execution refused')
+    } catch (error) {
+      return { content: `TmuxSession error: ${(error as Error).message}`, isError: true, status: context.signal?.aborted ? 'cancelled' : 'blocked' }
+    }
     switch (String(input.action)) {
-      case 'new':      return this._new(input)
-      case 'send':     return this._send(input)
-      case 'keys':     return this._keys(input)
-      case 'capture':  return this._capture(input)
+      case 'new':      return this._new(input, context)
+      case 'send':     return this._send(input, context)
+      case 'keys':     return this._keys(input, context)
+      case 'capture':  return this._capture(input, context)
       case 'wait_for': return this._waitFor(input, context)
-      case 'list':     return this._list()
-      case 'kill':     return this._kill(input)
+      case 'list':     return this._list(context)
+      case 'kill':     return this._kill(input, context)
       default:
         return { content: `Unknown action "${str(input.action)}". Use: new | send | keys | capture | wait_for | list | kill`, isError: true }
     }
@@ -155,21 +154,22 @@ TmuxSession({ action: "capture", session: "py", lines: 5 })
 
   // ── new ───────────────────────────────────────────────────────────────────
 
-  private async _new(input: Record<string, unknown>): Promise<ToolResult> {
+  private async _new(input: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
     const name    = str(input.session, `ovo-${Date.now()}`)
     const command = str(input.command)
 
-    if (await sessionExists(name)) {
+    if (await sessionExists(name, context)) {
       return { content: `Session "${name}" already exists. Use capture to check its state, or kill to recreate.`, isError: false }
     }
 
     try {
       if (command) {
         // new-session -d (detached), -s name, then run command in the shell
-        await tmux(`new-session -d -s ${shellEsc(name)}`)
-        await tmux(`send-keys -t ${shellEsc(name)} ${shellEsc(command)} Enter`)
+        await tmux(['new-session', '-d', '-s', name, '-c', context.cwd], context)
+        await tmux(['send-keys', '-t', name, '-l', '--', command], context)
+        await tmux(['send-keys', '-t', name, 'Enter'], context)
       } else {
-        await tmux(`new-session -d -s ${shellEsc(name)}`)
+        await tmux(['new-session', '-d', '-s', name, '-c', context.cwd], context)
       }
 
       return {
@@ -191,14 +191,14 @@ TmuxSession({ action: "capture", session: "py", lines: 5 })
 
   // ── send ──────────────────────────────────────────────────────────────────
 
-  private async _send(input: Record<string, unknown>): Promise<ToolResult> {
+  private async _send(input: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
     const name = str(input.session)
     const text = str(input.text)
 
     if (!name) return { content: 'Error: session is required for send', isError: true }
     if (!text) return { content: 'Error: text is required for send', isError: true }
 
-    if (!await sessionExists(name)) {
+    if (!await sessionExists(name, context)) {
       return { content: `Session "${name}" not found. Use: TmuxSession({ action: "list" })`, isError: true }
     }
 
@@ -206,10 +206,10 @@ TmuxSession({ action: "capture", session: "py", lines: 5 })
       // Split into chunks to avoid paste overflow
       const chunks = chunkText(text)
       for (const chunk of chunks) {
-        await tmux(`send-keys -t ${shellEsc(name)} -l -- ${shellEsc(chunk)}`)
+        await tmux(['send-keys', '-t', name, '-l', '--', chunk], context)
       }
       // Send Enter separately
-      await tmux(`send-keys -t ${shellEsc(name)} Enter`)
+      await tmux(['send-keys', '-t', name, 'Enter'], context)
 
       return {
         content: `Sent to "${name}": ${text.length > 80 ? text.slice(0, 80) + '…' : text}\nUse capture to see output.`,
@@ -222,19 +222,20 @@ TmuxSession({ action: "capture", session: "py", lines: 5 })
 
   // ── keys ──────────────────────────────────────────────────────────────────
 
-  private async _keys(input: Record<string, unknown>): Promise<ToolResult> {
+  private async _keys(input: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
     const name = str(input.session)
     const key  = str(input.key)
 
     if (!name) return { content: 'Error: session is required for keys', isError: true }
     if (!key)  return { content: 'Error: key is required for keys (e.g. C-c, C-d, Escape, Enter)', isError: true }
 
-    if (!await sessionExists(name)) {
+    if (!/^[A-Za-z0-9_ -]+$/.test(key)) return { content: 'Error: invalid special key names', isError: true }
+    if (!await sessionExists(name, context)) {
       return { content: `Session "${name}" not found. Use: TmuxSession({ action: "list" })`, isError: true }
     }
 
     try {
-      await tmux(`send-keys -t ${shellEsc(name)} ${key}`)
+      await tmux(['send-keys', '-t', name, '--', ...key.trim().split(/\s+/)], context)
       return { content: `Sent key "${key}" to "${name}".`, isError: false }
     } catch (e) {
       return { content: `Failed to send keys to "${name}": ${(e as Error).message}`, isError: true }
@@ -243,13 +244,14 @@ TmuxSession({ action: "capture", session: "py", lines: 5 })
 
   // ── capture ───────────────────────────────────────────────────────────────
 
-  private async _capture(input: Record<string, unknown>): Promise<ToolResult> {
+  private async _capture(input: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
     const name  = str(input.session)
     const lines = input.lines !== undefined ? Number(input.lines) : 50
 
     if (!name) return { content: 'Error: session is required for capture', isError: true }
 
-    if (!await sessionExists(name)) {
+    if (!Number.isSafeInteger(lines) || lines < 0) return { content: 'Error: lines must be a non-negative integer', isError: true }
+    if (!await sessionExists(name, context)) {
       return { content: `Session "${name}" not found. Use: TmuxSession({ action: "list" })`, isError: true }
     }
 
@@ -257,10 +259,10 @@ TmuxSession({ action: "capture", session: "py", lines: 5 })
       let output: string
       if (lines === 0) {
         // Full history
-        output = await tmux(`capture-pane -t ${shellEsc(name)} -p -S -`)
+        output = await tmux(['capture-pane', '-t', name, '-p', '-S', '-'], context)
       } else {
         // Last N lines — capture only what we need (avoid pulling full history)
-        output = await tmux(`capture-pane -t ${shellEsc(name)} -p -S -${lines}`)
+        output = await tmux(['capture-pane', '-t', name, '-p', '-S', `-${lines}`], context)
       }
 
       return {
@@ -290,7 +292,8 @@ TmuxSession({ action: "capture", session: "py", lines: 5 })
       return { content: 'wait_for cancelled (signal already aborted).', isError: true }
     }
 
-    if (!await sessionExists(name)) {
+    if (!Number.isFinite(timeout) || timeout <= 0 || !Number.isFinite(interval) || interval <= 0) return { content: 'Error: timeout and interval must be positive finite numbers', isError: true }
+    if (!await sessionExists(name, context)) {
       return { content: `Session "${name}" not found. Use: TmuxSession({ action: "list" })`, isError: true }
     }
 
@@ -313,7 +316,7 @@ TmuxSession({ action: "capture", session: "py", lines: 5 })
       }
 
       try {
-        const raw = await tmux(`capture-pane -t ${shellEsc(name)} -p -S -`)
+        const raw = await tmux(['capture-pane', '-t', name, '-p', '-S', '-'], context)
         lastOutput = raw
 
         if (regex.test(raw)) {
@@ -332,10 +335,10 @@ TmuxSession({ action: "capture", session: "py", lines: 5 })
       // this a Ctrl+C fired during the sleep would only take effect on
       // the *next* capture, blowing past the user's intent.
       if (signal) {
-        const aborted = await this._sleepWithAbort(interval, signal)
+        const aborted = await this._sleepWithAbort(Math.min(interval, Math.max(0, deadline - Date.now())), signal)
         if (aborted) return { content: 'wait_for cancelled.', isError: true }
       } else {
-        await new Promise(r => setTimeout(r, interval))
+        await new Promise(r => setTimeout(r, Math.min(interval, Math.max(0, deadline - Date.now()))))
       }
     }
 
@@ -379,30 +382,34 @@ TmuxSession({ action: "capture", session: "py", lines: 5 })
 
   // ── list ──────────────────────────────────────────────────────────────────
 
-  private async _list(): Promise<ToolResult> {
+  private async _list(context: ToolContext): Promise<ToolResult> {
     try {
-      const output = await tmux('list-sessions')
+      const output = await tmux(['list-sessions'], context)
       if (!output) {
         return { content: 'No active tmux sessions.\nCreate one: TmuxSession({ action: "new", session: "py", command: "python3" })', isError: false }
       }
       return { content: `Active tmux sessions:\n${output}`, isError: false }
-    } catch {
+    } catch (error) {
+      if (context.signal?.aborted) return { content: 'TmuxSession cancelled.', isError: true, status: 'cancelled' }
+      if (!(error as Error).message.includes('no server running') && !(error as Error).message.includes('failed to connect to server')) {
+        return { content: `Failed to list tmux sessions: ${(error as Error).message}`, isError: true }
+      }
       return { content: 'No active tmux sessions (tmux server not running).\nCreate one: TmuxSession({ action: "new", session: "py", command: "python3" })', isError: false }
     }
   }
 
   // ── kill ──────────────────────────────────────────────────────────────────
 
-  private async _kill(input: Record<string, unknown>): Promise<ToolResult> {
+  private async _kill(input: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
     const name = str(input.session)
     if (!name) return { content: 'Error: session is required for kill', isError: true }
 
-    if (!await sessionExists(name)) {
+    if (!await sessionExists(name, context)) {
       return { content: `Session "${name}" not found.`, isError: true }
     }
 
     try {
-      await tmux(`kill-session -t ${shellEsc(name)}`)
+      await tmux(['kill-session', '-t', name], context)
       return { content: `Session "${name}" killed.`, isError: false }
     } catch (e) {
       return { content: `Failed to kill "${name}": ${(e as Error).message}`, isError: true }

@@ -16,6 +16,7 @@ import { join } from 'path'
 import { homedir } from 'os'
 import { createHash } from 'crypto'
 import { StringDecoder } from 'string_decoder'
+import { isRecord } from './persistedData.js'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -75,6 +76,7 @@ export class Daemon {
   private status: DaemonStatus = 'stopped'
   private readonly connections = new Set<Socket>()
   private stopPromise?: Promise<void>
+  private startPromise?: Promise<void>
   private logHealthy = true
   private ownsEndpoint = false
   private readonly socketPath: string
@@ -90,7 +92,19 @@ export class Daemon {
     for (const value of Object.values(this.options)) if (!Number.isSafeInteger(value) || value < 1) throw new Error('Invalid daemon capacity')
   }
 
-  async start(): Promise<void> {
+  start(): Promise<void> {
+    if (this.startPromise) return this.startPromise
+    if (this.stopPromise && this.status === 'stopped') {
+      const stopping = this.stopPromise
+      return stopping.then(() => { if (this.stopPromise === stopping) this.stopPromise = undefined; return this.start() })
+    }
+    const pending = this.startOnce()
+    this.startPromise = pending
+    void pending.then(() => { this.startPromise = undefined }, () => { this.startPromise = undefined })
+    return pending
+  }
+
+  private async startOnce(): Promise<void> {
     if (this.status === 'running') return
 
     this.status = 'starting'
@@ -129,7 +143,10 @@ export class Daemon {
   async stop(): Promise<void> {
     if (this.stopPromise) return this.stopPromise
     this.status = 'stopped'
+    const starting = this.startPromise
     this.stopPromise = (async () => {
+      await starting?.catch(() => undefined)
+      this.status = 'stopped'
       if (this.server) {
         const server = this.server
         await new Promise<void>((resolve) => {
@@ -193,13 +210,20 @@ export class Daemon {
 
   private handleConnection(socket: Socket): void {
     let buffer = ''
+    let failed = false
     const decoder = new StringDecoder('utf8')
     socket.on('data', (data: Buffer) => {
-      if (Buffer.byteLength(buffer) + data.length > this.options.maxFrameBytes) { socket.end(JSON.stringify({ ok: false, error: 'Daemon frame byte limit exceeded' }) + '\n'); return }
+      if (failed) return
       buffer += decoder.write(data)
       let nl = buffer.indexOf('\n')
       while (nl !== -1) {
-        const line = buffer.slice(0, nl).trim()
+        const frame = buffer.slice(0, nl)
+        if (Buffer.byteLength(frame) > this.options.maxFrameBytes) {
+          failed = true
+          socket.end(JSON.stringify({ ok: false, error: 'Daemon frame byte limit exceeded' }) + '\n')
+          return
+        }
+        const line = frame.trim()
         buffer = buffer.slice(nl + 1)
         nl = buffer.indexOf('\n')
         if (!line) continue
@@ -213,6 +237,10 @@ export class Daemon {
           const response: DaemonResponse = { ok: false, error: err instanceof Error ? err.message : String(err) }
           socket.write(JSON.stringify(response) + '\n')
         }
+      }
+      if (Buffer.byteLength(buffer) > this.options.maxFrameBytes) {
+        failed = true
+        socket.end(JSON.stringify({ ok: false, error: 'Daemon frame byte limit exceeded' }) + '\n')
       }
     })
   }
@@ -273,6 +301,7 @@ export class DaemonClient {
     return new Promise((resolve) => {
       const socket = new Socket()
       let buffer = ''
+      const decoder = new StringDecoder('utf8')
       let settled = false
 
       const timer = setTimeout(() => {
@@ -288,7 +317,7 @@ export class DaemonClient {
       })
 
       socket.on('data', (data: Buffer) => {
-        buffer += data.toString()
+        buffer += decoder.write(data)
         if (Buffer.byteLength(buffer) > 1024 * 1024 && !settled) {
           settled = true
           clearTimeout(timer)
@@ -302,7 +331,10 @@ export class DaemonClient {
           clearTimeout(timer)
           const line = buffer.slice(0, nl).trim()
           try {
-            resolve(JSON.parse(line) as DaemonResponse)
+            const response: unknown = JSON.parse(line)
+            resolve(isRecord(response) && typeof response.ok === 'boolean'
+              && (response.error === undefined || typeof response.error === 'string')
+              ? response as unknown as DaemonResponse : { ok: false, error: 'Invalid daemon response' })
           } catch {
             resolve({ ok: false, error: 'Invalid daemon response' })
           }

@@ -16,7 +16,7 @@
  */
 
 import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/types.js'
-import { execSync } from 'child_process'
+import { execFileSync } from 'child_process'
 
 type Urgency = 'low' | 'normal' | 'critical'
 
@@ -66,8 +66,8 @@ Auto-detects the platform notification system (osascript on macOS, notify-send o
   }
 
   private executeSync(input: Record<string, unknown>, _ctx: ToolContext): ToolResult {
-    const title = (input.title as string)?.trim()
-    const message = (input.message as string)?.trim()
+    const title = typeof input.title === 'string' ? input.title.trim() : ''
+    const message = typeof input.message === 'string' ? input.message.trim() : ''
     const urgency = (input.urgency as Urgency) ?? 'normal'
 
     if (!title || !message) {
@@ -100,16 +100,18 @@ Auto-detects the platform notification system (osascript on macOS, notify-send o
           // Triple-bell for critical urgency
           process.stderr.write('\x07\x07')
         }
-      } catch { /* ignore */ }
-      results.push('terminal-bell: sent')
-      delivered = true
+        results.push('terminal-bell: sent')
+        delivered = true
+      } catch (error) {
+        results.push(`terminal-bell: failed (${error instanceof Error ? error.message : String(error)})`)
+      }
     }
 
     const summary = delivered
       ? `Notification delivered: "${title}"`
       : `Notification failed:\n${results.join('\n')}`
 
-    return { content: summary, isError: false }
+    return { content: summary, isError: !delivered }
   }
 }
 
@@ -128,11 +130,8 @@ function getBackends(): NotificationBackend[] {
       name: 'osascript',
       send: (title, message, urgency) => {
         const sound = urgency === 'critical' ? 'Basso' : urgency === 'low' ? 'Glass' : 'Ping'
-        const titleEsc = shellEscape(title)
-        const msgEsc = shellEscape(message)
-        const sndEsc = shellEscape(sound)
-        execSync(
-          `osascript -e 'display notification ${msgEsc} with title ${titleEsc} sound name ${sndEsc}'`,
+        execFileSync(
+          'osascript', ['-e', `display notification ${JSON.stringify(message)} with title ${JSON.stringify(title)} sound name ${JSON.stringify(sound)}`],
           { stdio: 'pipe', timeout: 5000 },
         )
         return true
@@ -143,9 +142,8 @@ function getBackends(): NotificationBackend[] {
   if (process.platform === 'linux') {
     backends.push({
       name: 'notify-send',
-      send: (_title, message, urgency) => {
-        const uFlag = urgency === 'critical' ? '-u critical' : urgency === 'low' ? '-u low' : '-u normal'
-        execSync(`notify-send ${uFlag} ${shellEscape(message)}`, {
+      send: (title, message, urgency) => {
+        execFileSync('notify-send', ['-u', urgency, '--', title, message], {
           stdio: 'pipe', timeout: 5000,
         })
         return true
@@ -166,8 +164,8 @@ function getBackends(): NotificationBackend[] {
           $balloon.Visible = $true
           $balloon.ShowBalloonTip(5000)
         `.replace(/\n/g, ' ')
-        execSync(`powershell -NoProfile -Command "${script.replace(/"/g, '\\"')}"`, {
-          stdio: 'pipe', timeout: 8000,
+        execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
+          stdio: 'pipe', timeout: 8000, windowsHide: true,
         })
         return true
       },
@@ -175,9 +173,4 @@ function getBackends(): NotificationBackend[] {
   }
 
   return backends
-}
-
-function shellEscape(s: string): string {
-  // For single-quoted shell contexts: escape ' as '\''
-  return "'" + s.replace(/'/g, "'\\''") + "'"
 }

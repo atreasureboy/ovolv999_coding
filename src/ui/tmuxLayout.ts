@@ -13,7 +13,7 @@
  * 降级：tmux 不可用或初始化失败时，子 agent 输出回落到主 stdout renderer
  */
 
-import { execSync, spawnSync } from 'child_process'
+import { execFileSync, spawnSync } from 'child_process'
 import { mkdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { randomBytes } from 'crypto'
@@ -87,21 +87,13 @@ export class TmuxLayout {
     const myPrefix = `ovogo-${pid}-`  // exact match: our PID, our session
 
     try {
-      // Garbage-collect STALE ovogo-* sessions that don't belong to
-      // a live process. We do NOT kill a session just because it's
-      // old — the previous behavior was to kill anything > 1h, which
-      // also killed sessions that a user had `tmux a`-ed into for a
-      // long-running monitoring task. Now we only kill if:
-      //   (a) the session has NO attached clients, AND
-      //   (b) it's owned by a PID that no longer exists, OR it has
-      //       been idle for > 1h.
-      const out = execSync('tmux ls -F "#{session_name}||#{session_created}||#{session_attached}" 2>/dev/null', { stdio: 'pipe' }).toString()
+      const out = execFileSync('tmux', ['ls', '-F', '#{session_name}||#{session_created}||#{session_attached}'], { stdio: 'pipe' }).toString()
       for (const line of out.trim().split('\n')) {
         if (!line.startsWith('ovogo-')) continue
-        if (line.includes(myPrefix)) continue  // skip our own session
+        if (line.startsWith(myPrefix)) continue  // skip our own session
         const [name, createdStr, attachedStr] = line.split('||')
         if (!name || !createdStr) continue
-        const attached = attachedStr === '1'
+        const attached = Number(attachedStr) > 0
         if (attached) {
           // Never kill a session the user is currently watching. This
           // is the most important fix here: the previous code would
@@ -112,13 +104,22 @@ export class TmuxLayout {
         }
         const ageSec = Date.now() / 1000 - parseInt(createdStr, 10)
         if (ageSec > 3600) {
+          const owner = /^ovogo-([1-9]\d*)-[a-f0-9]{6}$/.exec(name)
+          if (!owner) continue
           try {
-            execSync(`tmux kill-session -t ${sq(name)}`, { stdio: 'pipe' })
+            process.kill(Number(owner[1]), 0)
+            continue
+          } catch (error) {
+            if (!(error instanceof Error) || !('code' in error) || error.code !== 'ESRCH') continue
+          }
+          try {
+            execFileSync('tmux', ['kill-session', '-t', name], { stdio: 'pipe' })
           } catch { /* skip */ }
         }
       }
     } catch { /* no existing sessions */ }
 
+    let sessionCreated = false
     try {
       mkdirSync(logDir, { recursive: true })
     } catch {
@@ -130,15 +131,16 @@ export class TmuxLayout {
 
     try {
       // 创建后台 tmux session（不 attach，不影响主终端）
-      execSync(
-        `tmux new-session -d -s ${sq(this.sessionName)} -x 200 -y 50`,
+      execFileSync(
+        'tmux', ['new-session', '-d', '-s', this.sessionName, '-x', '200', '-y', '50'],
         { stdio: 'pipe' },
       )
+      sessionCreated = true
 
       // A trailing colon targets the session's current window. Do not assume
       // index 0: users commonly configure tmux base-index to 1 or higher.
       const statusTarget = this.sessionName + ':'
-      execSync(`tmux rename-window -t ${sq(statusTarget)} 'OVOGO-Status'`)
+      execFileSync('tmux', ['rename-window', '-t', statusTarget, 'OVOGO-Status'])
 
       // 在状态窗口写欢迎信息
       const welcome = [
@@ -148,12 +150,15 @@ export class TmuxLayout {
         `echo "\\033[2m  子 agent 窗口将在这里自动出现（Ctrl+B + 数字 切换）\\033[0m"`,
         `echo "\\033[1m\\033[95m${'═'.repeat(60)}\\033[0m"`,
       ].join(' && ')
-      execSync(`tmux send-keys -t ${sq(statusTarget)} ${JSON.stringify(welcome)} Enter`)
+      execFileSync('tmux', ['send-keys', '-t', statusTarget, welcome, 'Enter'])
 
       this.initialized = true
       return true
 
     } catch {
+      if (sessionCreated) {
+        try { execFileSync('tmux', ['kill-session', '-t', this.sessionName], { stdio: 'pipe' }) } catch (error) { void error }
+      }
       this.sessionName = ''
       return false
     }
@@ -168,7 +173,7 @@ export class TmuxLayout {
 
     const slot = this.slotCounter++
     const logFile = join(this.logDir, `agent-${slot}.log`)
-    const windowName = toWindowName(agentLabel) || `agent-${slot}`
+    const windowName = `${slot}-${toWindowName(agentLabel) || 'agent'}`.slice(0, 20)
 
     // 写入 agent 启动 banner 到日志文件
     const startBanner =
@@ -182,15 +187,15 @@ export class TmuxLayout {
 
     try {
       // 在 tmux session 里新建一个窗口
-      execSync(
-        `tmux new-window -t ${sq(this.sessionName)} -n ${sq(windowName)}`,
+      execFileSync(
+        'tmux', ['new-window', '-t', this.sessionName, '-n', windowName],
         { stdio: 'pipe' },
       )
 
       // 窗口内运行 tail -f 实时显示 agent 输出
       const tailCmd = `tail -f ${sq(logFile)}`
-      execSync(
-        `tmux send-keys -t ${sq(this.sessionName + ':' + windowName)} ${JSON.stringify(tailCmd)} Enter`,
+      execFileSync(
+        'tmux', ['send-keys', '-t', this.sessionName + ':' + windowName, tailCmd, 'Enter'],
         { stdio: 'pipe' },
       )
 
@@ -220,8 +225,8 @@ export class TmuxLayout {
     // 重命名窗口加 ✓ 标记
     try {
       const doneWindowName = `✓-${win.windowName}`.slice(0, 20)
-      execSync(
-        `tmux rename-window -t ${sq(this.sessionName + ':' + win.windowName)} ${sq(doneWindowName)}`,
+      execFileSync(
+        'tmux', ['rename-window', '-t', this.sessionName + ':' + win.windowName, doneWindowName],
         { stdio: 'pipe' },
       )
     } catch { /* best-effort */ }
@@ -260,8 +265,8 @@ export class TmuxLayout {
       // Check if anyone is attached to our session.
       let attached = 0
       try {
-        const out = execSync(
-          `tmux display-message -p -t ${sq(this.sessionName)} '#{session_attached}'`,
+        const out = execFileSync(
+          'tmux', ['display-message', '-p', '-t', this.sessionName, '#{session_attached}'],
           { stdio: 'pipe' },
         ).toString().trim()
         attached = parseInt(out, 10) || 0
@@ -273,7 +278,7 @@ export class TmuxLayout {
         this.activeWindows = []
         return
       }
-      execSync(`tmux kill-session -t ${sq(this.sessionName)}`, { stdio: 'pipe' })
+      execFileSync('tmux', ['kill-session', '-t', this.sessionName], { stdio: 'pipe' })
     } catch { /* best-effort */ }
     this.initialized = false
     this.sessionName = ''

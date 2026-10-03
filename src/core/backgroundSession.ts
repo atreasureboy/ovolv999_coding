@@ -146,7 +146,7 @@ function validateMetadata(value: unknown, id: string): SessionMetadata {
   if (!value || typeof value !== 'object') throw new Error(`Invalid background metadata: ${id}`)
   const meta = value as SessionMetadata
   if (meta.schemaVersion !== undefined && meta.schemaVersion !== 1) throw new Error(`Unsupported background metadata version: ${meta.schemaVersion}`)
-  if (meta.id !== id || typeof meta.task !== 'string' || typeof meta.cwd !== 'string' || typeof meta.logPath !== 'string' || !Number.isFinite(Date.parse(meta.startedAt)) || !Object.hasOwn(STATUS_ICON, meta.status) || (meta.pid !== null && (!Number.isInteger(meta.pid) || meta.pid <= 0))) throw new Error(`Invalid background metadata: ${id}`)
+  if (meta.id !== id || typeof meta.task !== 'string' || typeof meta.cwd !== 'string' || typeof meta.logPath !== 'string' || typeof meta.startedAt !== 'string' || !Number.isFinite(Date.parse(meta.startedAt)) || !Object.hasOwn(STATUS_ICON, meta.status) || (meta.pid !== null && (!Number.isInteger(meta.pid) || meta.pid <= 0))) throw new Error(`Invalid background metadata: ${id}`)
   if (meta.revision !== undefined && (!Number.isSafeInteger(meta.revision) || meta.revision < 1)) throw new Error(`Invalid background metadata revision: ${id}`)
   if (meta.exitCode !== undefined && !Number.isInteger(meta.exitCode)) throw new Error(`Invalid background exit code: ${id}`)
   return meta

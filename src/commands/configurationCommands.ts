@@ -74,7 +74,7 @@ export const configurationCommands: Command[] = [
       '/permissions [mode|cycle|rules|allow <Tool> <pattern>|deny <Tool> <pattern>|remove <index>|clear]',
     handler: (args, ctx) => {
       const mgr = ctx.engine.getPermissionManager()
-      const parts = args.trim().split(/\s+/).filter(Boolean)
+      const parts = args.trim().split(/\s+/).filter(Boolean).filter(Boolean)
       const action = parts[0]
       if (!action) {
         return text(mgr.formatMode() + '\n\n' + mgr.formatRules())
@@ -144,7 +144,7 @@ export const configurationCommands: Command[] = [
     usage: '/poor [on|off]',
     handler: (args, ctx) => {
       const liveConfig = ctx.engine.getConfig()
-      const action = args.trim().split(/\s+/)[0]
+      const action = args.trim().split(/\s+/).filter(Boolean)[0]
       const current = liveConfig.poor?.enabled === true
       if (!action) {
         return text(
@@ -278,7 +278,7 @@ export const configurationCommands: Command[] = [
     name: 'models',
     aliases: ['providers'],
     description: 'List known LLM providers and models. Usage: /models [provider]',
-    handler: async (args) => {
+    handler: async (args, ctx) => {
       const { MODELS, PROVIDERS, listProviders, detectProviderFromModel, getModelInfo } =
         await import('../core/providers.js')
       const trimmed = args.trim().toLowerCase()
@@ -315,12 +315,13 @@ export const configurationCommands: Command[] = [
           `  ${p.name.padEnd(20)} ${modelCount} model(s)${p.baseURL ? `  ${p.baseURL}` : ''}`,
         )
       }
-      lines.push('', 'Current model: ' + (process.env.OVOLV_MODEL ?? 'gpt-4o'))
-      const detected = detectProviderFromModel(process.env.OVOLV_MODEL ?? 'gpt-4o')
+      const currentModel = ctx.engine.getModel()
+      lines.push('', 'Current model: ' + currentModel)
+      const detected = detectProviderFromModel(currentModel)
       if (detected !== 'unknown') {
         lines.push(`  Detected provider: ${PROVIDERS[detected].name}`)
       }
-      const info = getModelInfo(process.env.OVOLV_MODEL ?? 'gpt-4o')
+      const info = getModelInfo(currentModel)
       if (info) {
         lines.push(`  Context window: ${(info.contextWindow / 1000).toFixed(0)}k`)
         lines.push(
@@ -370,7 +371,7 @@ export const configurationCommands: Command[] = [
     handler: async (args) => {
       const { setEffort, cycleEffort, getEffortPrompt, formatEffort, formatEffortList } =
         await import('../core/effort.js')
-      const parts = args.trim().split(/\s+/)
+      const parts = args.trim().split(/\s+/).filter(Boolean)
       const level = parts[0]
       if (level === 'list' || level === 'ls') {
         return text(formatEffortList())

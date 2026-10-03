@@ -22,6 +22,7 @@ export async function runInkRepl(opts: InkReplOptions): Promise<void> {
       dispatchSlash: controller.dispatchSlash,
       initialHistory: controller.getHistory(),
       getHistory: controller.getHistory,
+      onInterrupt: () => opts.engine.abort(),
       maxContextTokens: opts.maxContextTokens,
       cwd: opts.cwd,
     }),
@@ -30,11 +31,12 @@ export async function runInkRepl(opts: InkReplOptions): Promise<void> {
   const cleanup = registerCleanup({
     onCleanup: async () => {
       controller.save()
+      opts.store.cancelOverlays()
       opts.engine.abort()
       try {
         await opts.engine.dispose()
-      } finally {
         controller.release()
+      } finally {
         instance.unmount()
       }
     },

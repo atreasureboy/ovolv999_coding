@@ -26,8 +26,10 @@ export interface FormattedError {
  * and common HTTP status codes.
  */
 export function formatApiError(err: unknown): FormattedError {
-  const error = err as Error & { status?: number; code?: string; type?: string }
-  const msg = error.message || String(err)
+  const error = (err !== null && typeof err === 'object' ? err : {}) as {
+    message?: unknown; name?: unknown; status?: number; code?: string
+  }
+  const msg = typeof error.message === 'string' && error.message ? error.message : String(err)
   const status = error.status
   const code = error.code
 

@@ -5,7 +5,12 @@ export interface TmuxResult {
   stderr: string
 }
 
-export type TmuxRunner = (args: string[]) => Promise<TmuxResult>
+export interface TmuxRunOptions {
+  signal?: AbortSignal
+  timeoutMs?: number
+}
+
+export type TmuxRunner = (args: string[], options?: TmuxRunOptions) => Promise<TmuxResult>
 
 export interface ClaudeWorkerStartOptions {
   session: string
@@ -111,10 +116,12 @@ function delay(ms: number, signal?: AbortSignal): Promise<'done' | 'aborted'> {
   })
 }
 
-async function defaultTmuxRunner(args: string[]): Promise<TmuxResult> {
+async function defaultTmuxRunner(args: string[], options: TmuxRunOptions = {}): Promise<TmuxResult> {
   try {
     const { stdout, stderr } = await execManaged('tmux', args, {
       maxBuffer: 1024 * 1024,
+      timeoutMs: Math.min(5000, options.timeoutMs ?? 5000),
+      signal: options.signal,
     })
     return { stdout, stderr }
   } catch (error: unknown) {
@@ -194,10 +201,10 @@ export class ClaudeCodeWorkerManager {
     return started
   }
 
-  async capture(session: string, lines = 80): Promise<string> {
+  async capture(session: string, lines = 80, options?: TmuxRunOptions): Promise<string> {
     const safeLines = Number.isFinite(lines) ? lines : 80
     const start = safeLines <= 0 ? '-' : `-${Math.max(1, Math.floor(safeLines))}`
-    const { stdout } = await this.runner(['capture-pane', '-t', session, '-p', '-S', start])
+    const { stdout } = await this.runner(['capture-pane', '-t', session, '-p', '-S', start], options)
     return stdout.trim()
   }
 
@@ -205,13 +212,21 @@ export class ClaudeCodeWorkerManager {
     const pattern = options.pattern ?? DEFAULT_DONE_PATTERN
     const timeoutMs = Math.max(1, options.timeoutMs ?? 120_000)
     const intervalMs = Math.max(100, options.intervalMs ?? 2_000)
+    if (!Number.isSafeInteger(timeoutMs) || !Number.isSafeInteger(intervalMs)) throw new Error('Invalid worker wait duration')
     const deadline = Date.now() + timeoutMs
     const regex = compilePattern(pattern)
     let output = ''
 
     while (Date.now() <= deadline) {
       if (options.signal?.aborted) return { matched: false, output, aborted: true }
-      output = await this.capture(options.session, options.lines ?? 120)
+      try {
+        output = await this.capture(options.session, options.lines ?? 120, { signal: options.signal, timeoutMs: Math.max(1, deadline - Date.now()) })
+      } catch (error) {
+        if (options.signal?.aborted) return { matched: false, output, aborted: true }
+        throw error
+      }
+      if (options.signal?.aborted) return { matched: false, output, aborted: true }
+      if (Date.now() > deadline) break
       if (regex.test(output)) return { matched: true, output }
       const remainingMs = deadline - Date.now()
       if (remainingMs <= 0) break

@@ -38,7 +38,7 @@ export async function consumeModelStream(
   const watchdog = setInterval(() => {
     if (Date.now() - lastChunkTime > STREAM_TIMEOUT_MS) {
       if (turnController) {
-        turnController.abort('stream_timeout')
+        turnController.abort('timeout:model:stream')
       }
     }
   }, 10000)

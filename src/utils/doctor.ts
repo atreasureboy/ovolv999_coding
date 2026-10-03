@@ -107,13 +107,12 @@ function checkDirectoryStructure(cwd: string, results: CheckResult[]): void {
   for (const sub of expectedSubdirs) {
     const path = join(ovolvDir, sub)
     if (existsSync(path)) {
-      const items = readdirSync(path)
-      results.push({
-        category: 'structure',
-        item: `.ovolv999/${sub}`,
-        level: 'ok',
-        message: `${items.length} item(s)`,
-      })
+      try {
+        const items = readdirSync(path)
+        results.push({ category: 'structure', item: `.ovolv999/${sub}`, level: 'ok', message: `${items.length} item(s)` })
+      } catch (error) {
+        results.push({ category: 'structure', item: `.ovolv999/${sub}`, level: 'error', message: `Cannot read configuration directory: ${error instanceof Error ? error.message : String(error)}` })
+      }
     }
   }
 }

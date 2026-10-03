@@ -80,6 +80,7 @@ export interface AppProps {
   /** Initial history (for resume). */
   initialHistory: OpenAIMessage[]
   getHistory?: () => OpenAIMessage[]
+  onInterrupt?: () => void
   /** Max context tokens (for StatusBar). */
   maxContextTokens: number
   /** Working directory (for git branch display). */
@@ -97,6 +98,7 @@ export function App({
   dispatchSlash,
   initialHistory,
   getHistory,
+  onInterrupt,
   maxContextTokens,
   cwd,
 }: AppProps): React.ReactElement {
@@ -106,7 +108,7 @@ export function App({
   const [fallbackHistory, setFallbackHistory] = useState<OpenAIMessage[]>(initialHistory)
   const history = getHistory?.() ?? fallbackHistory
   const [showHelp, setShowHelp] = useState(false)
-  const inputHistory = useRef<string[]>(loadInputHistory())
+  const inputHistory = useRef<string[]>(loadInputHistory().reverse())
   const turnStartTime = useRef(0)
 
   // ── Terminal title lifecycle ──────────────────────────────────────────────
@@ -218,6 +220,10 @@ export function App({
 
   const sigintCount = useRef(0)
   useInput((input, key) => {
+    if (key.escape && state.running && !store.hasOverlay()) {
+      onInterrupt?.()
+      return
+    }
     const action = lookupAction(input, key, keybindings.bindings)
 
     // Help overlay toggle (only when no overlay/turn is active)

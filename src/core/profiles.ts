@@ -7,6 +7,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { join, resolve } from 'path'
+import { isRecord } from './persistedData.js'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -54,6 +55,29 @@ export interface ProfileStore {
   activeProfile: string | null
 }
 
+function hasOptionalFields(value: Record<string, unknown>, keys: string[], type: 'string' | 'boolean'): boolean {
+  return keys.every(key => value[key] === undefined || typeof value[key] === type)
+}
+
+function isProfile(value: unknown): value is Profile {
+  if (!isRecord(value) || typeof value.name !== 'string' || !value.name.trim() || typeof value.createdAt !== 'string') return false
+  if (!hasOptionalFields(value, ['displayName', 'description'], 'string') || !hasOptionalFields(value, ['active'], 'boolean')) return false
+  if (value.permissionLevel !== undefined && (typeof value.permissionLevel !== 'string' || !['strict', 'normal', 'permissive'].includes(value.permissionLevel))) return false
+  if (value.provider !== undefined && (!isRecord(value.provider) || typeof value.provider.name !== 'string'
+    || !hasOptionalFields(value.provider, ['model', 'apiKeyEnv', 'baseUrl'], 'string'))) return false
+  if (value.env !== undefined && (!isRecord(value.env) || !Object.values(value.env).every(item => typeof item === 'string'))) return false
+  if (value.metadata !== undefined && !isRecord(value.metadata)) return false
+  if (value.uiPrefs !== undefined && (!isRecord(value.uiPrefs) || !hasOptionalFields(value.uiPrefs, ['theme'], 'string')
+    || !hasOptionalFields(value.uiPrefs, ['showTokens', 'showCost', 'vim'], 'boolean'))) return false
+  if (value.modelPrefs !== undefined) {
+    if (!isRecord(value.modelPrefs) || !hasOptionalFields(value.modelPrefs, ['systemPrompt'], 'string')) return false
+    const { temperature, maxTokens } = value.modelPrefs
+    if (temperature !== undefined && (typeof temperature !== 'number' || !Number.isFinite(temperature) || temperature < 0 || temperature > 2)) return false
+    if (maxTokens !== undefined && (!Number.isSafeInteger(maxTokens) || (maxTokens as number) <= 0)) return false
+  }
+  return true
+}
+
 // ── Persistence ─────────────────────────────────────────────────────────────
 
 export function getProfilePath(cwd: string): string {
@@ -61,14 +85,25 @@ export function getProfilePath(cwd: string): string {
 }
 
 export function loadProfiles(cwd: string): ProfileStore {
+  const empty: ProfileStore = { profiles: Object.create(null) as Record<string, Profile>, activeProfile: null }
   const path = getProfilePath(cwd)
   if (!existsSync(path)) {
-    return { profiles: {}, activeProfile: null }
+    return empty
   }
   try {
-    return JSON.parse(readFileSync(path, 'utf8')) as ProfileStore
+    const data: unknown = JSON.parse(readFileSync(path, 'utf8'))
+    if (!isRecord(data) || !isRecord(data.profiles)) return empty
+    for (const [key, value] of Object.entries(data.profiles)) {
+      if (isProfile(value) && value.name === key) {
+        empty.profiles[key] = value
+      }
+    }
+    if (typeof data.activeProfile === 'string' && Object.hasOwn(empty.profiles, data.activeProfile)) {
+      empty.activeProfile = data.activeProfile
+    }
+    return empty
   } catch {
-    return { profiles: {}, activeProfile: null }
+    return empty
   }
 }
 
@@ -99,6 +134,7 @@ export function createProfile(
     createdAt: new Date().toISOString(),
   }
 
+  if (!isProfile(profile)) throw new Error('Invalid profile configuration')
   store.profiles[name] = profile
 
   // If first profile, make it active
@@ -159,7 +195,9 @@ export function updateProfile(
   const profile = store.profiles[name]
   if (!profile) return null
 
-  Object.assign(profile, updates)
+  const updated = { ...profile, ...updates, name: profile.name, createdAt: profile.createdAt }
+  if (!isProfile(updated)) return null
+  Object.assign(profile, updated)
   saveProfiles(cwd, store)
   return profile
 }
@@ -229,7 +267,7 @@ const DEFAULTS: EffectiveConfig = {
 
 export function getEffectiveConfig(cwd: string): EffectiveConfig {
   const profile = getActiveProfile(cwd)
-  if (!profile) return { ...DEFAULTS }
+  if (!profile) return { ...DEFAULTS, provider: { ...DEFAULTS.provider }, env: {} }
 
   return {
     provider: {

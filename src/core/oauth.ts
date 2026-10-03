@@ -8,10 +8,11 @@
 
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'http'
 import { randomBytes, createHash } from 'crypto'
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
+import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
-import { execSync } from 'child_process'
+import { execFileSync } from 'child_process'
+import { isRecord } from './persistedData.js'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -115,35 +116,7 @@ export async function exchangeCodeForToken(
     body.set('code_verifier', pkce.verifier)
   }
 
-  const response = await fetch(config.tokenEndpoint, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      'Accept': 'application/json',
-    },
-    body: body.toString(),
-  })
-
-  if (!response.ok) {
-    const text = await response.text()
-    throw new Error(`Token exchange failed (${response.status}): ${text}`)
-  }
-
-  const data = await response.json() as {
-    access_token: string
-    refresh_token?: string
-    expires_in?: number
-    token_type: string
-    scope?: string
-  }
-
-  return {
-    accessToken: data.access_token,
-    refreshToken: data.refresh_token,
-    expiresAt: data.expires_in ? Date.now() + data.expires_in * 1000 : undefined,
-    tokenType: data.token_type ?? 'Bearer',
-    scope: data.scope,
-  }
+  return requestToken(config.tokenEndpoint, body, 'Token exchange')
 }
 
 // ── Token Refresh ───────────────────────────────────────────────────────────
@@ -162,32 +135,42 @@ export async function refreshToken(
     body.set('client_secret', config.clientSecret)
   }
 
-  const response = await fetch(config.tokenEndpoint, {
+  return requestToken(config.tokenEndpoint, body, 'Token refresh', refreshTokenValue)
+}
+
+async function requestToken(endpoint: string, body: URLSearchParams, operation: string, fallbackRefresh?: string): Promise<OAuthToken> {
+  const response = await fetch(endpoint, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/x-www-form-urlencoded',
       'Accept': 'application/json',
     },
     body: body.toString(),
+    signal: AbortSignal.timeout(30000),
   })
 
   if (!response.ok) {
-    throw new Error(`Token refresh failed (${response.status})`)
+    throw new Error(`${operation} failed (${response.status})`)
   }
 
-  const data = await response.json() as {
-    access_token: string
-    refresh_token?: string
-    expires_in?: number
-    token_type: string
+  const data: unknown = await response.json()
+  if (!isRecord(data) || typeof data.access_token !== 'string' || !data.access_token
+    || (data.refresh_token !== undefined && typeof data.refresh_token !== 'string')
+    || (data.token_type !== undefined && typeof data.token_type !== 'string')
+    || (data.scope !== undefined && typeof data.scope !== 'string')
+    || (data.expires_in !== undefined && (typeof data.expires_in !== 'number' || !Number.isFinite(data.expires_in) || data.expires_in < 0))) {
+    throw new Error(`${operation} returned an invalid token`)
   }
 
-  return {
+  const token: OAuthToken = {
     accessToken: data.access_token,
-    refreshToken: data.refresh_token ?? refreshTokenValue,
-    expiresAt: data.expires_in ? Date.now() + data.expires_in * 1000 : undefined,
+    refreshToken: data.refresh_token ?? fallbackRefresh,
+    expiresAt: typeof data.expires_in === 'number' ? Date.now() + data.expires_in * 1000 : undefined,
     tokenType: data.token_type ?? 'Bearer',
+    scope: data.scope,
   }
+  if (!isOAuthToken(token)) throw new Error(`${operation} returned an invalid expiration`)
+  return token
 }
 
 // ── Callback Server ─────────────────────────────────────────────────────────
@@ -197,23 +180,30 @@ export class OAuthCallbackServer {
   private codePromise: Promise<{ code: string; state: string }> | null = null
   private codeResolve: ((value: { code: string; state: string }) => void) | null = null
   private codeReject: ((err: Error) => void) | null = null
+  private starting: Promise<void> | null = null
 
-  constructor(private readonly port: number = 8765) {}
+  constructor(private readonly port: number = 8765, private readonly host = '127.0.0.1') {}
 
   start(): Promise<void> {
-    return new Promise((resolve, reject) => {
+    if (this.starting) return this.starting
+    if (this.server?.listening) return Promise.resolve()
+    this.starting = new Promise((resolve, reject) => {
       this.server = createServer((req: IncomingMessage, res: ServerResponse) => {
         this.handleRequest(req, res)
       })
 
-      this.server.on('error', reject)
-      this.server.listen(this.port, () => resolve())
+      this.server.on('error', err => { this.codeReject?.(err); reject(err) })
+      this.server.listen(this.port, this.host, () => resolve())
 
       this.codePromise = new Promise((resolve2, reject2) => {
         this.codeResolve = resolve2
         this.codeReject = reject2
       })
+      void this.codePromise.catch(() => undefined)
     })
+    const pending = this.starting
+    void pending.then(() => { this.starting = null }, () => { this.starting = null; this.stop() })
+    return pending
   }
 
   private handleRequest(req: IncomingMessage, res: ServerResponse): void {
@@ -225,7 +215,8 @@ export class OAuthCallbackServer {
 
     if (error) {
       res.writeHead(400, { 'Content-Type': 'text/html' })
-      res.end(`<h1>Authorization Failed</h1><p>${error}</p>`)
+      const escaped = error.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!)
+      res.end(`<h1>Authorization Failed</h1><p>${escaped}</p>`)
       this.codeReject?.(new Error(`OAuth error: ${error}`))
       return
     }
@@ -246,17 +237,21 @@ export class OAuthCallbackServer {
       return Promise.reject(new Error('Server not started'))
     }
 
-    return Promise.race([
-      this.codePromise,
-      new Promise<{ code: string; state: string }>((_, reject) => {
-        setTimeout(() => {
-          reject(new Error(`OAuth callback timed out after ${timeoutMs}ms`))
-        }, timeoutMs)
-      }),
-    ])
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) return Promise.reject(new Error('Invalid callback timeout'))
+    const codePromise = this.codePromise
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`OAuth callback timed out after ${timeoutMs}ms`)), timeoutMs)
+      codePromise.then(value => { clearTimeout(timer); resolve(value) }, (error: unknown) => {
+        clearTimeout(timer)
+        reject(error instanceof Error ? error : new Error(String(error)))
+      })
+    })
   }
 
   stop(): void {
+    this.codeReject?.(new Error('OAuth callback server stopped'))
+    this.codeResolve = null
+    this.codeReject = null
     if (this.server) {
       this.server.close()
       this.server = null
@@ -273,16 +268,22 @@ export async function authorize(
   const pkce = config.usePKCE !== false ? generatePKCE() : undefined
   const state = generateState()
 
+  const redirect = new URL(config.redirectUri)
+  if (redirect.protocol !== 'http:' || !['localhost', '127.0.0.1', '[::1]'].includes(redirect.hostname)) {
+    throw new Error('OAuth redirect must use a local HTTP callback')
+  }
+  const port = Number(redirect.port || 80)
+  if (options.port !== undefined && options.port !== port) throw new Error('OAuth callback port must match redirectUri')
   const authUrl = buildAuthorizationUrl(config, state, pkce)
-
-  const callbackServer = new OAuthCallbackServer(options.port ?? 8765)
-  await callbackServer.start()
+  const callbackServer = new OAuthCallbackServer(port, redirect.hostname === '[::1]' ? '::1' : '127.0.0.1')
 
   try {
+    await callbackServer.start()
     if (options.openBrowser !== false) {
       try {
-        const openCmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open'
-        execSync(`${openCmd} "${authUrl}"`, { stdio: 'pipe', timeout: 5000 })
+        const openCmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'rundll32.exe' : 'xdg-open'
+        const args = process.platform === 'win32' ? ['url.dll,FileProtocolHandler', authUrl] : [authUrl]
+        execFileSync(openCmd, args, { stdio: 'pipe', timeout: 5000, windowsHide: true })
       } catch { /* ignore browser open errors */ }
     }
 
@@ -303,21 +304,25 @@ export async function authorize(
 // ── Token Storage ───────────────────────────────────────────────────────────
 
 function getTokenPath(serverName: string): string {
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(serverName)) throw new Error('Invalid OAuth server name')
   return join(homedir(), '.ovolv999', 'oauth-tokens', `${serverName}.json`)
 }
 
 export function saveToken(serverName: string, token: OAuthToken): void {
+  if (!isOAuthToken(token)) throw new Error('Invalid OAuth token')
   const path = getTokenPath(serverName)
   const dir = join(path, '..')
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-  writeFileSync(path, JSON.stringify(token, null, 2))
+  writeFileSync(path, JSON.stringify(token, null, 2), { mode: 0o600 })
+  if (process.platform !== 'win32') chmodSync(path, 0o600)
 }
 
 export function loadToken(serverName: string): OAuthToken | null {
   const path = getTokenPath(serverName)
   if (!existsSync(path)) return null
   try {
-    return JSON.parse(readFileSync(path, 'utf8')) as OAuthToken
+    const value: unknown = JSON.parse(readFileSync(path, 'utf8'))
+    return isOAuthToken(value) ? value : null
   } catch {
     return null
   }
@@ -334,8 +339,15 @@ export function deleteToken(serverName: string): boolean {
   }
 }
 
+function isOAuthToken(value: unknown): value is OAuthToken {
+  return isRecord(value) && typeof value.accessToken === 'string' && value.accessToken.length > 0
+    && typeof value.tokenType === 'string'
+    && (value.expiresAt === undefined || (typeof value.expiresAt === 'number' && Number.isFinite(value.expiresAt)))
+    && ['refreshToken', 'scope'].every(key => value[key] === undefined || typeof value[key] === 'string')
+}
+
 export function isTokenExpired(token: OAuthToken, leewayMs = 60000): boolean {
-  if (!token.expiresAt) return false
+  if (token.expiresAt === undefined) return false
   return Date.now() + leewayMs >= token.expiresAt
 }
 

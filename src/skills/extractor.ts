@@ -313,7 +313,7 @@ export function formatSkillMarkdown(extraction: SkillExtraction): string {
   const frontmatter = [
     '---',
     `name: ${extraction.name}`,
-    `description: ${extraction.description}`,
+    `description: ${/[\r\n]/.test(extraction.description) ? JSON.stringify(extraction.description) : extraction.description}`,
     `version: "1.0"`,
     `category: ${extraction.category}`,
     '---',
@@ -328,6 +328,7 @@ export function formatSkillMarkdown(extraction: SkillExtraction): string {
  * Returns the file path.
  */
 export function saveSkill(cwd: string, extraction: SkillExtraction): string {
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(extraction.name)) throw new Error('Invalid skill name: use letters, numbers, hyphens, and underscores')
   const dir = join(resolve(cwd), '.ovolv999', 'skills')
   mkdirSync(dir, { recursive: true })
 
@@ -342,6 +343,7 @@ export function saveSkill(cwd: string, extraction: SkillExtraction): string {
  * Check if a skill already exists.
  */
 export function skillExists(cwd: string, name: string): boolean {
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(name)) return false
   const filePath = join(resolve(cwd), '.ovolv999', 'skills', `${name}.md`)
   return existsSync(filePath)
 }

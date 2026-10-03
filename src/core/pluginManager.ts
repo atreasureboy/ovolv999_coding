@@ -14,7 +14,7 @@
  *   - Git URLs
  */
 
-import { existsSync, readFileSync, readdirSync, statSync, mkdirSync, writeFileSync } from 'fs'
+import { existsSync, readFileSync, readdirSync, statSync, mkdirSync, writeFileSync, cpSync, mkdtempSync, renameSync, rmSync } from 'fs'
 import { join, resolve } from 'path'
 import { homedir } from 'os'
 import { z } from 'zod'
@@ -44,7 +44,7 @@ export interface PluginManifest {
 }
 
 const pluginManifestSchema = z.object({
-  name: z.string().min(1),
+  name: z.string().regex(/^(?:@[A-Za-z0-9_.-]+\/)?[A-Za-z0-9][A-Za-z0-9_.-]*$/),
   version: z.string().default('0.0.0'),
   description: z.string().optional(),
   author: z.string().optional(),
@@ -106,6 +106,16 @@ export function discoverPlugins(): Plugin[] {
     try {
       const stat = statSync(pluginPath)
       if (!stat.isDirectory()) continue
+
+      if (entry.startsWith('@')) {
+        for (const child of readdirSync(pluginPath)) {
+          const scopedPath = join(pluginPath, child)
+          if (!statSync(scopedPath).isDirectory()) continue
+          const manifest = loadManifest(scopedPath)
+          if (manifest) plugins.push({ manifest, path: scopedPath, status: 'disabled' })
+        }
+        continue
+      }
 
       const manifest = loadManifest(pluginPath)
       if (manifest) {
@@ -275,9 +285,14 @@ export function installPlugin(opts: InstallOptions): InstallResult {
     }
 
     const destDir = join(dir, manifest.name)
+    if (existsSync(destDir)) return { success: false, message: `Plugin "${manifest.name}" already exists` }
+    let staging: string | undefined
     try {
-      mkdirSync(destDir, { recursive: true })
-      // In a real implementation, we'd copy files. For now, just register.
+      staging = mkdtempSync(join(dir, '.install-'))
+      cpSync(sourcePath, staging, { recursive: true })
+      mkdirSync(join(destDir, '..'), { recursive: true })
+      renameSync(staging, destDir)
+      staging = undefined
       return {
         success: true,
         pluginName: manifest.name,
@@ -285,6 +300,8 @@ export function installPlugin(opts: InstallOptions): InstallResult {
       }
     } catch (err) {
       return { success: false, message: `Install failed: ${err instanceof Error ? err.message : String(err)}` }
+    } finally {
+      if (staging) rmSync(staging, { recursive: true, force: true })
     }
   }
 

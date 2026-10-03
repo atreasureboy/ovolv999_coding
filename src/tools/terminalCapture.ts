@@ -14,7 +14,7 @@
  */
 
 import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/types.js'
-import { execSync } from 'child_process'
+import { assertExecutionProfile, execManaged } from '../core/executionBackend.js'
 
 export class TerminalCaptureTool implements Tool {
   name = 'TerminalCapture'
@@ -55,18 +55,21 @@ export class TerminalCaptureTool implements Tool {
     return true
   }
 
-  execute(input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
-    return new Promise(resolve => resolve(this.executeSync(input, ctx)))
-  }
-
-  private executeSync(input: Record<string, unknown>, ctx: ToolContext): ToolResult {
+  async execute(input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const target = (input.target as string) ?? ''
     const lines = input.lines as number | undefined
+    if (typeof target !== 'string' || (lines !== undefined && (!Number.isSafeInteger(lines) || lines < 0))) return { content: 'Invalid capture target or line count', isError: true }
+    try {
+      ctx.signal?.throwIfAborted()
+      assertExecutionProfile(ctx.executionProfile)
+    } catch (err) {
+      return { content: `Terminal capture refused: ${(err as Error).message}`, isError: true, status: ctx.signal?.aborted ? 'cancelled' : 'blocked' }
+    }
 
     // Strategy 1: tmux capture-pane
     if (process.env.TMUX || target) {
       try {
-        return this.captureTmux(target, lines)
+        return await this.captureTmux(target, lines, ctx)
       } catch (err) {
         // Fall through to other strategies
         const msg = err instanceof Error ? err.message : String(err)
@@ -78,36 +81,15 @@ export class TerminalCaptureTool implements Tool {
       }
     }
 
-    // Strategy 2: check for a shell session with capture capability
-    try {
-      return this.captureViaSubshell(ctx)
-    } catch { /* fall through */ }
-
     return {
       content: 'Terminal capture not available: not inside tmux and no screen readback support.',
       isError: false,
     }
   }
 
-  private captureTmux(target: string, lines?: number): ToolResult {
-    // Verify tmux is present
-    try {
-      execSync('tmux -V', { stdio: 'pipe', timeout: 2000 })
-    } catch {
-      throw new Error('tmux not found')
-    }
-
-    const paneFlag = target ? `-t ${shellQuote(target)}` : ''
-    const startLine = lines !== undefined ? `-S -${Math.max(0, lines)}` : '-S -'
-    const cmd = `tmux capture-pane ${paneFlag} ${startLine} -E - -p`
-
-    let output: string
-    try {
-      output = execSync(cmd, { encoding: 'utf8', stdio: 'pipe', timeout: 5000 })
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      return { content: `tmux capture-pane failed: ${msg}`, isError: true }
-    }
+  private async captureTmux(target: string, lines: number | undefined, ctx: ToolContext): Promise<ToolResult> {
+    const args = ['capture-pane', ...(target ? ['-t', target] : []), '-S', lines === undefined ? '-' : `-${lines}`, '-E', '-', '-p']
+    const { stdout: output } = await execManaged('tmux', args, { cwd: ctx.cwd, profile: ctx.executionProfile, signal: ctx.signal, timeoutMs: 5000 })
 
     const cleaned = stripAnsi(output).trimEnd()
     if (cleaned.length === 0) {
@@ -121,20 +103,10 @@ export class TerminalCaptureTool implements Tool {
     }
   }
 
-  private captureViaSubshell(_ctx: ToolContext): ToolResult {
-    // Best-effort: try to read the scrollback via a terminal-specific
-    // escape sequence. Most terminals ignore this, so it's a last resort.
-    throw new Error('no screen readback available')
-  }
 }
 
 /** Strip ANSI escape sequences (colors, cursor moves, etc.) */
 export function stripAnsi(text: string): string {
   // eslint-disable-next-line no-control-regex
   return text.replace(/\x1b\[[0-9;]*[A-Za-z]|\x1b\][^\x07]*\x07|\x1b[()][AB012]|\x1b[=>]/g, '')
-}
-
-function shellQuote(s: string): string {
-  if (/^[A-Za-z0-9_:.@/-]+$/.test(s)) return s
-  return `'${s.replace(/'/g, "'\\''")}'`
 }

@@ -56,10 +56,14 @@ function globToRegex(pattern: string): RegExp {
       case '*':
         if (pattern[i + 1] === '*') {
           // ** — match everything including path separators
-          regex += '.*'
           i += 2
           // Skip following slash if present (allow **/ to match zero dirs)
-          if (pattern[i] === '/') i++
+          if (pattern[i] === '/') {
+            regex += '(?:.*/)?'
+            i++
+          } else {
+            regex += '.*'
+          }
         } else {
           // * — match everything except path separator
           regex += '[^/]*'

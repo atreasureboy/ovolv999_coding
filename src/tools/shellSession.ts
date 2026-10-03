@@ -10,6 +10,11 @@ import * as fs from 'fs'
 import * as path from 'path'
 import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/types.js'
 import { str } from '../core/strings.js'
+import { randomUUID } from 'crypto'
+import { StringDecoder } from 'string_decoder'
+import { assertExecutionProfile } from '../core/executionBackend.js'
+import { resolveWorkspacePath } from '../core/workspacePath.js'
+import { BoundedOutputBuffer } from './boundedOutput.js'
 
 interface ShellConn {
   id:           string
@@ -19,6 +24,7 @@ interface ShellConn {
   connectedAt:  Date | null
   logFile:      string
   logStream:    fs.WriteStream | null
+  commandPending?: boolean
 }
 
 const _sessions = new Map<string, ShellConn>()
@@ -51,7 +57,7 @@ function escapeRegex(s: string): string {
 
 export class ShellSessionTool implements Tool {
   name = 'ShellSession'
-  metadata = { mutatesState: true, concurrencySafe: true, longRunning: true }
+  metadata = { mutatesState: true, concurrencySafe: false, longRunning: true }
 
   definition: ToolDefinition = {
     type: 'function',
@@ -79,17 +85,24 @@ export class ShellSessionTool implements Tool {
           session_id: { type: 'string', description: 'Session ID (format: shell_PORT)' },
           command: { type: 'string', description: 'Command to execute (required for exec)' },
           timeout: { type: 'number', description: 'Max wait for output in milliseconds (default 8000)' },
-          log_dir: { type: 'string', description: 'Directory for session logs (default /tmp)' },
+          log_dir: { type: 'string', description: 'Directory for session logs (default: session or workspace .shell_logs)' },
         },
         required: ['action'],
       },
     },
   }
 
-  async execute(input: Record<string, unknown>, _context: ToolContext): Promise<ToolResult> {
+  async execute(input: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+    try {
+      if (input.action !== 'kill') context.signal?.throwIfAborted()
+      assertExecutionProfile(context.executionProfile)
+      if (context.executionProfile?.envAllowlist) throw new Error('Remote shell environment cannot be verified against an allowlist; execution refused')
+    } catch (error) {
+      return { content: `ShellSession error: ${(error as Error).message}`, isError: true }
+    }
     switch (str(input.action)) {
-      case 'listen': return this._listen(input)
-      case 'exec':   return this._exec(input)
+      case 'listen': return this._listen(input, context)
+      case 'exec':   return this._exec(input, context)
       case 'list':   return this._list()
       case 'kill':   return this._kill(input)
       default:
@@ -97,10 +110,13 @@ export class ShellSessionTool implements Tool {
     }
   }
 
-  private _listen(input: Record<string, unknown>): Promise<ToolResult> {
+  private _listen(input: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
     const port   = Number(input.port ?? 4444)
     const id     = sessionId(port)
-    const logDir = str(input.log_dir, '/tmp')
+    if (!Number.isSafeInteger(port) || port < 1 || port > 65535) return Promise.resolve({ content: 'Error: port must be an integer from 1 to 65535', isError: true })
+    let logDir: string
+    try { logDir = resolveWorkspacePath(context, str(input.log_dir, path.join(context.sessionDir ?? context.cwd, '.shell_logs'))) }
+    catch (error) { return Promise.resolve({ content: `Error: ${(error as Error).message}`, isError: true }) }
 
     if (_sessions.has(id)) {
       const s = _sessions.get(id)
@@ -120,6 +136,7 @@ export class ShellSessionTool implements Tool {
       try { fs.mkdirSync(logDir, { recursive: true }) } catch { /* ignore */ }
       const logFile   = path.join(logDir, `${id}.log`)
       const logStream = fs.createWriteStream(logFile, { flags: 'a' })
+      const writeLog = (data: string | Buffer): void => { if (!logStream.destroyed && !logStream.writableEnded) logStream.write(data) }
 
       const server = net.createServer((socket) => {
         const conn = _sessions.get(id)
@@ -132,13 +149,20 @@ export class ShellSessionTool implements Tool {
           socket.destroy()
           return
         }
+        if (conn.socket) { socket.destroy(); return }
         conn.socket      = socket
         conn.connectedAt = new Date()
         const connMsg = `\n[+] Shell connected from ${socket.remoteAddress}:${socket.remotePort}\n`
-        logStream.write(connMsg)
-        socket.on('data', (chunk) => logStream.write(chunk))
-        socket.on('close', () => { conn.socket = null; conn.connectedAt = null; logStream.write('\n[-] Shell disconnected\n') })
-        socket.on('error', () => { conn.socket = null; logStream.write('\n[!] Socket error\n') })
+        writeLog(connMsg)
+        socket.on('data', writeLog)
+        socket.on('close', () => { if (conn.socket === socket) { conn.socket = null; conn.connectedAt = null } writeLog('\n[-] Shell disconnected\n') })
+        socket.on('error', () => { if (conn.socket === socket) { conn.socket = null; conn.connectedAt = null } writeLog('\n[!] Socket error\n') })
+      })
+      logStream.on('error', error => {
+        _sessions.get(id)?.socket?.destroy()
+        _sessions.delete(id)
+        server.close()
+        resolve({ content: `Failed to log shell session: ${error.message}`, isError: true })
       })
 
       server.on('error', () => { _sessions.delete(id); logStream.end(); resolve({ content: `Failed to listen on port ${port}`, isError: true }) })
@@ -169,49 +193,63 @@ export class ShellSessionTool implements Tool {
     })
   }
 
-  private _exec(input: Record<string, unknown>): Promise<ToolResult> {
+  private _exec(input: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
     const id      = resolveId(input)
     const command = str(input.command).trim()
     const timeout = Number(input.timeout ?? 8_000)
 
     if (!command) return Promise.resolve({ content: 'Error: command is required for exec', isError: true })
+    if (!Number.isFinite(timeout) || timeout <= 0) return Promise.resolve({ content: 'Error: timeout must be a positive finite number', isError: true })
 
     const conn = _sessions.get(id)
     if (!conn) return Promise.resolve({ content: `Session "${id}" not found. Active: ${[..._sessions.keys()].join(', ') || 'none'}`, isError: true })
     if (!conn.socket) return Promise.resolve({ content: `Session "${id}" listening but no shell connected yet.`, isError: false })
+    if (conn.commandPending) return Promise.resolve({ content: 'A prior remote command has not been confirmed complete. Close this session before starting another command.', isError: true })
+    conn.commandPending = true
 
     return new Promise((resolve) => {
       const socket = conn.socket!
-      const chunks: Buffer[] = []
+      const outputBuffer = new BoundedOutputBuffer(64 * 1024)
+      const decoder = new StringDecoder('utf8')
+      let recent = ''
       let done = false
-      let stabilize: ReturnType<typeof setTimeout> | null = null
       let timeoutTimer: ReturnType<typeof setTimeout> | null = null
-      const marker = `__EOC_${Date.now().toString(36)}__`
+      const marker = `__EOC_${randomUUID()}__`
 
-      const finish = () => {
+      const finish = (failure?: string) => {
         if (done) return
         done = true
-        if (stabilize) clearTimeout(stabilize)
+        conn.commandPending = failure !== undefined && !socket.destroyed
         if (timeoutTimer) clearTimeout(timeoutTimer)
         socket.removeListener('data', onData)
-        let output = Buffer.concat(chunks).toString('utf8')
+        socket.removeListener('close', onClose)
+        socket.removeListener('error', onError)
+        context.signal?.removeEventListener('abort', onAbort)
+        outputBuffer.append(decoder.end())
+        let output = outputBuffer.render()
         output = output.replace(new RegExp(escapeRegex(marker) + '\\r?\\n?', 'g'), '')
         output = stripEcho(output, command)
         output = stripPrompt(output)
-        resolve({ content: output.trimEnd() || '(empty output)', isError: false })
+        resolve({ content: (failure ? `${failure}\n` : '') + (output.trimEnd() || '(empty output)'), isError: failure !== undefined })
       }
 
       const onData = (chunk: Buffer) => {
-        chunks.push(chunk)
-        const text = chunk.toString('utf8')
-        if (text.includes(marker)) { if (stabilize) clearTimeout(stabilize); stabilize = setTimeout(finish, 200); return }
-        if (stabilize) clearTimeout(stabilize)
-        stabilize = setTimeout(finish, 400)
+        const text = decoder.write(chunk)
+        outputBuffer.append(text)
+        recent = (recent + text).slice(-8192)
+        if (new RegExp(`(?:^|\n)${escapeRegex(marker)}(?:\r?\n|$)`).test(recent)) finish()
       }
+      const onAbort = (): void => finish('Output wait cancelled; remote command termination is not confirmed.')
+      const onClose = (): void => finish('Shell connection closed before command completion.')
+      const onError = (error: Error): void => finish(`Shell connection failed: ${error.message}`)
 
       socket.on('data', onData)
-      socket.write(command + `\necho '${marker}'\n`)
-      timeoutTimer = setTimeout(finish, timeout)
+      socket.once('close', onClose)
+      socket.once('error', onError)
+      context.signal?.addEventListener('abort', onAbort, { once: true })
+      timeoutTimer = setTimeout(() => finish('Timed out waiting for output; remote command termination is not confirmed.'), timeout)
+      if (context.signal?.aborted) onAbort()
+      else socket.write(command + `\nprintf '\\n%s\\n' '${marker}'\n`)
     })
   }
 
@@ -225,14 +263,14 @@ export class ShellSessionTool implements Tool {
     return { content: lines.join('\n'), isError: false }
   }
 
-  private _kill(input: Record<string, unknown>): ToolResult {
+  private async _kill(input: Record<string, unknown>): Promise<ToolResult> {
     const id   = resolveId(input)
     const conn = _sessions.get(id)
     if (!conn) return { content: `Session "${id}" not found.`, isError: true }
-    conn.socket?.destroy()
-    conn.server.close()
-    conn.logStream?.end()
     _sessions.delete(id)
-    return { content: `Session "${id}" closed.`, isError: false }
+    conn.socket?.destroy()
+    await new Promise<void>(resolve => conn.server.close(() => resolve()))
+    if (conn.logStream && !conn.logStream.destroyed) await new Promise<void>(resolve => conn.logStream!.end(() => resolve()))
+    return { content: `Session "${id}" connection and listener closed; remote command termination is not confirmed.`, isError: false }
   }
 }

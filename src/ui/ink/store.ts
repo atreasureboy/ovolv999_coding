@@ -271,6 +271,7 @@ export class UIStore {
   // The resolve functions are stored privately and called by resolveX().
 
   showPlanApproval(plan: string): Promise<boolean> {
+    this.cancelOverlays()
     return new Promise<boolean>((resolve) => {
       this.planResolver = resolve
       this.publish({ pendingPlan: { plan } })
@@ -286,6 +287,7 @@ export class UIStore {
   showPermissionDialog(
     request: UIPermissionRequest,
   ): Promise<{ approved: boolean; alwaysAllow: boolean; feedback?: string }> {
+    this.cancelOverlays()
     return new Promise<{ approved: boolean; alwaysAllow: boolean; feedback?: string }>(
       (resolve) => {
         this.permissionResolver = resolve
@@ -301,6 +303,7 @@ export class UIStore {
   }
 
   showSelectPicker<T>(title: string, items: UISelectItem<T>[]): Promise<T | null> {
+    this.cancelOverlays()
     return new Promise<T | null>((resolve) => {
       this.selectResolver = resolve as (value: unknown) => void
       this.publish({ selectOverlay: { title, items } })
@@ -311,6 +314,18 @@ export class UIStore {
     this.selectResolver?.(value)
     this.selectResolver = null
     this.publish({ selectOverlay: null })
+  }
+
+  cancelOverlays(): void {
+    this.planResolver?.(false)
+    this.permissionResolver?.({ approved: false, alwaysAllow: false })
+    this.selectResolver?.(null)
+    this.planResolver = null
+    this.permissionResolver = null
+    this.selectResolver = null
+    if (this.hasOverlay()) {
+      this.publish({ pendingPlan: null, pendingPermission: null, selectOverlay: null })
+    }
   }
 
   /** True when any interactive overlay is blocking input. */
@@ -329,6 +344,7 @@ export class UIStore {
 
   /** Full reset (for testing). */
   reset(): void {
+    this.cancelOverlays()
     this.nextId = 1
     this.publish({ ...INITIAL_STATE, messages: [] })
   }

@@ -5,9 +5,10 @@
  * Captures: open files, git state, todos, env vars, custom metadata.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, writeFileSync } from 'fs'
 import { join, resolve } from 'path'
 import { execSync } from 'child_process'
+import { isRecord, isStringArray, readPersistedRows } from './persistedData.js'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -48,14 +49,22 @@ export function getSnapshotPath(cwd: string): string {
   return join(resolve(cwd), '.ovolv999', 'snapshots.json')
 }
 
+function isSnapshot(value: unknown): value is WorkspaceSnapshot {
+  return isRecord(value) &&
+    typeof value.id === 'string' && typeof value.name === 'string' &&
+    typeof value.createdAt === 'string' &&
+    (value.gitBranch === null || typeof value.gitBranch === 'string') &&
+    (value.gitCommit === null || typeof value.gitCommit === 'string') &&
+    typeof value.gitDirty === 'boolean' && isStringArray(value.files) &&
+    Array.isArray(value.todos) && value.todos.every(todo => isRecord(todo) && typeof todo.text === 'string' && typeof todo.done === 'boolean') &&
+    isRecord(value.metadata) &&
+    (value.activeFile === undefined || typeof value.activeFile === 'string') &&
+    (value.notes === undefined || typeof value.notes === 'string') &&
+    (value.cursor === undefined || (isRecord(value.cursor) && Number.isSafeInteger(value.cursor.line) && Number(value.cursor.line) >= 0 && Number.isSafeInteger(value.cursor.column) && Number(value.cursor.column) >= 0))
+}
+
 export function loadSnapshots(cwd: string): SnapshotStore {
-  const path = getSnapshotPath(cwd)
-  if (!existsSync(path)) return { snapshots: [] }
-  try {
-    return JSON.parse(readFileSync(path, 'utf8')) as SnapshotStore
-  } catch {
-    return { snapshots: [] }
-  }
+  return { snapshots: readPersistedRows(getSnapshotPath(cwd), 'snapshots', isSnapshot) }
 }
 
 export function saveSnapshots(cwd: string, store: SnapshotStore): void {

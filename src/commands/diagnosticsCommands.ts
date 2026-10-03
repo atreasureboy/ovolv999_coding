@@ -138,12 +138,7 @@ export const diagnosticsCommands: Command[] = [
         return text('No conversation to scan.')
       }
       const { maskSecrets, formatScanSummary } = await import('../utils/secretScanner.js')
-      const allText = ctx.history
-        .map((m) => {
-          if (typeof m.content === 'string') return m.content
-          return JSON.stringify(m.tool_calls ?? '')
-        })
-        .join('\n')
+      const allText = JSON.stringify(ctx.history)
       const result = maskSecrets(allText)
       if (!result.found) {
         return text('✓ No secrets detected in conversation history.')
@@ -239,7 +234,7 @@ export const diagnosticsCommands: Command[] = [
         assessHealth,
         formatHealthAssessment,
       } = await import('../core/codeMetrics.js')
-      const parts = args.trim().split(/\s+/)
+      const parts = args.trim().split(/\s+/).filter(Boolean)
       const sub = parts[0] ?? 'help'
       if (sub === 'file') {
         const filePath = parts[1]
@@ -274,7 +269,7 @@ export const diagnosticsCommands: Command[] = [
     handler: async (args, ctx) => {
       const { runDiagnostics, filterDiagnostics, formatDiagnosticsResult, clearCache } =
         await import('../core/diagnostics.js')
-      const parts = args.trim().split(/\s+/)
+      const parts = args.trim().split(/\s+/).filter(Boolean)
       const clearFlag = parts.includes('--clear') || parts.includes('--fresh')
       if (clearFlag) clearCache()
       const validCheckers = ['auto', 'tsc', 'eslint', 'biome', 'ruff']
@@ -305,7 +300,7 @@ export const diagnosticsCommands: Command[] = [
     description: 'Prompt cache statistics. Usage: /cache [stats | reset | health]',
     handler: async (args) => {
       const cs = await import('../utils/cacheStats.js')
-      const parts = args.trim().split(/\s+/)
+      const parts = args.trim().split(/\s+/).filter(Boolean)
       const sub = parts[0] ?? 'stats'
       if (sub === 'stats') {
         return text(cs.formatCacheStats(cs.getCacheStats()))

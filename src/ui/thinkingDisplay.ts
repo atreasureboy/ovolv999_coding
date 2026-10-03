@@ -86,7 +86,7 @@ export function findUltrathinkPositions(text: string): Array<{ start: number; en
       idx = lower.indexOf(trigger, idx + 1)
     }
   }
-  return positions.sort((a, b) => a.start - b.start)
+  return positions.sort((a, b) => a.start - b.start || b.end - a.end)
 }
 
 // ── Rainbow Colorization ────────────────────────────────────────────────────
@@ -135,6 +135,7 @@ export function colorizeUltrathink(text: string): string {
   let result = ''
   let lastEnd = 0
   for (const pos of positions) {
+    if (pos.start < lastEnd) continue
     result += text.slice(lastEnd, pos.start)
     result += rainbow(pos.trigger)
     lastEnd = pos.end
@@ -182,7 +183,9 @@ export function getThinkingDuration(block: ThinkingBlock): number {
  * Truncate text to max chars, adding ellipsis.
  */
 export function truncate(text: string, maxChars: number): string {
+  if (maxChars <= 0) return ''
   if (text.length <= maxChars) return text
+  if (maxChars <= 3) return '.'.repeat(maxChars)
   const half = Math.floor((maxChars - 3) / 2)
   return text.slice(0, half) + '...' + text.slice(-half)
 }

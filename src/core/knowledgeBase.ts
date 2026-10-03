@@ -13,8 +13,9 @@
  * Stored in .ovolv999/knowledge.json
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, writeFileSync } from 'fs'
 import { join, resolve } from 'path'
+import { isRecord, isStringArray, readPersistedRows } from './persistedData.js'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -60,16 +61,16 @@ export function getKnowledgePath(cwd: string): string {
 }
 
 export function loadKnowledge(cwd: string): KnowledgeStore {
-  const path = getKnowledgePath(cwd)
-  if (!existsSync(path)) {
-    return { entries: [] }
-  }
-  try {
-    const raw = readFileSync(path, 'utf8')
-    return JSON.parse(raw) as KnowledgeStore
-  } catch {
-    return { entries: [] }
-  }
+  return { entries: readPersistedRows(getKnowledgePath(cwd), 'entries', isKnowledgeEntry) }
+}
+
+function isKnowledgeEntry(value: unknown): value is KnowledgeEntry {
+  return isRecord(value)
+    && ['id', 'key', 'value', 'createdAt', 'updatedAt'].every(field => typeof value[field] === 'string')
+    && typeof value.category === 'string' && ['file', 'pattern', 'decision', 'gotcha', 'dependency', 'convention', 'architecture', 'general'].includes(value.category)
+    && (value.source === undefined || typeof value.source === 'string')
+    && (value.tags === undefined || isStringArray(value.tags))
+    && (value.confidence === undefined || (typeof value.confidence === 'number' && Number.isFinite(value.confidence) && value.confidence >= 0 && value.confidence <= 1))
 }
 
 export function saveKnowledge(cwd: string, store: KnowledgeStore): void {

@@ -12,6 +12,7 @@
  */
 
 import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/types.js'
+import { readBodyWithCap } from './webFetch.js'
 
 export interface ParsedPage {
   url: string
@@ -30,7 +31,7 @@ export interface ParsedPage {
 
 export class WebBrowserTool implements Tool {
   name = 'WebBrowser'
-  metadata = { readOnly: true, concurrencySafe: true }
+  metadata = { readOnly: true, concurrencySafe: true, requiresNetwork: true }
 
   definition: ToolDefinition = {
     type: 'function',
@@ -81,30 +82,40 @@ Structured page summary with extractable links for follow-up.`,
 
     const extract = (input.extract as string) ?? 'all'
     const maxLinks = (input.max_links as number) ?? 50
+    if (!/^https?:\/\//i.test(url)) return { content: 'Error: URL must start with http:// or https://', isError: true }
+    if (!['all', 'text', 'links', 'metadata'].includes(extract) || !Number.isSafeInteger(maxLinks) || maxLinks < 0) {
+      return { content: 'Error: invalid extract or max_links value', isError: true }
+    }
+    if (ctx.signal?.aborted) return { content: 'Request cancelled.', isError: true }
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(new Error('Request timed out after 30s')), 30_000)
+    const abort = (): void => controller.abort(new Error('Request cancelled.'))
+    ctx.signal?.addEventListener('abort', abort, { once: true })
 
-    let response: Response
     try {
-      response = await fetch(url, {
+      const response = await fetch(url, {
         redirect: 'follow',
-        signal: ctx.signal,
+        signal: controller.signal,
         headers: {
           'User-Agent': 'ovolv999-webbrowser/1.0',
           'Accept': 'text/html,application/xhtml+xml,application/json,text/plain',
         },
       })
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => undefined)
+        return { content: `HTTP ${response.status} ${response.statusText} for ${url}`, isError: true }
+      }
+      const contentType = response.headers.get('content-type') ?? 'unknown'
+      const html = await readBodyWithCap(response, controller.signal, 5 * 1024 * 1024)
+      const page = parseHtml(url, response.url || url, response.status, html, contentType)
+      if (!contentType.includes('html')) page.textBlocks = [html]
+      return { content: formatPage(page, extract, maxLinks), isError: false }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       return { content: `Fetch failed: ${msg}`, isError: true }
-    }
-
-    const contentType = response.headers.get('content-type') ?? 'unknown'
-    const html = await response.text()
-
-    const page = parseHtml(url, response.url, response.status, html, contentType)
-
-    return {
-      content: formatPage(page, extract, maxLinks),
-      isError: false,
+    } finally {
+      clearTimeout(timer)
+      ctx.signal?.removeEventListener('abort', abort)
     }
   }
 }
@@ -125,11 +136,11 @@ function decodeEntities(s: string): string {
   // Numeric entities
   out = out.replace(/&#(\d+);/g, (_: string, n: string) => {
     const code = parseInt(n, 10)
-    return code > 0 ? String.fromCodePoint(code) : ''
+    return code > 0 && code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff) ? String.fromCodePoint(code) : '�'
   })
   out = out.replace(/&#x([0-9a-f]+);/gi, (_: string, n: string) => {
     const code = parseInt(n, 16)
-    return code > 0 ? String.fromCodePoint(code) : ''
+    return code > 0 && code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff) ? String.fromCodePoint(code) : '�'
   })
   return out
 }

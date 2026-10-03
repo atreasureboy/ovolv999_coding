@@ -9,6 +9,7 @@ import { promisify } from 'util'
 import { relative } from 'path'
 import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/types.js'
 import { GREP_DESCRIPTION } from '../prompts/tools.js'
+import { resolveWorkspacePath } from '../core/workspacePath.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -87,10 +88,16 @@ export class GrepTool implements Tool {
       return { content: 'Error: pattern is required', isError: true }
     }
 
-    const searchDir = searchPath ?? context.cwd
+    let searchDir: string
+    try {
+      context.signal?.throwIfAborted()
+      searchDir = resolveWorkspacePath(context, searchPath ?? '.')
+    } catch (error) {
+      return { content: `Grep error: ${(error as Error).message}`, isError: true }
+    }
 
     // Build rg command (preferred — faster, respects .gitignore)
-    const args: string[] = []
+    const args: string[] = ['--no-config']
 
     if (case_insensitive) args.push('-i')
 
@@ -140,39 +147,37 @@ export class GrepTool implements Tool {
           cwd: context.cwd,
           maxBuffer: 10 * 1024 * 1024,
           timeout: 30_000,
+          signal: context.signal,
         })
         stdout = result.stdout
       } catch (err: unknown) {
-        const e = err as { code?: number; stdout?: string; stderr?: string; message?: string }
+        const e = err as { code?: number | string; stdout?: string; stderr?: string; message?: string }
         // rg exits with code 1 when no matches — not an error
         if (e.code === 1 && !e.stderr) {
           return { content: `No matches found for pattern: ${pattern}. Try case_insensitive:true, broaden the regex, remove the glob filter, or use Glob to confirm the file exists.`, isError: false }
         }
-        // rg not found (ENOENT) or other error — fall back to Node.js search
-        stdout = ''
-        // If rg failed for non-"no matches" reasons, try grep as fallback
-        if (e.code !== 1) {
-          // Build grep fallback command
-          const grepFlags = ['-r', case_insensitive ? '-i' : '', output_mode === 'files_with_matches' ? '-l' : '-n']
-            .filter(Boolean)
-          if (effectiveGlob) grepFlags.push('--include', effectiveGlob)
-          grepFlags.push('-E', pattern, searchDir)
-          try {
-            const fallback = await execFileAsync('grep', grepFlags.filter(Boolean), {
-              cwd: context.cwd,
-              maxBuffer: 10 * 1024 * 1024,
-              timeout: 30_000,
-            })
-            stdout = fallback.stdout
-          } catch (grepErr) {
-            const ge = grepErr as { code?: string | number }
-            // Distinguish "grep not installed" from "no matches"
-            if (ge.code === 'ENOENT') {
-              return { content: `Error: neither ripgrep (rg) nor grep is available on this system. Install ripgrep for best results.`, isError: true }
-            }
-            // grep ran but exited non-zero (no matches or error) — treat as no matches
-            return { content: `No matches found for pattern: ${pattern}. Try case_insensitive:true, broaden the regex, remove the glob filter, or use Glob to confirm the file exists.`, isError: false }
+        if (e.code !== 'ENOENT') {
+          return { content: `Grep error: ${e.stderr || e.message || String(err)}`, isError: true }
+        }
+        const grepFlags = ['-r', case_insensitive ? '-i' : '', output_mode === 'files_with_matches' ? '-l' : output_mode === 'count' ? '-c' : '-n'].filter(Boolean)
+        if (effectiveGlob) grepFlags.push('--include', effectiveGlob)
+        if (output_mode === 'content' && typeof contextLines === 'number' && contextLines > 0) grepFlags.push('-C', String(contextLines))
+        grepFlags.push('-E', '-e', pattern, '--', searchDir)
+        try {
+          const fallback = await execFileAsync('grep', grepFlags, {
+            cwd: context.cwd,
+            maxBuffer: 10 * 1024 * 1024,
+            timeout: 30_000,
+            signal: context.signal,
+          })
+          stdout = fallback.stdout
+        } catch (grepErr) {
+          const ge = grepErr as { code?: string | number; stderr?: string; message?: string }
+          if (ge.code === 'ENOENT') {
+            return { content: `Error: neither ripgrep (rg) nor grep is available on this system. Install ripgrep for best results.`, isError: true }
           }
+          if (ge.code !== 1 || ge.stderr) return { content: `Grep error: ${ge.stderr || ge.message || String(grepErr)}`, isError: true }
+          return { content: `No matches found for pattern: ${pattern}. Try case_insensitive:true, broaden the regex, remove the glob filter, or use Glob to confirm the file exists.`, isError: false }
         }
       }
 

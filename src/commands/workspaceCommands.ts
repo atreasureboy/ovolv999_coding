@@ -129,7 +129,7 @@ export const workspaceCommands: Command[] = [
     description: 'Run git commands: /git status|log|stash|add|push|pull',
     usage: '/git <subcommand> [args]',
     handler: (args, ctx) => {
-      const [subcmd, ...rest] = args.trim().split(/\s+/)
+      const [subcmd, ...rest] = args.trim().split(/\s+/).filter(Boolean)
       const sub = (subcmd ?? '').toLowerCase()
       const safeRun = (cmd: string, params: string[], label: string): SlashCommandResult => {
         try {
@@ -308,7 +308,7 @@ Describe your project here.
         formatSnapshotList,
         formatSnapshotDiff,
       } = await import('../core/workspace.js')
-      const parts = args.trim().split(/\s+/)
+      const parts = args.trim().split(/\s+/).filter(Boolean)
       const sub = parts[0] ?? 'list'
       if (sub === 'save' || sub === 'create') {
         const name = parts[1]
