@@ -10,6 +10,18 @@ function tmpProject(): string {
 }
 
 describe('detectProjectContext', () => {
+  it('preserves framework, lockfile and language marker priorities', () => {
+    const cwd = tmpProject()
+    writeFileSync(join(cwd, 'package.json'), JSON.stringify({ dependencies: { next: '1', vite: '1', react: '1' }, packageManager: 'npm@1' }))
+    writeFileSync(join(cwd, 'pnpm-lock.yaml'), '')
+    writeFileSync(join(cwd, 'yarn.lock'), '')
+    writeFileSync(join(cwd, 'tsconfig.json'), '{}')
+    writeFileSync(join(cwd, 'pyproject.toml'), '')
+    writeFileSync(join(cwd, 'go.mod'), '')
+    writeFileSync(join(cwd, 'Cargo.toml'), '')
+    expect(detectProjectContext(cwd)).toMatchObject({ framework: 'Next.js', packageManager: 'pnpm', language: 'Rust' })
+  })
+
   it('reads package scripts only when scripts is an object', () => {
     const cwd = tmpProject()
     writeFileSync(join(cwd, 'package.json'), JSON.stringify({

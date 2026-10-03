@@ -34,17 +34,10 @@ function tryReadJSON(path: string): Record<string, unknown> | null {
   }
 }
 
-function tryExec(cmd: string, cwd: string): string | null {
+function tryExec(cmd: string, cwd: string, format: 'trimmed' | 'raw' = 'trimmed'): string | null {
   try {
-    return execSync(cmd, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 3000 }).trim()
-  } catch {
-    return null
-  }
-}
-
-function tryExecRaw(cmd: string, cwd: string): string | null {
-  try {
-    return execSync(cmd, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 3000 })
+    const output = execSync(cmd, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 3000 })
+    return format === 'raw' ? output : output.trim()
   } catch {
     return null
   }
@@ -56,33 +49,31 @@ export function detectProjectContext(cwd: string): ProjectContext {
 
   // Package.json
   const pkgPath = join(cwd, 'package.json')
-  if (existsSync(pkgPath)) {
-    const pkg = tryReadJSON(pkgPath)
-    if (pkg) {
-      ctx.language = 'TypeScript/JavaScript'
+  const pkg = existsSync(pkgPath) ? tryReadJSON(pkgPath) : null
+  if (pkg) {
+    ctx.language = 'TypeScript/JavaScript'
 
-      // Detect scripts
-      const scripts = pkg.scripts && typeof pkg.scripts === 'object' && !Array.isArray(pkg.scripts)
-        ? pkg.scripts as Record<string, string>
-        : undefined
-      if (scripts) {
-        ctx.scripts = {
-          build: scripts.build,
-          test: scripts.test,
-          lint: scripts.lint,
-          format: scripts.format,
-          dev: scripts.dev,
-        }
+    // Detect scripts
+    const scripts = pkg.scripts && typeof pkg.scripts === 'object' && !Array.isArray(pkg.scripts)
+      ? pkg.scripts as Record<string, string>
+      : undefined
+    if (scripts) {
+      ctx.scripts = {
+        build: scripts.build,
+        test: scripts.test,
+        lint: scripts.lint,
+        format: scripts.format,
+        dev: scripts.dev,
       }
-
-      // Detect framework
-      const deps = { ...(pkg.dependencies as Record<string, string> ?? {}), ...(pkg.devDependencies as Record<string, string> ?? {}) }
-      if (deps.next) ctx.framework = 'Next.js'
-      else if (deps.vite) ctx.framework = 'Vite'
-      else if (deps.react) ctx.framework = 'React'
-      else if (deps.express) ctx.framework = 'Express'
-      else if (deps.fastapi ?? deps.flask) ctx.framework = 'Python Web'
     }
+
+    // Detect framework
+    const deps = { ...(pkg.dependencies as Record<string, string> ?? {}), ...(pkg.devDependencies as Record<string, string> ?? {}) }
+    if (deps.next) ctx.framework = 'Next.js'
+    else if (deps.vite) ctx.framework = 'Vite'
+    else if (deps.react) ctx.framework = 'React'
+    else if (deps.express) ctx.framework = 'Express'
+    else if (deps.fastapi ?? deps.flask) ctx.framework = 'Python Web'
   }
 
   // Package manager
@@ -91,9 +82,7 @@ export function detectProjectContext(cwd: string): ProjectContext {
   else if (existsSync(join(cwd, 'package-lock.json'))) ctx.packageManager = 'npm'
   else if (existsSync(join(cwd, 'bun.lock')) || existsSync(join(cwd, 'bun.lockb'))) ctx.packageManager = 'bun'
 
-  const pkgPathForManager = join(cwd, 'package.json')
-  if (!ctx.packageManager && existsSync(pkgPathForManager)) {
-    const pkg = tryReadJSON(pkgPathForManager)
+  if (!ctx.packageManager) {
     const packageManager = typeof pkg?.packageManager === 'string' ? pkg.packageManager.split('@')[0] : undefined
     if (packageManager) ctx.packageManager = packageManager
   }
@@ -117,7 +106,7 @@ export function detectProjectContext(cwd: string): ProjectContext {
   if (gitBranch) {
     // NUL-delimited porcelain preserves the leading space in XY status codes.
     // Trimming these records would turn an unstaged " M" into staged "M ".
-    const status = tryExecRaw('git status --porcelain=v1 -z', cwd)
+    const status = tryExec('git status --porcelain=v1 -z', cwd, 'raw')
     const records = status ? status.split('\0').filter(Boolean) : []
     const modified = records.filter(record => {
       const code = record.slice(0, 2)

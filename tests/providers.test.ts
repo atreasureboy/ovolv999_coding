@@ -17,6 +17,12 @@ import {
 } from '../src/core/providers.js'
 
 describe('detectProviderFromModel', () => {
+  it('keeps model pattern priority when names match multiple providers', () => {
+    expect(detectProviderFromModel('llama-3-instruct')).toBe('groq')
+    expect(detectProviderFromModel('openrouter/anthropic/claude-sonnet-4-5')).toBe('anthropic')
+    expect(detectProviderFromModel('groq/gemini-custom')).toBe('google')
+  })
+
   it('detects OpenAI models', () => {
     expect(detectProviderFromModel('gpt-4o')).toBe('openai')
     expect(detectProviderFromModel('gpt-4o-mini')).toBe('openai')
@@ -112,6 +118,12 @@ describe('detectProviderFromBaseURL', () => {
 })
 
 describe('detectProviderFromEnv', () => {
+  it('selects keys in provider registry order', () => {
+    expect(detectProviderFromEnv({ OPENAI_API_KEY: 'one', ANTHROPIC_API_KEY: 'two', GOOGLE_API_KEY: 'three' })).toBe('openai')
+    expect(detectProviderFromEnv({ ANTHROPIC_API_KEY: 'two', GOOGLE_API_KEY: 'three', GROQ_API_KEY: 'four' })).toBe('anthropic')
+    expect(detectProviderFromEnv({ GOOGLE_API_KEY: 'three', XAI_API_KEY: 'four', GROQ_API_KEY: 'five' })).toBe('google')
+  })
+
   it('returns first matching provider', () => {
     const env = { OPENAI_API_KEY: 'sk-xxx' }
     expect(detectProviderFromEnv(env)).toBe('openai')
@@ -153,6 +165,14 @@ describe('detectProvider (combined)', () => {
 })
 
 describe('getModelInfo', () => {
+  it('returns the same catalog record for exact and provider-prefixed lookups', () => {
+    const catalogRecord = MODELS.find(model => model.id === 'gpt-4o')!
+    expect(getModelInfo('gpt-4o')).toBe(catalogRecord)
+    expect(getModelInfo('openai/gpt-4o')).toBe(catalogRecord)
+    expect(getModelPricing('openai/gpt-4o')).toBe(catalogRecord.pricing)
+    expect(getModelInfo('OpenAI/GPT-4O')).toBeNull()
+  })
+
   it('returns info for known model', () => {
     const info = getModelInfo('gpt-4o')
     expect(info).not.toBeNull()
