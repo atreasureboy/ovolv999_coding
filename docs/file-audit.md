@@ -35,7 +35,13 @@
 
 首次整仓运行发现两个测试环境问题，原日志保留：旧 cron 子进程测试单文件转译后找不到新共享依赖，本地 OAuth 测试随机分配到请求库拒绝的端口。已补齐真实测试依赖并选择高位空闲端口，保留两秒防卡死边界，并收紧 body timeout 断言；上述数字来自修复后的完整重验。
 
-锁定依赖安装、Git Bash 对两个 shell 入口的语法检查和 diff 检查通过。当前构建的源码指纹为 `79480d0a10774f5466dc999d2e40b063a9c5f5911191c777e562ce40e7c00ff4`；提交前本地构建明确标记 dirty，独立安装后的干净候选验收和短时稳定性结果另行记录。日志位于忽略目录 `.artifacts/file-audit/`；安装包和短时稳定性证据位于 `.artifacts/production/`。
+锁定依赖安装、Git Bash 对两个 shell 入口的语法检查和 diff 检查通过。构建源码指纹为 `79480d0a10774f5466dc999d2e40b063a9c5f5911191c777e562ce40e7c00ff4`。提交前本地构建明确标记 dirty；正式安装验收使用干净实现提交 `f7cb16532b262d37d64f1e506d213389b8f68504`，相同源码指纹且 `sourceDirty: false`。
+
+干净构建、打包、独立目录冻结安装及安装后验收 **18 项全部通过**，覆盖实际命令 shim、help/version、ESM 命令加载、单任务/管道/stdin、历史恢复、审批拒绝、编辑后真实验证、schema 兼容、ACP 和受控后台进程树停止。包 SHA256：`add6ef408300a8a5a8b8267d74d47978e5c223ed48dd2099f7e6bcb25facb85f`。验收使用 loopback 模型服务，没有联系线上模型。
+
+10 秒真实本地 MCP 稳定性检查通过，完成 **156 次请求、39 次采样**；结束时 pending、queuedBytes、bufferedBytes 均为 0，客户端关闭、受控子进程退出。主进程/子进程活跃资源增长均为 0；RSS 增长分别为 -630,784 / 1,884,160 字节，未测量 Windows 内核句柄数量。这是短时检查，不是四小时验收。
+
+后续仅更新报告、台账和状态记录；源码/测试冻结指纹保持一致。日志位于忽略目录 `.artifacts/file-audit/`；原首次整仓失败记录是 `final-first-tests.log`，通过记录是 `final-tests.log`。安装包和短时稳定性证据位于 `.artifacts/production/`。
 
 ## 能力边界
 

@@ -67,7 +67,7 @@
 
 - [x] Cross-review changes independently and resolve findings.
 - [x] Reconcile the complete inventory with per-file ledgers and document exclusions and external limits.
-- [ ] Run fresh typecheck, lint, complete tests, build, and installed package acceptance against the final implementation.
+- [x] Run fresh typecheck, lint, complete tests, build, and installed package acceptance against the final implementation.
 - [ ] Commit coherent changes, push the existing branch, and verify remote HEAD.
 
 ## Baseline
