@@ -135,7 +135,7 @@ export class LspClient extends EventEmitter {
   private proc: ChildProcess | null = null
   private nextId = 1
   private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
-  private buffer = ''
+  private buffer: Buffer = Buffer.alloc(0)
   private initialized = false
   private diagnostics = new Map<string, LspDiagnostic[]>()
   private serverSpec: ServerSpec | null = null
@@ -151,6 +151,8 @@ export class LspClient extends EventEmitter {
 
   async start(): Promise<boolean> {
     if (this.initialized) return true
+    this.shutdown = false
+    this.buffer = Buffer.alloc(0)
 
     this.serverSpec = this.options.command
       ? { command: this.options.command, args: this.options.args ?? [], languageId: this.options.languageId ?? 'typescript' }
@@ -167,34 +169,41 @@ export class LspClient extends EventEmitter {
       return false
     }
 
-    this.proc.on('error', (err: Error) => {
+    const proc = this.proc
+    proc.on('error', (err: Error) => {
+      if (this.proc !== proc) return
       for (const { reject } of this.pending.values()) reject(err)
       this.pending.clear()
       this.initialized = false
     })
-    if (!this.proc.stdout || !this.proc.stdin) {
+    if (!proc.stdout || !proc.stdin) {
       return false
     }
 
     // If spawn failed (nonexistent binary), pid is undefined and an
     // 'error' event fires on the next tick. Set up a guard so start()
     // rejects quickly rather than waiting for the full init timeout.
-    if (!this.proc.pid) {
+    if (!proc.pid) {
       return false
     }
 
     // During initialization, a spawn-error (ENOENT etc.) should reject
     // the initialize request immediately instead of waiting for timeout.
     const initErrorHandler = (err: Error): void => {
+      if (this.proc !== proc) return
       for (const [, { reject }] of this.pending) reject(err)
       this.pending.clear()
     }
-    this.proc.once('error', initErrorHandler)
+    proc.once('error', initErrorHandler)
 
-    this.proc.stdout.on('data', (data: Buffer) => this.onData(data))
-    this.proc.on('exit', () => {
+    proc.stdout.on('data', (data: Buffer) => {
+      if (this.proc === proc) this.onData(data)
+    })
+    proc.on('exit', () => {
+      if (this.proc !== proc) return
       this.initialized = false
       this.proc = null
+      this.buffer = Buffer.alloc(0)
     })
 
     // Initialize
@@ -327,9 +336,11 @@ export class LspClient extends EventEmitter {
 
   kill(): void {
     this.initialized = false
-    if (this.proc) {
-      try { this.proc.kill('SIGTERM') } catch { /* ignore */ }
-      this.proc = null
+    this.buffer = Buffer.alloc(0)
+    const proc = this.proc
+    this.proc = null
+    if (proc) {
+      try { proc.kill('SIGTERM') } catch { /* ignore */ }
     }
     for (const [, { reject }] of this.pending) reject(new Error('LSP client stopped'))
     this.pending.clear()
@@ -338,13 +349,13 @@ export class LspClient extends EventEmitter {
   // ── Protocol ──────────────────────────────────────────────────────────
 
   private onData(data: Buffer): void {
-    this.buffer += data.toString('utf8')
+    this.buffer = Buffer.concat([this.buffer, data])
 
     while (true) {
       const headerEnd = this.buffer.indexOf('\r\n\r\n')
       if (headerEnd < 0) break
 
-      const header = this.buffer.slice(0, headerEnd)
+      const header = this.buffer.subarray(0, headerEnd).toString('utf8')
       const match = header.match(/Content-Length:\s*(\d+)/i)
       if (!match) break
 
@@ -352,8 +363,9 @@ export class LspClient extends EventEmitter {
       const bodyStart = headerEnd + 4
       if (this.buffer.length < bodyStart + length) break
 
-      const body = this.buffer.slice(bodyStart, bodyStart + length)
-      this.buffer = this.buffer.slice(bodyStart + length)
+      const body = this.buffer.subarray(bodyStart, bodyStart + length).toString('utf8')
+      const remaining = this.buffer.subarray(bodyStart + length)
+      this.buffer = remaining.length ? remaining : Buffer.alloc(0)
 
       try {
         const msg = JSON.parse(body) as LspMessage

@@ -10,6 +10,7 @@
  */
 
 import type OpenAI from 'openai'
+import type { OpenAIMessage } from '../core/types.js'
 import type { AgentModule, ModuleBootResult, ModuleRunContext } from '../core/module.js'
 import type { SemanticMemory } from '../core/semanticMemory.js'
 import type { EpisodicMemory } from '../core/episodicMemory.js'
@@ -37,6 +38,46 @@ Rules:
 - Respond with JSON only, no prose`
 
 const REFLECTION_MAX_TOKENS = 800
+
+interface ReflectionKnowledge {
+  content: string
+  tags: string[]
+  confidence: number
+}
+
+interface ReflectionAttribution {
+  scope: 'run' | 'session'
+  source: 'agent_inferred' | 'consolidation'
+  outcome: string
+  verification: string
+}
+
+async function requestReflection(client: OpenAI, model: string, prompt: string, signal?: AbortSignal): Promise<ReflectionKnowledge[]> {
+  const response = await client.chat.completions.create({
+    model,
+    messages: [{ role: 'system', content: REFLECTION_SYSTEM_PROMPT }, { role: 'user', content: prompt }],
+    temperature: 0,
+    max_tokens: REFLECTION_MAX_TOKENS,
+  }, { timeout: 30_000, signal, maxRetries: 0 })
+  return parseReflection(response.choices[0]?.message?.content ?? '')
+}
+
+async function persistReflection(semantic: SemanticMemory, entries: ReflectionKnowledge[], attribution: ReflectionAttribution, signal?: AbortSignal): Promise<number> {
+  signal?.throwIfAborted()
+  let persisted = 0
+  for (const entry of entries) {
+    const result = await semantic.writeAsync({
+      content: `[${attribution.scope} ${attribution.outcome}; verification ${attribution.verification}] ${entry.content}`,
+      provenance: { status: 'unverified', claimedSource: attribution.source, outcome: attribution.outcome, verification: attribution.verification },
+      tags: entry.tags,
+      source: attribution.source,
+      confidence: entry.confidence,
+      timestamp: new Date().toISOString(),
+    })
+    if (result.persistence === 'persisted') persisted++
+  }
+  return persisted
+}
 
 export class ReflectionModule implements AgentModule {
   readonly name = 'reflection'
@@ -70,35 +111,10 @@ export class ReflectionModule implements AgentModule {
     try {
       const conversationSummary = this.serializeForReflection(ctx.messages)
 
-      const response = await this.client.chat.completions.create({
-        model: ctx.model ?? this.model,
-        messages: [
-          { role: 'system', content: REFLECTION_SYSTEM_PROMPT },
-          {
-            role: 'user',
-            content: `Analyze this agent run (outcome: ${outcome}; verification: ${verification}):\n\n${conversationSummary}`,
-          },
-        ],
-        temperature: 0,
-        max_tokens: REFLECTION_MAX_TOKENS,
-      }, { timeout: 30_000, signal: ctx.abortSignal, maxRetries: 0 })
-
-      const output = response.choices[0]?.message?.content ?? ''
-      const parsed = parseReflection(output)
-
-      ctx.abortSignal?.throwIfAborted()
-      let persisted = 0
-      for (const entry of parsed) {
-        const result = await this.semantic.writeAsync({
-          content: `[run ${outcome}; verification ${verification}] ${entry.content}`,
-          provenance: { status: 'unverified', claimedSource: 'agent_inferred', outcome, verification },
-          tags: entry.tags,
-          source: 'agent_inferred',
-          confidence: entry.confidence,
-          timestamp: new Date().toISOString(),
-        })
-        if (result.persistence === 'persisted') persisted++
-      }
+      const parsed = await requestReflection(this.client, ctx.model ?? this.model,
+        `Analyze this agent run (outcome: ${outcome}; verification: ${verification}):\n\n${conversationSummary}`, ctx.abortSignal)
+      const persisted = await persistReflection(this.semantic, parsed,
+        { scope: 'run', source: 'agent_inferred', outcome, verification }, ctx.abortSignal)
 
       if (parsed.length > 0) {
         ctx.eventLog?.append('memory_write', 'reflection', {
@@ -114,7 +130,7 @@ export class ReflectionModule implements AgentModule {
     }
   }
 
-  private serializeForReflection(messages: { role: string; content: string | unknown[] | null; tool_calls?: unknown[] }[]): string {
+  private serializeForReflection(messages: OpenAIMessage[]): string {
     const parts: string[] = []
     for (const msg of messages.slice(-30)) {
       if (msg.role === 'user' && typeof msg.content === 'string') {
@@ -122,7 +138,7 @@ export class ReflectionModule implements AgentModule {
       } else if (msg.role === 'assistant') {
         if (typeof msg.content === 'string' && msg.content) parts.push(`[ASSISTANT]: ${msg.content.slice(0, 200)}`)
         if (msg.tool_calls?.length) {
-          const names = (msg.tool_calls as Array<{ function: { name: string } }>)
+          const names = msg.tool_calls
             .map(tc => tc.function.name).join(', ')
           parts.push(`[TOOLS USED]: ${names}`)
         }
@@ -135,11 +151,7 @@ export class ReflectionModule implements AgentModule {
 }
 
 /** Parse LLM reflection output into knowledge entries (standalone, not private) */
-function parseReflection(output: string): Array<{
-  content: string
-  tags: string[]
-  confidence: number
-}> {
+function parseReflection(output: string): ReflectionKnowledge[] {
   try {
     const parsed = JSON.parse(output) as {
       knowledge?: Array<{
@@ -192,36 +204,11 @@ export async function consolidateSession(
   }).join('\n')
 
   try {
-    const response = await client.chat.completions.create({
-      model,
-      messages: [
-        { role: 'system', content: REFLECTION_SYSTEM_PROMPT },
-        {
-          role: 'user',
-          content: `Summarize this entire coding session and extract durable knowledge:\n\n${sessionSummary}`,
-        },
-      ],
-      temperature: 0,
-      max_tokens: REFLECTION_MAX_TOKENS,
-    }, { timeout: 30_000, signal, maxRetries: 0 })
-
-    const output = response.choices[0]?.message?.content ?? ''
-    const parsed = parseReflection(output)
-
-    signal?.throwIfAborted()
-    let persisted = 0
+    const parsed = await requestReflection(client, model,
+      `Summarize this entire coding session and extract durable knowledge:\n\n${sessionSummary}`, signal)
     const outcome = episodes.some(episode => episode.outcome !== 'success') ? 'contains_failures_or_incomplete_actions' : 'tool_successes_only'
-    for (const entry of parsed) {
-      const result = await semantic.writeAsync({
-        content: `[session ${outcome}; verification not_run] ${entry.content}`,
-        provenance: { status: 'unverified', claimedSource: 'consolidation', outcome, verification: 'not_run' },
-        tags: entry.tags,
-        source: 'consolidation',
-        confidence: entry.confidence,
-        timestamp: new Date().toISOString(),
-      })
-      if (result.persistence === 'persisted') persisted++
-    }
+    const persisted = await persistReflection(semantic, parsed,
+      { scope: 'session', source: 'consolidation', outcome, verification: 'not_run' }, signal)
 
     return { episodes: episodes.length, knowledgeExtracted: persisted }
   } catch {

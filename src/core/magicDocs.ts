@@ -363,27 +363,22 @@ function extractPatterns(files: FileContent[]): DocSection {
 
 // ── Dependencies Extractor ──────────────────────────────────────────────────
 
-function extractDependencies(files: FileContent[], _rootDir: string): DocSection {
-  const importMap: Record<string, Set<string>> = {}
+function extractDependencies(files: FileContent[]): DocSection {
+  const importMap = Object.create(null) as Record<string, Set<string>>
+  const importPatterns = [
+    /import\s+.*?\s+from\s+['"]([^'"]+)['"]/g,
+    /require\s*\(\s*['"]([^'"]+)['"]\s*\)/g,
+  ]
+
+  function addDependency(dependency: string, filePath: string): void {
+    if (dependency.startsWith('.') || dependency.startsWith('/')) return
+    const files = importMap[dependency] ??= new Set<string>()
+    files.add(filePath)
+  }
 
   for (const file of files) {
-    // ESM imports
-    const importMatches = [...file.content.matchAll(/import\s+.*?\s+from\s+['"]([^'"]+)['"]/g)]
-    for (const m of importMatches) {
-      const dep = m[1]
-      if (!dep.startsWith('.') && !dep.startsWith('/')) {
-        if (!importMap[dep]) importMap[dep] = new Set()
-        importMap[dep].add(file.path)
-      }
-    }
-    // CommonJS requires
-    const requireMatches = [...file.content.matchAll(/require\s*\(\s*['"]([^'"]+)['"]\s*\)/g)]
-    for (const m of requireMatches) {
-      const dep = m[1]
-      if (!dep.startsWith('.') && !dep.startsWith('/')) {
-        if (!importMap[dep]) importMap[dep] = new Set()
-        importMap[dep].add(file.path)
-      }
+    for (const pattern of importPatterns) {
+      for (const match of file.content.matchAll(pattern)) addDependency(match[1], file.path)
     }
   }
 
@@ -478,7 +473,7 @@ export function extractDocs(options: MagicDocsOptions): MagicDocsResult {
         case 'config': sections.push(extractConfig(contents)); break
         case 'decisions': sections.push(extractDecisions(contents)); break
         case 'patterns': sections.push(extractPatterns(contents)); break
-        case 'dependencies': sections.push(extractDependencies(contents, options.rootDir)); break
+        case 'dependencies': sections.push(extractDependencies(contents)); break
       }
     } catch (err) {
       warnings.push(`Failed to extract ${sectionType}: ${(err as Error).message}`)

@@ -125,6 +125,21 @@ describe('EpisodicMemory', () => {
 // ── ModuleRegistry ───────────────────────────────────────────────────────────
 
 describe('ModuleRegistry', () => {
+  it('constructs shared dependencies once before both diamond dependents', () => {
+    const reg = new ModuleRegistry()
+    const constructed: string[] = []
+    for (const [name, dependencies] of [
+      ['shared', []], ['left', ['shared']], ['right', ['shared']], ['root', ['left', 'right']],
+    ] as Array<[string, string[]]>) {
+      reg.register(name, () => {
+        constructed.push(name)
+        return makeModule(name, dependencies)
+      })
+    }
+    expect(reg.resolve(['root', 'shared', 'left'], makeCtx()).map(module => module.name)).toEqual(['shared', 'left', 'right', 'root'])
+    expect(constructed).toEqual(['root', 'left', 'shared', 'right'])
+  })
+
   function makeModule(name: string, deps?: string[]): AgentModule {
     return {
       name,

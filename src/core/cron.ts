@@ -76,6 +76,21 @@ const DOW_NAMES: Record<string, number> = {
   SUN: 0, MON: 1, TUE: 2, WED: 3, THU: 4, FRI: 5, SAT: 6,
 }
 
+function parseFieldValue(value: string, name: CronField['name']): number {
+  const numeric = parseInt(value, 10)
+  if (!isNaN(numeric)) return numeric
+  const names = name === 'month' ? MONTH_NAMES : name === 'dow' ? DOW_NAMES : undefined
+  return names?.[value.toUpperCase()] ?? NaN
+}
+
+function parsePositiveStep(value: string, field: string, name: CronField['name']): number {
+  const step = parseInt(value, 10)
+  if (!Number.isSafeInteger(step) || step <= 0) {
+    throw new CronParseError(`Invalid step in "${field}" for ${name}`)
+  }
+  return step
+}
+
 /**
  * Parse a single cron field (supports comma lists, wildcards with step, ranges).
  */
@@ -90,10 +105,7 @@ export function parseField(
   }
 
   if (field.startsWith('*/')) {
-    const step = parseInt(field.slice(2), 10)
-    if (isNaN(step) || step <= 0) {
-      throw new CronParseError(`Invalid step in "${field}" for ${name}`)
-    }
+    const step = parsePositiveStep(field.slice(2), field, name)
     return range(min, max).filter(v => (v - min) % step === 0)
   }
 
@@ -102,20 +114,12 @@ export function parseField(
   for (const part of field.split(',')) {
     // Handle step (e.g., "1-10/2")
     const [rangePart, stepPart] = part.split('/')
-    const step = stepPart ? parseInt(stepPart, 10) : 1
+    const step = stepPart ? parsePositiveStep(stepPart, field, name) : 1
 
     if (rangePart.includes('-')) {
       const [startStr, endStr] = rangePart.split('-')
-      let start = parseInt(startStr, 10)
-      let end = parseInt(endStr, 10)
-
-      if (isNaN(start)) {
-        start = name === 'month' ? (MONTH_NAMES[startStr.toUpperCase()] ?? NaN) : NaN
-      }
-      if (isNaN(end)) {
-        end = name === 'month' ? (MONTH_NAMES[endStr.toUpperCase()] ?? NaN)
-          : name === 'dow' ? (DOW_NAMES[endStr.toUpperCase()] ?? NaN) : NaN
-      }
+      const start = parseFieldValue(startStr, name)
+      const end = parseFieldValue(endStr, name)
 
       if (isNaN(start) || isNaN(end)) {
         throw new CronParseError(`Invalid range "${rangePart}" for ${name}`)
@@ -128,11 +132,7 @@ export function parseField(
         values.push(v)
       }
     } else {
-      let val = parseInt(rangePart, 10)
-      if (isNaN(val)) {
-        val = name === 'month' ? (MONTH_NAMES[rangePart.toUpperCase()] ?? NaN)
-          : name === 'dow' ? (DOW_NAMES[rangePart.toUpperCase()] ?? NaN) : NaN
-      }
+      const val = parseFieldValue(rangePart, name)
       if (isNaN(val)) {
         throw new CronParseError(`Invalid value "${rangePart}" for ${name}`)
       }

@@ -359,11 +359,11 @@ function computeStats(root: string): CodeStats {
 
   const allFiles: Array<{ path: string; lines: number }> = []
 
-  function walk(dir: string) {
-    if (stats.totalFiles >= MAX_FILES) return
+  function walk(dir: string): void {
     try {
       const entries = readdirSync(dir)
       for (const entry of entries) {
+        if (stats.totalFiles >= MAX_FILES) return
         if (IGNORED_DIRS.has(entry) || entry.startsWith('.')) continue
         const fullPath = join(dir, entry)
         try {

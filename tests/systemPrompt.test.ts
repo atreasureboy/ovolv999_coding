@@ -4,7 +4,8 @@ import {
   getGitStatusInfo, findMemoryFiles, buildProjectTree,
   formatMemoryFiles, BASE_SYSTEM_PROMPT,
 } from '../src/core/systemPrompt.js'
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'fs'
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, renameSync } from 'fs'
+import { execFileSync } from 'child_process'
 import { join } from 'path'
 import { tmpdir } from 'os'
 
@@ -27,6 +28,42 @@ describe('System Prompt Builder', () => {
   })
 
   describe('getGitStatusInfo', () => {
+    it('separates index changes, working tree changes and untracked files', () => {
+      const git = (...args: string[]) => execFileSync('git', args, { cwd, stdio: 'ignore' })
+      git('init')
+      git('config', 'user.email', 'test@example.com')
+      git('config', 'user.name', 'Test')
+      writeFileSync(join(cwd, 'staged.txt'), 'original')
+      writeFileSync(join(cwd, 'unstaged.txt'), 'original')
+      writeFileSync(join(cwd, 'both.txt'), 'original')
+      git('add', '.')
+      git('commit', '-m', 'initial')
+      writeFileSync(join(cwd, 'staged.txt'), 'staged')
+      writeFileSync(join(cwd, 'both.txt'), 'staged')
+      git('add', 'staged.txt', 'both.txt')
+      writeFileSync(join(cwd, 'both.txt'), 'unstaged')
+      writeFileSync(join(cwd, 'unstaged.txt'), 'unstaged')
+      writeFileSync(join(cwd, 'new file.txt'), 'new')
+      const info = getGitStatusInfo(cwd)
+      expect(info.staged).toEqual(['both.txt', 'staged.txt'])
+      expect(info.modified).toEqual(['both.txt', 'unstaged.txt'])
+      expect(info.untracked).toEqual(['new file.txt'])
+      expect(info.isClean).toBe(false)
+    })
+
+    it('retains renamed paths containing spaces without counting the old name', () => {
+      const git = (...args: string[]) => execFileSync('git', args, { cwd, stdio: 'ignore' })
+      git('init')
+      git('config', 'user.email', 'test@example.com')
+      git('config', 'user.name', 'Test')
+      writeFileSync(join(cwd, 'old name.txt'), 'original')
+      git('add', '.')
+      git('commit', '-m', 'initial')
+      renameSync(join(cwd, 'old name.txt'), join(cwd, 'new name.txt'))
+      git('add', '-A')
+      expect(getGitStatusInfo(cwd).staged).toEqual(['new name.txt'])
+    })
+
     it('returns null branch for non-git dir', () => {
       const info = getGitStatusInfo(cwd)
       expect(info.branch).toBeNull()

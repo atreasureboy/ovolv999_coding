@@ -5,9 +5,9 @@
  * memory files (CLAUDE.md), and mode-specific prompts.
  */
 
-import { existsSync, readFileSync, readdirSync } from 'fs'
+import { readFileSync, readdirSync } from 'fs'
 import { join, resolve, basename } from 'path'
-import { execSync } from 'child_process'
+import { execFileSync } from 'child_process'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -44,34 +44,34 @@ export function getGitStatusInfo(cwd: string): GitStatusInfo {
     userName: null,
   }
 
+  const git = (args: string[]): string => execFileSync('git', args, {
+    cwd, encoding: 'utf8', timeout: 5000, stdio: ['pipe', 'pipe', 'ignore'],
+  })
   try {
-    info.branch = execSync('git rev-parse --abbrev-ref HEAD', {
-      cwd, encoding: 'utf8', timeout: 5000, stdio: ['pipe', 'pipe', 'ignore'],
-    }).trim()
+    info.branch = git(['rev-parse', '--abbrev-ref', 'HEAD']).trim()
 
-    info.userName = execSync('git config user.name', {
-      cwd, encoding: 'utf8', timeout: 5000, stdio: ['pipe', 'pipe', 'ignore'],
-    }).trim() || null
+    info.userName = git(['config', 'user.name']).trim() || null
 
-    const status = execSync('git status --short', {
-      cwd, encoding: 'utf8', timeout: 5000, stdio: ['pipe', 'pipe', 'ignore'],
-    }).trim()
+    const status = git(['status', '--porcelain=v1', '-z'])
 
     if (status) {
       info.isClean = false
-      for (const line of status.split('\n')) {
-        if (!line.trim()) continue
+      const records = status.split('\0')
+      for (let index = 0; index < records.length; index++) {
+        const line = records[index]
+        if (!line) continue
         const flag = line.slice(0, 2)
         const file = line.slice(3)
-        if (flag.includes('?')) info.untracked.push(file)
-        else if (flag.match(/[MARC]/)) info.staged.push(file)
-        if (flag.match(/[marc]/)) info.modified.push(file)
+        if (flag === '??') info.untracked.push(file)
+        else {
+          if (/[MADRCUT]/.test(flag[0])) info.staged.push(file)
+          if (/[MADRCUT]/.test(flag[1])) info.modified.push(file)
+        }
+        if (flag.includes('R') || flag.includes('C')) index++
       }
     }
 
-    const log = execSync('git log --oneline -5', {
-      cwd, encoding: 'utf8', timeout: 5000, stdio: ['pipe', 'pipe', 'ignore'],
-    }).trim()
+    const log = git(['log', '--oneline', '-5']).trim()
 
     if (log) {
       info.recentCommits = log.split('\n').map(line => {
@@ -129,35 +129,24 @@ export function findMemoryFiles(cwd: string): MemoryFile[] {
     '.ovolv999/instructions.md',
     '.ovolv999/CLAUDE.md',
     '.claude/CLAUDE.md',
-  ]
-
-  for (const candidate of candidates) {
-    const fullPath = resolve(cwd, candidate)
-    if (existsSync(fullPath)) {
-      try {
-        files.push({
-          path: fullPath,
-          content: readFileSync(fullPath, 'utf8'),
-          relative: candidate,
-        })
-      } catch { /* skip */ }
-    }
-  }
+  ].map(relative => ({ path: resolve(cwd, relative), relative }))
 
   // Also check parent directories for CLAUDE.md
   let parent = resolve(cwd, '..')
   for (let i = 0; i < 3 && parent !== resolve(parent, '..'); i++) {
-    const candidate = join(parent, 'CLAUDE.md')
-    if (existsSync(candidate) && !files.some(f => f.path === candidate)) {
-      try {
-        files.push({
-          path: candidate,
-          content: readFileSync(candidate, 'utf8'),
-          relative: 'parent:' + basename(parent) + '/CLAUDE.md',
-        })
-      } catch { /* skip */ }
-    }
+    candidates.push({ path: join(parent, 'CLAUDE.md'), relative: 'parent:' + basename(parent) + '/CLAUDE.md' })
     parent = resolve(parent, '..')
+  }
+
+  const seen = new Set<string>()
+  for (const { path, relative } of candidates) {
+    if (seen.has(path)) continue
+    try {
+      files.push({ path, content: readFileSync(path, 'utf8'), relative })
+      seen.add(path)
+    } catch {
+      continue
+    }
   }
 
   return files
@@ -172,16 +161,17 @@ export function buildProjectTree(cwd: string, maxDepth = 2): string {
     '.ovolv999', '.claude',
   ])
 
-  function walk(dir: string, depth: number, prefix: string): string[] {
+  function readEntries(dir: string): string[] | null {
+    try {
+      return readdirSync(dir).sort()
+    } catch {
+      return null
+    }
+  }
+
+  function walk(dir: string, depth: number, prefix: string, entries: string[]): string[] {
     if (depth > maxDepth) return []
     const lines: string[] = []
-
-    let entries: string[]
-    try {
-      entries = readdirSync(dir).sort()
-    } catch {
-      return []
-    }
 
     const visible = entries.filter(e => !ignoreDirs.has(e) && !e.startsWith('.'))
     const maxShow = depth === 0 ? 20 : 10
@@ -194,14 +184,14 @@ export function buildProjectTree(cwd: string, maxDepth = 2): string {
       const connector = isLast ? '└── ' : '├── '
       const fullPath = join(dir, entry)
 
-      let isDir = false
-      try { isDir = existsSync(fullPath) && readdirSync(fullPath) !== undefined } catch { /* */ }
+      const childEntries = readEntries(fullPath)
+      const isDir = childEntries !== null
 
       lines.push(`${prefix}${connector}${entry}${isDir ? '/' : ''}`)
 
       if (isDir && depth < maxDepth) {
         const newPrefix = prefix + (isLast ? '    ' : '│   ')
-        lines.push(...walk(fullPath, depth + 1, newPrefix))
+        lines.push(...walk(fullPath, depth + 1, newPrefix, childEntries))
       }
     }
 
@@ -212,7 +202,7 @@ export function buildProjectTree(cwd: string, maxDepth = 2): string {
     return lines
   }
 
-  const lines = walk(cwd, 0, '')
+  const lines = walk(cwd, 0, '', readEntries(cwd) ?? [])
   return lines.length > 0 ? `${basename(cwd)}/\n${lines.join('\n')}` : basename(cwd)
 }
 
