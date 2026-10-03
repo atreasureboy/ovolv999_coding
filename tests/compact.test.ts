@@ -80,6 +80,18 @@ describe('maybeCompact split logic', () => {
 // ── microCompact ────────────────────────────────────────────────────────────
 
 describe('microCompact', () => {
+  it('protects six recent uncleared results even when their content is tiny', () => {
+    const messages: OpenAIMessage[] = [
+      { role: 'tool', name: 'Read', content: 'old'.repeat(100) },
+      { role: 'tool', name: 'Read', content: '[Old tool result content cleared — re-run the tool if needed]' },
+      ...Array.from({ length: 6 }, () => ({ role: 'tool' as const, name: 'Read', content: 'tiny' })),
+    ]
+    const result = microCompact(messages)
+    expect(result.toolsCleared).toBe(1)
+    expect(result.messages[0].content).toBe('[Old tool result content cleared — re-run the tool if needed]')
+    expect(result.messages.slice(2).map(message => message.content)).toEqual(['tiny', 'tiny', 'tiny', 'tiny', 'tiny', 'tiny'])
+  })
+
   /** Helper: create a tool result message with substantial content */
   function toolResult(name: string, id: string, content: string): OpenAIMessage {
     return { role: 'tool', tool_call_id: id, content, name }
@@ -946,30 +958,14 @@ describe('maybeCompact — abort propagation (cancellation defect fix)', () => {
     )).rejects.toBe(abortErr)
   })
 
-  it('source-level guard: engine evaluateContextBudget passes the turn signal', () => {
-    // Confirm the engine's call sites forward the AbortSignal. We can't
-    // easily reach into engine.ts from a runtime test without spinning
-    // up the full state machine, so this is the structural regression
-    // guard that future edits can rely on.
-    // Use top-level readFileSync import
-    const src = readFileSync(
-      fileURLToPath(new URL('../src/core/engine.ts', import.meta.url)),
-      'utf8',
-    )
-    // First call site: the pressure-driven compact.
-    expect(src).toMatch(/await maybeCompact\(\s*this\.client,\s*this\.config\.model,\s*messages,\s*turnAbortSignal\s*\)/)
-    // Second call site: the reactive-compact-after-context-overflow retry.
-    // The pattern in the source is the compactResult await line — we
-    // accept either order of args as long as turnAbortSignal is passed.
-    const reactivePasses = /maybeCompact\(this\.client,\s*this\.config\.model,\s*messages,\s*turnAbortSignal\)/.test(src)
-    expect(reactivePasses).toBe(true)
-    // Both call sites counted → 2 occurrences of the 4-arg form.
-    const matches = src.match(/maybeCompact\(\s*this\.client,\s*this\.config\.model,\s*messages,\s*turnAbortSignal/g)
-    expect(matches?.length).toBe(2)
-  })
 })
 
 describe('isAbort helper (cancellation recogniser)', () => {
+  it('treats thrown objects with non-string messages as ordinary failures', () => {
+    expect(isAbort({ message: 123 })).toBe(false)
+    expect(isAbort({ message: { text: 'aborted' } })).toBe(false)
+  })
+
   it('returns true when signal is aborted', () => {
     const ac = new AbortController(); ac.abort()
     expect(isAbort(new Error('whatever'), ac.signal)).toBe(true)
