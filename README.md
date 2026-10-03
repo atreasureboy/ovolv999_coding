@@ -7,8 +7,6 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript)](https://www.typescriptlang.org/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/Node-%3E%3D22.13.0-339933?logo=node.js)](https://nodejs.org/)
-[![Tests](https://img.shields.io/badge/Tests-3424%20passed-brightgreen)]()
-[![Test Files](https://img.shields.io/badge/Test%20Files-139-blue)]()
 
 > `ovolv999 "任何你需要它完成的任务"`
 
@@ -16,7 +14,7 @@
 
 ## 简介
 
-ovolv999 是一个**纯 Agent 基座框架**，仿 Claude Code 架构，核心设计为"超级个人编码工具"。
+ovolv999 是一个面向自主编码的 TypeScript Agent 基座。当前实现保留兼容模型接口，并参考 Codex 的工具路由、审批和执行生命周期划分职责。模块边界、精简依据与验证记录见 [逐模块重构说明](docs/module-refinement.md)。
 
 所有 Agent 共享同一套运行时（Harness），通过启用/禁用模块获得差异化能力。不存在 `agent_type` 枚举——角色是 `AgentConfig`（identity + modules + tools）的组合配置。
 
@@ -63,7 +61,7 @@ ovolv999 是一个**纯 Agent 基座框架**，仿 Claude Code 架构，核心�
 ```
 ╔═══════════════════════════════════════════════════════════════════════════╗
 ║                   ovolv999 — 统一 Harness + 模块化 Agent 基座               ║
-║              139 test files · 3424 tests · 37 tools · 83 commands          ║
+║                    Turn 生命周期 · 模块装配 · 工具调度                  ║
 ║              Runtime: openai · glob · zod · ink · react                     ║
 ╠═══════════════════════════════════════════════════════════════════════════╣
 ║                                                                           ║
@@ -440,141 +438,30 @@ ovolv999 读取多级配置（优先级从高到低）：
 
 ```
 ovolv999/
-├── bin/
-│   └── ovogogogo.ts                # CLI 入口 + REPL + session subcommands + --bg
+├── bin/ovogogogo.ts                  # CLI 装配入口
 ├── src/
-│   ├── core/                        # 引擎核心 (75 模块)
-│   │   ├── engine.ts                # 统一 Harness — Boot Sequence + Module 集成
-│   │   ├── types.ts                 # EngineConfig / Tool metadata / ToolContext
-│   │   ├── module.ts                # AgentModule 接口 (4 生命周期钩子)
-│   │   ├── moduleRegistry.ts        # 工厂注册 + 依赖解析 + 环检测
-│   │   ├── agentPresets.ts          # 4 preset + resolveAgentConfig
-│   │   ├── agentToolFilter.ts       # Agent 工具白名单过滤
-│   │   ├── compact.ts               # microCompact + strategy + tool_call 对保护
-│   │   ├── snipCompact.ts           # 手术式裁剪 (head/tail 截断)
-│   │   ├── autoCompact.ts           # 自动触发压缩
-│   │   ├── semanticMemory.ts        # 语义记忆 + 来源优先级 + hash 去重
-│   │   ├── episodicMemory.ts        # 过程记忆 (成功+失败轨迹)
-│   │   ├── knowledgeBase.ts         # 结构化知识库
-│   │   ├── permissionSystem.ts      # 权限模式 + allow/deny 规则
-│   │   ├── permissionRules.ts       # glob 规则匹配
-│   │   ├── pathSecurity.ts          # 路径安全检查
-│   │   ├── sandbox.ts               # 独立策略模块；非默认 OS 隔离
-│   │   ├── lspClient.ts             # 进程内 LSP 客户端
-│   │   ├── sshRemote.ts             # SSH 远程会话
-│   │   ├── backgroundSession.ts     # detached 会话管理
-│   │   ├── backgroundTaskManager.ts # 后台任务生命周期
-│   │   ├── oauth.ts                 # 独立 OAuth helper，MCP 未接线
-│   │   ├── mcpClient.ts             # MCP 客户端 (stdio)
-│   │   ├── magicDocs.ts             # 自动文档提取 (7 种提取器)
-│   │   ├── telemetry.ts             # opt-in 本地遥测
-│   │   ├── settingsSync.ts          # 加密设置同步
-│   │   ├── autoClassifier.ts        # 请求自动分类
-│   │   ├── autoDream.ts             # 空闲知识整理
-│   │   ├── effort.ts                # effort 分级系统
-│   │   ├── budget.ts                # token 预算控制
-│   │   ├── modes.ts                 # 模式系统
-│   │   ├── outputStyles.ts          # 输出风格
-│   │   ├── hooks.ts                 # 6 种 Hook + HookRunner
-│   │   ├── goals.ts                 # 目标管理
-│   │   ├── diagnostics.ts           # LSP 诊断集成
-│   │   ├── sessionManager.ts        # 会话管理
-│   │   ├── sessionTranscript.ts     # 会话转录
-│   │   ├── sessionStats.ts          # 会话统计
-│   │   ├── profiles.ts              # 配置 profile
-│   │   ├── snippets.ts              # 代码片段管理
-│   │   ├── bookmarks.ts             # 位置书签
-│   │   ├── commandHistory.ts        # 命令历史
-│   │   ├── fileHistory.ts           # 文件编辑历史 / rewind
-│   │   ├── fileDetection.ts         # 文件类型检测
-│   │   ├── fileState.ts             # 文件状态追踪
-│   │   ├── atomicWrite.ts           # 原子写入
-│   │   ├── costTracker.ts           # token/cost 统计
-│   │   ├── eventLog.ts              # 不可变审计流
-│   │   ├── messageBus.ts            # 内部消息总线
-│   │   ├── pluginManager.ts         # 插件管理
-│   │   ├── plugins.ts               # 插件接口
-│   │   ├── builtinPlugins.ts        # 内置插件
-│   │   ├── daemon.ts                # 后台守护进程
-│   │   ├── cron.ts                  # 定时任务
-│   │   ├── workflow.ts              # 工作流
-│   │   ├── loopEngine.ts            # 循环引擎
-│   │   ├── teamMemory.ts            # 团队记忆共享
-│   │   ├── skillSearch.ts           # 技能语义搜索
-│   │   ├── riskClassifier.ts        # 风险分类
-│   │   ├── thinkingTagFilter.ts     # thinking 标签过滤
-│   │   ├── promptSuggestions.ts     # 提示建议
-│   │   ├── suggestions.ts           # 自动建议
-│   │   ├── onboarding.ts            # 首次引导
-│   │   ├── migrations.ts            # 配置迁移
-│   │   ├── systemPrompt.ts          # 系统提示词组装
-│   │   ├── config.ts                # 配置管理
-│   │   ├── providers.ts             # LLM provider 管理
-│   │   ├── codeMetrics.ts           # 代码度量
-│   │   ├── claudeCodeWorkerManager.ts # tmux Claude Code worker 管理
-│   │   ├── queryStateMachine.ts     # 查询状态机
-│   │   ├── taskTimer.ts             # 任务计时
-│   │   ├── workspace.ts             # 工作区管理
-│   │   └── strings.ts               # str() 安全转换 helper
-│   ├── tools/                       # 工具层 (37 工具)
-│   │   ├── bash.ts                  # 跨平台 shell + 后台任务
-│   │   ├── fileRead.ts / fileWrite.ts / fileEdit.ts
-│   │   ├── glob.ts / grep.ts
-│   │   ├── todo.ts / notebookEdit.ts
-│   │   ├── webFetch.ts / webSearch.ts / webBrowser.ts
-│   │   ├── agent.ts                 # AgentConfig 驱动 + 验证闸门
-│   │   ├── claudeCode.ts            # 外部 Claude Code worker
-│   │   ├── enterPlanMode.ts / exitPlanMode.ts / verifyPlanExecution.ts
-│   │   ├── tasks.ts                 # TaskCreate/Get/List/Update/Stop (5 工具)
-│   │   ├── worktree.ts              # Git worktree (3 工具)
-│   │   ├── mcpResources.ts          # MCP 资源 (2 工具)
-│   │   ├── brief.ts / ctxInspect.ts / terminalCapture.ts
-│   │   ├── pushNotification.ts / sleep.ts / snip.ts
-│   │   ├── diagnostics.ts / goal.ts / askUser.ts
-│   │   ├── loadSkill.ts / shellSession.ts / tmuxSession.ts
-│   │   ├── mcpToolAdapter.ts
-│   │   └── index.ts                 # 工具注册
-│   ├── commands/                    # 斜杠命令 (83 个)
-│   │   ├── builtin.ts               # 全部命令注册
-│   │   ├── index.ts / mod.ts
-│   ├── modules/                     # 内置能力模块
-│   │   ├── memory.ts                # 相关性检索 + 3 memory tools + episodic
-│   │   ├── critic.ts                # 每 N 轮 LLM 纠错
-│   │   ├── workspace.ts             # sessionDir 注入
-│   │   └── reflection.ts            # 知识提取 + session 整合
+│   ├── cli/                         # 参数、环境、路径、单任务与交互会话
+│   ├── core/
+│   │   ├── engine.ts / engine/       # turn 调度、策略、流解析、结果验收
+│   │   ├── compact.ts / compact/     # 压缩策略、预算与 token 估算
+│   │   ├── providers.ts / providers/ # 兼容导出、元数据、识别与能力
+│   │   └── *.ts                     # 运行状态、持久化、进程、权限及独立能力
+│   ├── commands/
+│   │   ├── builtin.ts               # 一处注册装配，保留有效顺序和别名
+│   │   └── *Commands.ts             # 按职责分组的命令处理
+│   ├── config/settings.ts / settings/ # 读取保存、规范化、分层与补丁合并
+│   ├── tools/                       # 工具规则及文件/输出共享步骤
+│   ├── modules/                     # memory、critic、workspace、reflection、mcp
+│   ├── integrations/acp.ts / acp/    # RPC 调度、协议规则与输入组帧
+│   ├── integrations/pipeMode.ts      # 管道模式
+│   ├── ui/ink/                      # 会话 controller、状态 store 与展示组件
+│   ├── ui/                          # readline、Renderer、输入与历史裁剪
+│   ├── skills/                      # 发现、加载与提取
 │   ├── prompts/                     # 提示词
-│   │   ├── system.ts / tools.ts / critic.ts
-│   ├── ui/                          # 终端 UI (15 文件)
-│   │   ├── renderer.ts              # 流式输出 + 工具卡片 + spinner
-│   │   ├── input.ts                 # readline + stdin pipe
-│   │   ├── vim.ts                   # vim 模式 (normal/insert/visual)
-│   │   ├── keybindings.ts           # 可定制键绑定
-│   │   ├── theme.ts / markdown.ts / ansi.ts
-│   │   ├── statusLine.ts / statusLineCustom.ts
-│   │   ├── tmuxLayout.ts            # tmux 窗口管理
-│   │   ├── slashSuggest.ts / thinkingDisplay.ts
-│   │   ├── diffBrowser.ts / historyTrimmer.ts
-│   │   └── turnDeadline.ts
-│   ├── skills/                      # 技能系统
-│   │   ├── loader.ts                # frontmatter 解析 + formatSkillIndex
-│   │   └── extractor.ts             # 技能提取
-│   ├── utils/                       # 工具函数 (19 文件)
-│   │   ├── ide.ts                   # IDE 检测 (9 种编辑器)
-│   │   ├── autoUpdater.ts           # 自动更新检查
-│   │   ├── cacheStats.ts            # prompt cache 统计
-│   │   ├── systemHealth.ts          # 13 项系统健康检查
-│   │   ├── apiError.ts / cleanup.ts / clipboard.ts
-│   │   ├── doctor.ts / editor.ts / globMatch.ts
-│   │   ├── imageInput.ts / inputHistory.ts
-│   │   ├── keychain.ts / notifier.ts
-│   │   ├── secretScanner.ts / sessionExport.ts
-│   │   ├── terminalTitle.ts / vcr.ts
-│   │   └── ansi.ts
-│   └── integrations/                # 外部协议集成
-│       ├── acp.ts                   # stdio JSON-RPC adapter，能力由已装配 handler 决定
-│       └── pipeMode.ts              # 管道模式
-├── tests/                           # 139 test files · 3424 tests
-└── package.json                     # runtime: openai/glob/zod/ink/react
+│   └── utils/                       # 独立工具函数
+├── tests/                           # 行为回归测试；新增用例对应源码目录
+├── scripts/                         # clean build、安装后验收与发布门禁
+└── docs/module-refinement.md         # 入口职责、修复依据与本轮验证
 ```
 
 ## AgentOS 概念对照
@@ -613,7 +500,7 @@ ovolv999/
 | 运行时 | Node.js ≥ 22.13.0 |
 | LLM API | OpenAI SDK (兼容 Claude/GPT/本地端点) |
 | 终端 UI | Ink + React（可选 `--ink`）/ readline REPL（默认） |
-| 测试 | Vitest (3424 tests · 139 files) |
+| 测试 | Vitest；执行结果见重构与发布验收记录 |
 | Lint | ESLint (typescript-eslint recommendedTypeChecked) |
 | 运行时依赖 | openai · glob · zod · ink · react (5 个) |
 
