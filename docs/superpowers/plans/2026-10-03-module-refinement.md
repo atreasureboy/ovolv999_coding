@@ -47,7 +47,7 @@ Interfaces: preserve entrypoint helper exports, flags, help text, session safety
 - [x] Preserve existing CLI behavior with its process-level tests.
 - [x] Extract parsing/environment/path/help/session responsibilities; unify repeated subcommand dispatch.
 - [x] Remove redundant private argument implementations only after call-site verification.
-- [ ] Run CLI and pipe suites and installed CLI checks.
+- [x] Run CLI and pipe suites and installed CLI checks.
 
 ## Task 3: Commands and Ink state (commands implementer)
 
@@ -87,6 +87,5 @@ Interfaces: existing exports and ordered provider matching; fixed hook-name set,
 - [x] Examine persistence/runtime, modules/memory, remaining UI and utilities for concrete duplication and dead code; refine independently where justified.
 - [x] Record module ownership and examined-but-unchanged boundaries in repository documentation.
 - [x] Obtain an independent whole-diff review; fix reproduced regressions.
-- [ ] Run full typecheck, lint, tests, build and installed-package acceptance on frozen source.
-- [ ] Save reviewable domain commits and report actual scope, baseline comparison and remaining limitations.
-
+- [x] Run full typecheck, lint, tests, build and installed-package acceptance on frozen source.
+- [x] Save reviewable domain commits and report actual scope, baseline comparison and remaining limitations.

@@ -68,4 +68,10 @@ ModelGateway、ProviderAdmission、RunContext、执行后端、工作区租约�
 
 独立交叉审查未发现重构引入的实质回归。额外差分检查覆盖 13,125 次 Bash 字节缓冲操作、374 个 RunStore JSON 边界、500 个混合历史裁剪场景和 63 个合法 cron 字段，与基线行为相同；这不等同于所有输入的形式证明。
 
-打包安装验收待执行。回归日志位于忽略目录 `.artifacts/refactor/`；打包验收日志位于 `.artifacts/production/`。这两个目录不进入 npm 包。
+干净构建、打包、独立目录冻结安装及安装后验收通过，共 18 项检查：包括命令 shim、help/version、ESM 命令加载、单任务/管道/stdin、历史恢复、审批拒绝、编辑后真实验证、旧 schema、ACP stdio 和后台进程树停止。验收使用本地模型服务，未访问线上模型。
+
+安装验收对应 clean commit `0fac35c0f267b99d704f9527fd84127ad7509dc5`，源码指纹 `fa332049dd3a93487d415c044dc0eab6e778b84380112c49207af09f36d502f5`；后续仅完善文档，最终 clean build 指纹相同。npm 包 SHA256：`28aa246aabdb50bd03f134e2625d15faf6a6c585eb84f3fa0386c21f8b19c36d`。
+
+最终编译入口实测：`createTools()` 默认实例化 32 个工具；命令组定义 82 个有效主命令，注册后含别名共 136 个条目。模块工具、动态 MCP 和按需 LoadSkill 在运行时另行装配。
+
+回归日志位于忽略目录 `.artifacts/refactor/`；打包验收日志位于 `.artifacts/production/release-package-smoke.json`。这两个目录不进入 npm 包。

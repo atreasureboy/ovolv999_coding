@@ -2,7 +2,7 @@
 
 <div align="center">
 
-**统一 Harness · 模块化能力 · 流式引擎 · 并发调度 · 三层记忆 · 37 工具 · 83 命令**
+**统一 Harness · 模块化能力 · 流式引擎 · 并发调度 · 三层记忆 · 可组合工具与命令**
 
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript)](https://www.typescriptlang.org/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -106,7 +106,7 @@ ovolv999 是一个面向自主编码的 TypeScript Agent 基座。当前实现�
 ║  │  Abort: softAbort(ESC) / hardAbort(Ctrl+C)                         │   ║
 ║  └─────────────────────────────────────────────────────────────────────┘   ║
 ║                                                                           ║
-║  ┌─ Modules (4) ──┐  ┌─ Tools (37) ────────┐  ┌─ Memory (3 层) ──────┐  ║
+║  ┌─ Modules ─────┐  ┌─ Tools ─────────────┐  ┌─ Memory (3 层) ──────┐  ║
 ║  │ memory         │  │ Bash/Read/Write/Edit │  │ Semantic: 关键词检索  │  ║
 ║  │ critic         │  │ Glob/Grep/Todo       │  │ Episodic: 工具轨迹    │  ║
 ║  │ workspace      │  │ Web* /Agent/Skill    │  │ KnowledgeBase: 结构化 │  ║
@@ -120,7 +120,7 @@ ovolv999 是一个面向自主编码的 TypeScript Agent 基座。当前实现�
 ║  └────────────────┘  │ ClaudeCode/Diag      │  │ MagicDocs             │  ║
 ║                      │ MCP Resources(2)     │  │ Telemetry             │  ║
 ║  ┌─ Commands ────┐  └──────────────────────┘  │ Settings Sync         │  ║
-║  │ 83 built-in   │                            └──────────────────────┘  ║
+║  │ 按职责分组注册 │                            └──────────────────────┘  ║
 ║  └───────────────┘                                                      ║
 ║                                                                           ║
 ║  输出: sessions/session_TIMESTAMP/ → 会话产物、EventLog、agent-logs       ║
@@ -213,7 +213,7 @@ tool_calls [A, B, C, D, E, F]
            → Promise.all([E, F]) → 同时执行
 ```
 
-## 工具参考（37 个）
+## 工具参考
 
 | 类别 | 工具 | 说明 |
 |------|------|------|
@@ -232,7 +232,7 @@ tool_calls [A, B, C, D, E, F]
 | **MCP** | ListMcpResources, ReadMcpResource | MCP 资源读取 |
 | **其他** | AskUser, TodoWrite | 用户交互 + 任务清单 |
 
-## 斜杠命令（83 个）
+## 斜杠命令
 
 | 类别 | 命令 |
 |------|------|
