@@ -33,10 +33,10 @@ const MODEL_PRICING: Record<string, ModelPricing> = {
   'gpt-4-turbo': { inputPer1M: 10, outputPer1M: 30 },
   'gpt-4': { inputPer1M: 30, outputPer1M: 60 },
   'gpt-3.5-turbo': { inputPer1M: 0.5, outputPer1M: 1.5 },
-  'o1': { inputPer1M: 15, outputPer1M: 60 },
+  o1: { inputPer1M: 15, outputPer1M: 60 },
   'o1-mini': { inputPer1M: 3, outputPer1M: 12 },
   'o1-pro': { inputPer1M: 150, outputPer1M: 600 },
-  'o3': { inputPer1M: 10, outputPer1M: 40 },
+  o3: { inputPer1M: 10, outputPer1M: 40 },
   'o3-mini': { inputPer1M: 1.1, outputPer1M: 4.4 },
   'o4-mini': { inputPer1M: 1.1, outputPer1M: 4.4 },
   // Anthropic (Claude)
@@ -60,7 +60,7 @@ const MODEL_PRICING: Record<string, ModelPricing> = {
  */
 export function getModelPricing(model: string): ModelPricing | null {
   // Exact match
-  if (MODEL_PRICING[model]) return MODEL_PRICING[model]
+  if (Object.hasOwn(MODEL_PRICING, model)) return MODEL_PRICING[model]
 
   // Prefix match — longest prefix wins (most specific)
   let best: ModelPricing | null = null
@@ -98,7 +98,10 @@ export interface ModelUsage {
  */
 export function calculateUSDCost(model: string, usage: TokenUsage): number {
   const pricing = getModelPricing(model)
-  if (!pricing) return 0
+  return pricing ? priceUsage(pricing, usage) : 0
+}
+
+function priceUsage(pricing: ModelPricing, usage: TokenUsage): number {
   return (
     (usage.inputTokens / 1_000_000) * pricing.inputPer1M +
     (usage.outputTokens / 1_000_000) * pricing.outputPer1M
@@ -157,14 +160,8 @@ export class CostTracker {
   /** Record usage from a single API call. */
   addUsage(model: string, usage: TokenUsage, durationMs?: number): void {
     const pricing = getModelPricing(model)
-    let cost = 0
-    if (pricing) {
-      cost =
-        (usage.inputTokens / 1_000_000) * pricing.inputPer1M +
-        (usage.outputTokens / 1_000_000) * pricing.outputPer1M
-    } else {
-      this._hasUnknownModel = true
-    }
+    const cost = pricing ? priceUsage(pricing, usage) : 0
+    if (!pricing) this._hasUnknownModel = true
     this.totalCostUSD += cost
     this.totalInputTokens += usage.inputTokens
     this.totalOutputTokens += usage.outputTokens
@@ -229,9 +226,7 @@ export class CostTracker {
   formatSummary(): string {
     const costDisplay =
       formatCost(this.totalCostUSD) +
-      (this._hasUnknownModel
-        ? ' (costs may be inaccurate — unknown model pricing)'
-        : '')
+      (this._hasUnknownModel ? ' (costs may be inaccurate — unknown model pricing)' : '')
 
     const lines: string[] = [
       `Total cost:           ${costDisplay}`,
@@ -263,10 +258,7 @@ export class CostTracker {
  * Estimate token count from raw text.
  * Default ratio: 4 bytes/token (matching OpenAI's rough guidance).
  */
-export function roughTokenCountEstimation(
-  content: string,
-  bytesPerToken = 4,
-): number {
+export function roughTokenCountEstimation(content: string, bytesPerToken = 4): number {
   return Math.round(content.length / bytesPerToken)
 }
 

@@ -22,22 +22,52 @@ function identity(value: unknown): value is string {
   return text(value, 128) && /^[a-zA-Z0-9][\w-]*$/.test(value) && !['constructor', 'prototype'].includes(value)
 }
 
-function timestamp(value: unknown): boolean {
+function timestamp(value: unknown): value is string {
   if (typeof value !== 'string') return false
   const time = Date.parse(value)
   return Number.isFinite(time) && new Date(time).toISOString() === value
 }
 
+function validRunOwner(value: unknown): value is ProcessIdentity {
+  return object(value)
+    && Number.isInteger(value.pid) && Number(value.pid) > 0
+    && text(value.hostname, 255) && text(value.birthId, 256)
+}
+
+function validRunMetadata(value: Record<string, unknown>, path: string): boolean {
+  return value.schemaVersion === 1
+    && identity(value.runId) && basename(path) === value.runId + '.json'
+    && (value.parentRunId === undefined || identity(value.parentRunId))
+    && text(value.workspace, 32768) && text(value.epoch, 128)
+    && Number.isSafeInteger(value.revision) && Number(value.revision) >= 0
+    && RUN_STATUSES.has(String(value.status))
+    && validRunOwner(value.owner) && object(value.operations)
+}
+
+function validAcceptance(value: unknown): value is NonNullable<RunRecord['acceptance']> {
+  return object(value) && text(value.definitionHash, 256) && text(value.artifactVersion, 256)
+}
+
+type OperationIntent = Pick<RunRecord['operations'][string], 'name' | 'readOnly' | 'intentAt'> & { receipt?: unknown }
+
+function validOperationIntent(value: unknown): value is OperationIntent {
+  return object(value) && text(value.name, 256) && typeof value.readOnly === 'boolean' && timestamp(value.intentAt)
+}
+
+function validOperationReceipt(value: unknown): value is NonNullable<RunRecord['operations'][string]['receipt']> {
+  return object(value) && typeof value.status === 'string' && RECEIPT_STATUSES.has(value.status) && timestamp(value.recordedAt)
+}
+
 function validate(value: unknown, path: string): asserts value is RunRecord {
   const fail = (): never => { throw new Error(`Unsupported or corrupt RunStore: ${path}; preserve for recovery`) }
-  if (!object(value) || value.schemaVersion !== 1 || !identity(value.runId) || basename(path) !== value.runId + '.json' || (value.parentRunId !== undefined && !identity(value.parentRunId)) || !text(value.workspace, 32768) || !text(value.epoch, 128) || !Number.isSafeInteger(value.revision) || Number(value.revision) < 0 || !RUN_STATUSES.has(String(value.status)) || !object(value.owner) || !Number.isInteger(value.owner.pid) || Number(value.owner.pid) <= 0 || !text(value.owner.hostname, 255) || !text(value.owner.birthId, 256) || !object(value.operations)) fail()
+  if (!object(value) || !validRunMetadata(value, path)) fail()
   const record = value as RunRecord
-  if (record.acceptance !== undefined && (!object(record.acceptance) || !text(record.acceptance.definitionHash, 256) || !text(record.acceptance.artifactVersion, 256))) fail()
+  if (record.acceptance !== undefined && !validAcceptance(record.acceptance)) fail()
   const operations = Object.entries(record.operations)
   if (operations.length > MAX_RUN_OPERATIONS) throw new Error(`RunStore operation limit exceeded at ${path}; preserve for recovery`)
   for (const [id, operation] of operations) {
-    if (!identity(id) || !object(operation) || !text(operation.name, 256) || typeof operation.readOnly !== 'boolean' || !timestamp(operation.intentAt)) fail()
-    if (operation.receipt !== undefined && (!object(operation.receipt) || !RECEIPT_STATUSES.has(operation.receipt.status) || !timestamp(operation.receipt.recordedAt))) fail()
+    if (!identity(id) || !validOperationIntent(operation)) fail()
+    if (operation.receipt !== undefined && !validOperationReceipt(operation.receipt)) fail()
   }
 }
 

@@ -94,6 +94,13 @@ const MAX_OUTPUT_RETURN = 30_000  // 30KB cap when returning to LLM context
 const DEFAULT_MAX_OUTPUT_FILE_BYTES = 10 * 1024 * 1024 // 10MB per-task log rotation cap
 const DEFAULT_SIGKILL_GRACE_MS = 3000     // grace period before SIGKILL escalation
 
+function recordTaskCompletion(info: TaskInfo, status: TaskStatus, exitCode: number | null, endTime = Date.now()): void {
+  info.status = status
+  info.exitCode = exitCode
+  info.endTime = endTime
+  info.durationMs = endTime - info.startTime
+}
+
 // ── Process-tree helpers ────────────────────────────────────────────────────
 
 /**
@@ -128,10 +135,7 @@ function stopInternal(task: InternalTask, graceMs: number): boolean {
         const result = await stopOwnedProcessTree(tree, graceMs)
         if (!result.stopped) throw new Error(result.reason ?? 'Process tree stop failed')
       }
-      task.info.status = 'stopped'
-      task.info.exitCode = proc.exitCode
-      task.info.endTime = Date.now()
-      task.info.durationMs = task.info.endTime - task.info.startTime
+      recordTaskCompletion(task.info, 'stopped', proc.exitCode)
       task.onSettled()
     } catch (error) {
       task.info.status = 'stop_failed'
@@ -327,10 +331,7 @@ export class BackgroundTaskManager {
     // escalation finishes.
     if (options?.signal?.aborted) {
       this.tasks.set(id, task)
-      info.status = 'stopped'
-      info.endTime = info.startTime
-      info.durationMs = 0
-      info.exitCode = -1
+      recordTaskCompletion(info, 'stopped', -1, info.startTime)
       task.stopped = true
       onSettled()
       return id
@@ -400,10 +401,7 @@ export class BackgroundTaskManager {
       task.process = null
       if (task.stopped) return
       if (info.status !== 'running') return
-      info.exitCode = code
-      info.status = code === 0 ? 'completed' : 'failed'
-      info.endTime = Date.now()
-      info.durationMs = info.endTime - info.startTime
+      recordTaskCompletion(info, code === 0 ? 'completed' : 'failed', code)
     })
 
     proc.on('error', (err: Error & { code?: string }) => {
@@ -419,10 +417,7 @@ export class BackgroundTaskManager {
       task.process = null
       if (task.stopped) return
       if (info.status !== 'running') return
-      info.exitCode = -1
-      info.status = 'failed'
-      info.endTime = Date.now()
-      info.durationMs = info.endTime - info.startTime
+      recordTaskCompletion(info, 'failed', -1)
     })
 
     this.tasks.set(id, task)

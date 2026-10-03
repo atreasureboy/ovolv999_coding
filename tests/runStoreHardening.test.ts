@@ -20,6 +20,13 @@ it.each([
   { status: 'fictional_success' },
   { operations: [] },
   { operations: { malformed: { name: 'Write', readOnly: false, intentAt: new Date().toISOString(), receipt: {} } } },
+  { schemaVersion: 2 },
+  { parentRunId: '../outside' },
+  { acceptance: { definitionHash: '', artifactVersion: 'artifact' } },
+  { acceptance: { definitionHash: 'definition', artifactVersion: 42 } },
+  { operations: { malformed: { name: 'Write', readOnly: 'false', intentAt: new Date().toISOString() } } },
+  { operations: { malformed: { name: 'Write', readOnly: false, intentAt: '2026-10-03' } } },
+  { operations: { malformed: { name: 'Write', readOnly: false, intentAt: new Date().toISOString(), receipt: { status: 'completed', recordedAt: '2026-10-03' } } } },
 ])('rejects invalid authoritative run data %j without rewriting it', patch => {
   const run = store()
   const invalid = JSON.stringify({ ...JSON.parse(readFileSync(run.path, 'utf8')), ...patch })

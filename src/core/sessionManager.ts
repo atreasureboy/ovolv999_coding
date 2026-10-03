@@ -192,6 +192,22 @@ function isValidContentPart(part: unknown): boolean {
   return typeof image.url === 'string' && image.url.length > 0 && (image.detail === undefined || ['auto', 'low', 'high'].includes(image.detail as string))
 }
 
+function validateMessageArray(
+  messages: unknown[],
+  errorForIndex: (index: number) => Error,
+): asserts messages is OpenAIMessage[] {
+  for (let index = 0; index < messages.length; index++) {
+    if (!isValidMessageShape(messages[index])) throw errorForIndex(index)
+  }
+}
+
+function validateStoredMessages(messages: unknown[], sessionDir: string): asserts messages is OpenAIMessage[] {
+  validateMessageArray(messages, index => new CorruptSessionError(
+    sessionDir,
+    new Error(`history[${index}] does not match OpenAIMessage shape (role/content invalid)`),
+  ))
+}
+
 function sessionIdFor(sessionDir: string): string {
   return basename(sessionDir).match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)?.[0]
     ?? `legacy_${createHash('sha256').update(resolve(sessionDir)).digest('hex')}`
@@ -208,7 +224,7 @@ function sessionIdFor(sessionDir: string): string {
  *
  * Filename is never consulted — detection is purely from content.
  */
-function isEnvelope(parsed: unknown): parsed is Record<string, unknown> {
+function isEnvelope(parsed: unknown): parsed is EnvelopeRecord {
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false
   const obj = parsed as Record<string, unknown>
   return typeof obj.version === 'number'
@@ -219,16 +235,18 @@ function isEnvelope(parsed: unknown): parsed is Record<string, unknown> {
  * isEnvelope() to confirm it isn't a legacy root array. Per-field types
  * are validated inside `migrateToCurrent` — this is just a structural view.
  */
-type EnvelopeRecord = {
+type EnvelopeRecord = Record<string, unknown> & {
   version: number
-  schema: unknown
-  updatedAt: unknown
-  messages: unknown
 }
 
-/** Narrow an `isEnvelope()`-confirmed object to its declared shape. */
-function asEnvelopeRecord(parsed: Record<string, unknown>): EnvelopeRecord {
-  return parsed as unknown as EnvelopeRecord
+function hasCurrentSessionIdentity(value: EnvelopeRecord): boolean {
+  if (typeof value.sessionId !== 'string' || !value.sessionId
+    || typeof value.revision !== 'number' || !Number.isSafeInteger(value.revision) || value.revision < 1
+    || !value.owner || typeof value.owner !== 'object') return false
+  const owner = value.owner as Record<string, unknown>
+  return typeof owner.pid === 'number' && Number.isInteger(owner.pid) && owner.pid > 0
+    && typeof owner.hostname === 'string'
+    && typeof owner.birthId === 'string' && owner.birthId.length > 0
 }
 
 /**
@@ -287,15 +305,8 @@ function isValidIsoTimestamp(value: unknown): value is string {
 function migrateToCurrent(parsed: unknown, sessionDir: string): SessionEnvelope {
   if (Array.isArray(parsed)) {
     // Legacy v0: root array. Validate messages then migrate to v1.
-    for (let i = 0; i < parsed.length; i++) {
-      if (!isValidMessageShape(parsed[i])) {
-        throw new CorruptSessionError(
-          sessionDir,
-          new Error(`history[${i}] does not match OpenAIMessage shape (role/content invalid)`),
-        )
-      }
-    }
-    return migrateLegacyV0ToV1(parsed as OpenAIMessage[], sessionDir)
+    validateStoredMessages(parsed, sessionDir)
+    return migrateLegacyV0ToV1(parsed, sessionDir)
   }
 
   if (!isEnvelope(parsed)) {
@@ -305,7 +316,7 @@ function migrateToCurrent(parsed: unknown, sessionDir: string): SessionEnvelope 
     )
   }
 
-  const env = asEnvelopeRecord(parsed)
+  const env = parsed
   const version = env.version
 
   // Gate (1): version range. Done BEFORE field-shape validation so a future
@@ -347,24 +358,16 @@ function migrateToCurrent(parsed: unknown, sessionDir: string): SessionEnvelope 
     )
   }
   const messages = env.messages
-  for (let i = 0; i < messages.length; i++) {
-    if (!isValidMessageShape(messages[i])) {
-      throw new CorruptSessionError(
-        sessionDir,
-        new Error(`history[${i}] does not match OpenAIMessage shape (role/content invalid)`),
-      )
-    }
-  }
+  validateStoredMessages(messages, sessionDir)
 
   if (version === CURRENT_SESSION_VERSION) {
-    const current = parsed as unknown as SessionEnvelope
-    if (typeof current.sessionId !== 'string' || !current.sessionId || !Number.isSafeInteger(current.revision) || current.revision < 1 || !current.owner || !Number.isInteger(current.owner.pid) || current.owner.pid <= 0 || typeof current.owner.hostname !== 'string' || typeof current.owner.birthId !== 'string' || !current.owner.birthId) {
+    if (!hasCurrentSessionIdentity(env)) {
       throw new CorruptSessionError(sessionDir, new Error('history sessionId/revision/owner is invalid'))
     }
     return env as unknown as SessionEnvelope
   }
 
-  if (version === 1) return { ...migrateLegacyV0ToV1(messages as OpenAIMessage[], sessionDir), updatedAt: env.updatedAt }
+  if (version === 1) return { ...migrateLegacyV0ToV1(messages, sessionDir), updatedAt: env.updatedAt }
 
   // Intermediate versions (MIN..CURRENT) — a clean migration step is needed.
   // Future: add migrateToV2, migrateToV3, ... and dispatch by version here.
@@ -495,14 +498,10 @@ export function saveSession(sessionDir: string, history: OpenAIMessage[], expect
   // can never produce a half-written / orphan-tmp state. The error path
   // MUST be free of side effects — callers rely on "saveSession threw,
   // therefore nothing on disk changed for the history".
-  for (let i = 0; i < history.length; i++) {
-    if (!isValidMessageShape(history[i])) {
-      throw new TypeError(
-        `history[${i}] does not match OpenAIMessage shape ` +
-        `(role='tool' rows must include a non-empty tool_call_id; all rows need a valid role and string-or-null content)`,
-      )
-    }
-  }
+  validateMessageArray(history, index => new TypeError(
+    `history[${index}] does not match OpenAIMessage shape ` +
+    `(role='tool' rows must include a non-empty tool_call_id; all rows need a valid role and string-or-null content)`,
+  ))
 
   const historyPath = join(sessionDir, 'history.json')
   // Uniquely-suffixed tmp — pid + ms + 8 random bytes hex. Same shape as

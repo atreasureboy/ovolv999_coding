@@ -1,4 +1,15 @@
-import { appendFileSync, closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'fs'
+import {
+  appendFileSync,
+  closeSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from 'fs'
 import { join } from 'path'
 import { createHash, randomBytes, randomUUID } from 'crypto'
 import { acquirePersistenceLease, withPersistenceLock } from './persistenceLock.js'
@@ -26,14 +37,15 @@ export interface SemanticMemoryWriteResult extends SemanticMemoryEntry {
   persistenceError?: string
 }
 
-interface TagIndex {
-  [tag: string]: Set<string>
-}
-
-const SOURCE_PRIORITY: Record<string, number> = { user_stated: 3, agent_inferred: 2, consolidation: 2, tool_observed: 1 }
+const SOURCE_PRIORITY = new Map([
+  ['user_stated', 3],
+  ['agent_inferred', 2],
+  ['consolidation', 2],
+  ['tool_observed', 1],
+])
 
 function sourceRank(source: string): number {
-  return SOURCE_PRIORITY[source] ?? 1
+  return SOURCE_PRIORITY.get(source) ?? 1
 }
 
 function contentHash(content: string): string {
@@ -43,21 +55,33 @@ function contentHash(content: string): string {
 export class SemanticMemory {
   private filePath: string
   private entries = new Map<string, SemanticMemoryEntry>()
-  private tagIndex: TagIndex = {}
+  private tagIndex = new Map<string, Set<string>>()
   private loaded = false
   private lastLoadedMtimeMs = -1
   private lastLoadedSize = -1
 
   constructor(projectDir: string) {
     const memDir = join(projectDir, 'memory')
-    try { mkdirSync(memDir, { recursive: true }) } catch (error) { void error }
+    try {
+      mkdirSync(memDir, { recursive: true })
+    } catch (error) {
+      void error
+    }
     this.filePath = join(memDir, 'semantic.jsonl')
   }
 
-  private replaceEntries(entries: Map<string, SemanticMemoryEntry>, mtimeMs: number, size: number): void {
-    const index: TagIndex = {}
+  private replaceEntries(
+    entries: Map<string, SemanticMemoryEntry>,
+    mtimeMs: number,
+    size: number,
+  ): void {
+    const index = new Map<string, Set<string>>()
     for (const entry of entries.values()) {
-      for (const tag of entry.tags) (index[tag] ??= new Set()).add(entry.id)
+      for (const tag of entry.tags) {
+        let ids = index.get(tag)
+        if (!ids) index.set(tag, (ids = new Set()))
+        ids.add(entry.id)
+      }
     }
     this.entries = entries
     this.tagIndex = index
@@ -69,7 +93,13 @@ export class SemanticMemory {
   private ensureLoaded(force = false): boolean {
     try {
       const before = statSync(this.filePath)
-      if (!force && this.loaded && before.mtimeMs === this.lastLoadedMtimeMs && before.size === this.lastLoadedSize) return true
+      if (
+        !force &&
+        this.loaded &&
+        before.mtimeMs === this.lastLoadedMtimeMs &&
+        before.size === this.lastLoadedSize
+      )
+        return true
       const raw = readFileSync(this.filePath, 'utf8')
       const after = statSync(this.filePath)
       if (before.mtimeMs !== after.mtimeMs || before.size !== after.size) return false
@@ -77,11 +107,22 @@ export class SemanticMemory {
       for (const line of raw.split('\n').filter(Boolean)) {
         try {
           const entry = JSON.parse(line) as SemanticMemoryEntry
-          if (typeof entry.id !== 'string' || typeof entry.content !== 'string' || !Array.isArray(entry.tags)) continue
-          entry.tags = entry.tags.filter(tag => typeof tag === 'string')
-          entry.provenance = { ...entry.provenance, status: 'unverified', claimedSource: entry.source }
+          if (
+            typeof entry.id !== 'string' ||
+            typeof entry.content !== 'string' ||
+            !Array.isArray(entry.tags)
+          )
+            continue
+          entry.tags = entry.tags.filter((tag) => typeof tag === 'string')
+          entry.provenance = {
+            ...entry.provenance,
+            status: 'unverified',
+            claimedSource: entry.source,
+          }
           entries.set(entry.id, entry)
-        } catch (error) { void error }
+        } catch (error) {
+          void error
+        }
       }
       this.replaceEntries(entries, after.mtimeMs, after.size)
       return true
@@ -95,19 +136,34 @@ export class SemanticMemory {
   }
 
   write(entry: Omit<SemanticMemoryEntry, 'id'>): SemanticMemoryWriteResult {
-    return this.writeUsing(entry, action => withPersistenceLock(this.filePath, action))
+    return this.writeUsing(entry, (action) => withPersistenceLock(this.filePath, action))
   }
 
   async writeAsync(entry: Omit<SemanticMemoryEntry, 'id'>): Promise<SemanticMemoryWriteResult> {
     try {
       const lease = await acquirePersistenceLease(this.filePath)
-      try { return this.writeUsing(entry, action => { lease.assertOwned(); return action() }) } finally { lease.release() }
+      try {
+        return this.writeUsing(entry, (action) => {
+          lease.assertOwned()
+          return action()
+        })
+      } finally {
+        lease.release()
+      }
     } catch (error) {
-      return { ...entry, id: `sem_${randomUUID()}`, persistence: 'failed', persistenceError: error instanceof Error ? error.message : 'Persistence failed' }
+      return {
+        ...entry,
+        id: `sem_${randomUUID()}`,
+        persistence: 'failed',
+        persistenceError: error instanceof Error ? error.message : 'Persistence failed',
+      }
     }
   }
 
-  private writeUsing(entry: Omit<SemanticMemoryEntry, 'id'>, guard: (action: () => SemanticMemoryWriteResult) => SemanticMemoryWriteResult): SemanticMemoryWriteResult {
+  private writeUsing(
+    entry: Omit<SemanticMemoryEntry, 'id'>,
+    guard: (action: () => SemanticMemoryWriteResult) => SemanticMemoryWriteResult,
+  ): SemanticMemoryWriteResult {
     const full: SemanticMemoryEntry = {
       ...entry,
       id: `sem_${randomUUID()}`,
@@ -115,12 +171,14 @@ export class SemanticMemory {
     }
     try {
       return guard(() => {
-        if (!this.ensureLoaded(true)) throw new Error('Memory could not be read; write was not committed')
+        if (!this.ensureLoaded(true))
+          throw new Error('Memory could not be read; write was not committed')
         const next = new Map(this.entries)
         const hash = contentHash(entry.content)
         for (const [id, existing] of next) {
           if (contentHash(existing.content) !== hash) continue
-          if (sourceRank(entry.source) < sourceRank(existing.source)) return { ...existing, persistence: 'persisted' }
+          if (sourceRank(entry.source) < sourceRank(existing.source))
+            return { ...existing, persistence: 'persisted' }
           const updated: SemanticMemoryEntry = {
             ...existing,
             confidence: Math.max(existing.confidence, entry.confidence),
@@ -145,7 +203,11 @@ export class SemanticMemory {
         return { ...full, persistence: 'persisted' }
       })
     } catch (error) {
-      return { ...full, persistence: 'failed', persistenceError: error instanceof Error ? error.message : 'Persistence failed' }
+      return {
+        ...full,
+        persistence: 'failed',
+        persistenceError: error instanceof Error ? error.message : 'Persistence failed',
+      }
     }
   }
 
@@ -154,14 +216,27 @@ export class SemanticMemory {
     let fd: number | undefined
     try {
       fd = openSync(tmpPath, 'wx')
-      writeFileSync(fd, Array.from(entries.values(), value => JSON.stringify(value)).join('\n') + '\n')
+      writeFileSync(
+        fd,
+        Array.from(entries.values(), (value) => JSON.stringify(value)).join('\n') + '\n',
+      )
       fsyncSync(fd)
       closeSync(fd)
       fd = undefined
       renameSync(tmpPath, this.filePath)
     } finally {
-      if (fd !== undefined) { try { closeSync(fd) } catch (error) { void error } }
-      try { unlinkSync(tmpPath) } catch (error) { void error }
+      if (fd !== undefined) {
+        try {
+          closeSync(fd)
+        } catch (error) {
+          void error
+        }
+      }
+      try {
+        unlinkSync(tmpPath)
+      } catch (error) {
+        void error
+      }
     }
   }
 
@@ -172,11 +247,7 @@ export class SemanticMemory {
   }
 
   /** Search by tags and/or keywords in content */
-  search(options: {
-    tags?: string[]
-    keywords?: string[]
-    limit?: number
-  }): SemanticMemoryEntry[] {
+  search(options: { tags?: string[]; keywords?: string[]; limit?: number }): SemanticMemoryEntry[] {
     this.ensureLoaded()
     let results: SemanticMemoryEntry[]
 
@@ -184,7 +255,7 @@ export class SemanticMemory {
     if (options.tags && options.tags.length > 0) {
       const candidateIds = new Set<string>()
       for (const tag of options.tags) {
-        const ids = this.tagIndex[tag]
+        const ids = this.tagIndex.get(tag)
         if (ids) {
           for (const id of ids) candidateIds.add(id)
         }
