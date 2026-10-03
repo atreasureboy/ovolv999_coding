@@ -5,15 +5,18 @@
  * Refreshed on demand (e.g. after turn execution).
  */
 
-import { execSync } from 'child_process'
+import { execFileSync } from 'child_process'
+import { resolve } from 'path'
 
-let cachedBranch: string | null | undefined
+const cachedBranches = new Map<string, string | null>()
 
 export function getGitBranch(cwd: string): string | null {
-  if (cachedBranch !== undefined) return cachedBranch
+  const workspace = resolve(cwd)
+  if (cachedBranches.has(workspace)) return cachedBranches.get(workspace) ?? null
+  let cachedBranch: string | null
   try {
-    const branch = execSync('git rev-parse --abbrev-ref HEAD', {
-      cwd,
+    const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+      cwd: workspace,
       timeout: 2000,
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -22,10 +25,11 @@ export function getGitBranch(cwd: string): string | null {
   } catch {
     cachedBranch = null
   }
+  cachedBranches.set(workspace, cachedBranch)
   return cachedBranch
 }
 
 /** Force re-detection (call after git operations). */
 export function refreshGitBranch(): void {
-  cachedBranch = undefined
+  cachedBranches.clear()
 }

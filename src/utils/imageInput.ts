@@ -8,7 +8,8 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'fs'
 import { join, extname } from 'path'
 import { homedir } from 'os'
-import { execSync } from 'child_process'
+import { execFileSync, execSync } from 'child_process'
+import { INPUT_IMAGE_TYPES, buildImageDataUrl } from './imageFormats.js'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -29,22 +30,6 @@ export interface ImageValidationResult {
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
-const SUPPORTED_MIME_TYPES = new Set([
-  'image/png',
-  'image/jpeg',
-  'image/jpg',
-  'image/gif',
-  'image/webp',
-])
-
-const EXT_TO_MIME: Record<string, string> = {
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif',
-  '.webp': 'image/webp',
-}
-
 const MAX_IMAGE_SIZE = 20 * 1024 * 1024 // 20 MB
 const MAX_DIMENSION = 4096
 const MIN_DIMENSION = 16
@@ -60,19 +45,19 @@ export function validateImage(path: string): ImageValidationResult {
   }
 
   const ext = extname(path).toLowerCase()
-  const mimeType = EXT_TO_MIME[ext]
+  const mimeType = INPUT_IMAGE_TYPES[ext]
   if (!mimeType) {
-    errors.push(`Unsupported file extension: ${ext}. Supported: ${Object.keys(EXT_TO_MIME).join(', ')}`)
+    errors.push(
+      `Unsupported file extension: ${ext}. Supported: ${Object.keys(INPUT_IMAGE_TYPES).join(', ')}`,
+    )
     return { valid: false, errors, warnings }
-  }
-
-  if (!SUPPORTED_MIME_TYPES.has(mimeType)) {
-    errors.push(`Unsupported MIME type: ${mimeType}`)
   }
 
   const stat = statSync(path)
   if (stat.size > MAX_IMAGE_SIZE) {
-    errors.push(`Image too large: ${(stat.size / 1024 / 1024).toFixed(1)}MB (max ${MAX_IMAGE_SIZE / 1024 / 1024}MB)`)
+    errors.push(
+      `Image too large: ${(stat.size / 1024 / 1024).toFixed(1)}MB (max ${MAX_IMAGE_SIZE / 1024 / 1024}MB)`,
+    )
   }
 
   if (stat.size === 0) {
@@ -83,10 +68,14 @@ export function validateImage(path: string): ImageValidationResult {
   const dims = getImageDimensions(path)
   if (dims) {
     if (dims.width > MAX_DIMENSION || dims.height > MAX_DIMENSION) {
-      warnings.push(`Large dimensions ${dims.width}x${dims.height} (max recommended: ${MAX_DIMENSION}x${MAX_DIMENSION})`)
+      warnings.push(
+        `Large dimensions ${dims.width}x${dims.height} (max recommended: ${MAX_DIMENSION}x${MAX_DIMENSION})`,
+      )
     }
     if (dims.width < MIN_DIMENSION || dims.height < MIN_DIMENSION) {
-      warnings.push(`Small dimensions ${dims.width}x${dims.height} (min recommended: ${MIN_DIMENSION}x${MIN_DIMENSION})`)
+      warnings.push(
+        `Small dimensions ${dims.width}x${dims.height} (min recommended: ${MIN_DIMENSION}x${MIN_DIMENSION})`,
+      )
     }
   }
 
@@ -95,24 +84,12 @@ export function validateImage(path: string): ImageValidationResult {
 
 export function getMimeType(path: string): string {
   const ext = extname(path).toLowerCase()
-  return EXT_TO_MIME[ext] ?? 'application/octet-stream'
+  return INPUT_IMAGE_TYPES[ext] ?? 'application/octet-stream'
 }
 
 // ── Dimensions ──────────────────────────────────────────────────────────────
 
 export function getImageDimensions(path: string): { width: number; height: number } | null {
-  try {
-    // Try file command (Linux/macOS)
-    const output = execSync(`file "${path}"`, { encoding: 'utf8', timeout: 5000 })
-
-    // Parse output like: "image.png: PNG image data, 1920 x 1080, 8-bit/color/RGBA, non-interlaced"
-    const m = output.match(/(\d+)\s*[x×]\s*(\d+)/)
-    if (m) {
-      return { width: parseInt(m[1], 10), height: parseInt(m[2], 10) }
-    }
-  } catch { /* file not available */ }
-
-  // Try parsing PNG header directly
   try {
     const buf = readFileSync(path)
     if (buf.length >= 24 && buf.toString('ascii', 12, 16) === 'IHDR') {
@@ -120,7 +97,23 @@ export function getImageDimensions(path: string): { width: number; height: numbe
       const height = buf.readUInt32BE(20)
       return { width, height }
     }
-  } catch { /* not a PNG or unreadable */ }
+  } catch {
+    return null
+  }
+
+  try {
+    const output = execFileSync('file', ['--brief', '--', path], {
+      encoding: 'utf8',
+      timeout: 5000,
+      stdio: 'pipe',
+    })
+    const match = output.match(/(\d+)\s*[x×]\s*(\d+)/)
+    if (match) {
+      return { width: parseInt(match[1], 10), height: parseInt(match[2], 10) }
+    }
+  } catch {
+    return null
+  }
 
   return null
 }
@@ -206,7 +199,9 @@ export function getResizedPath(path: string, maxDimension = MAX_DIMENSION): stri
         stdio: 'pipe',
       })
       if (existsSync(resizedPath)) return resizedPath
-    } catch { /* ImageMagick not available */ }
+    } catch {
+      /* ImageMagick not available */
+    }
 
     // Try sips (macOS)
     try {
@@ -215,8 +210,12 @@ export function getResizedPath(path: string, maxDimension = MAX_DIMENSION): stri
         stdio: 'pipe',
       })
       if (existsSync(resizedPath)) return resizedPath
-    } catch { /* sips not available */ }
-  } catch { /* resize failed */ }
+    } catch {
+      /* sips not available */
+    }
+  } catch {
+    /* resize failed */
+  }
 
   return path
 }
@@ -242,7 +241,7 @@ export function buildImageContentPart(
   return {
     type: 'image_url',
     image_url: {
-      url: `data:${mimeType};base64,${info.base64}`,
+      url: buildImageDataUrl(mimeType, info.base64),
       detail,
     },
   }
@@ -262,7 +261,9 @@ export function getClipboardImagePath(): string | null {
   try {
     execSync(`pngpaste "${tmpPath}"`, { timeout: 5000, stdio: 'pipe' })
     if (existsSync(tmpPath) && statSync(tmpPath).size > 0) return tmpPath
-  } catch { /* not macOS or pngpaste not installed */ }
+  } catch {
+    /* not macOS or pngpaste not installed */
+  }
 
   // Try Linux xclip
   try {
@@ -272,7 +273,9 @@ export function getClipboardImagePath(): string | null {
       shell: '/bin/bash',
     })
     if (existsSync(tmpPath) && statSync(tmpPath).size > 0) return tmpPath
-  } catch { /* not Linux or xclip not installed */ }
+  } catch {
+    /* not Linux or xclip not installed */
+  }
 
   return null
 }

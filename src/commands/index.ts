@@ -58,7 +58,10 @@ export interface Command {
   /** Aliases (e.g. ['q'] for /exit) */
   aliases?: string[]
   enabled?: (ctx: SlashCommandContext) => boolean
-  handler: (args: string, ctx: SlashCommandContext) => SlashCommandResult | Promise<SlashCommandResult>
+  handler: (
+    args: string,
+    ctx: SlashCommandContext,
+  ) => SlashCommandResult | Promise<SlashCommandResult>
 }
 
 // ── Registry ────────────────────────────────────────────────────────────────

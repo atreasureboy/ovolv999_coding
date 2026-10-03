@@ -19,20 +19,10 @@
 
 import { readFileSync, existsSync, statSync } from 'fs'
 import { resolve, isAbsolute, extname } from 'path'
+import { MENTION_IMAGE_TYPES, buildImageDataUrl } from '../../utils/imageFormats.js'
 
 const MAX_FILE_CHARS = 8000
 const AT_MENTION_RE = /(?:^|\s)@((?:\.\/)?(?:[A-Za-z0-9_.\-/]+))/g
-
-const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'])
-
-const MIME_MAP: Record<string, string> = {
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif',
-  '.webp': 'image/webp',
-  '.bmp': 'image/bmp',
-}
 
 export interface ImageMention {
   path: string
@@ -106,13 +96,19 @@ export function expandAtMentions(text: string, cwd: string): ExpansionResult {
 
     // Image files — read as base64 data URL
     const ext = extname(relPath).toLowerCase()
-    if (IMAGE_EXTENSIONS.has(ext)) {
+    const mime = MENTION_IMAGE_TYPES[ext]
+    if (mime) {
       try {
         const buf = readFileSync(absPath)
-        const mime = MIME_MAP[ext] ?? 'image/png'
-        const dataUrl = `data:${mime};base64,${buf.toString('base64')}`
+        const dataUrl = buildImageDataUrl(mime, buf.toString('base64'))
         images.push({ path: relPath, dataUrl })
-        mentions.push({ path: relPath, found: true, truncated: false, chars: buf.length, isImage: true })
+        mentions.push({
+          path: relPath,
+          found: true,
+          truncated: false,
+          chars: buf.length,
+          isImage: true,
+        })
       } catch {
         mentions.push({ path: relPath, found: false, truncated: false, chars: 0, isImage: true })
       }
@@ -131,7 +127,8 @@ export function expandAtMentions(text: string, cwd: string): ExpansionResult {
     const chars = content.length
     const truncated = chars > MAX_FILE_CHARS
     if (truncated) {
-      content = content.slice(0, MAX_FILE_CHARS) + `\n... (truncated, ${chars - MAX_FILE_CHARS} more chars)`
+      content =
+        content.slice(0, MAX_FILE_CHARS) + `\n... (truncated, ${chars - MAX_FILE_CHARS} more chars)`
     }
 
     appendix += `\n<file_content path="${relPath}">\n${content}\n</file_content>\n`

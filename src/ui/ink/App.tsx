@@ -31,7 +31,11 @@ import { HelpOverlay } from './components/HelpOverlay.js'
 import { expandAtMentions } from './expandAtMentions.js'
 import { copyToClipboard } from '../../utils/clipboard.js'
 import { loadInputHistory, saveInputHistory } from '../../utils/inputHistory.js'
-import { initTerminalTitle, updateTerminalTitle, restoreTerminalTitle } from '../../utils/terminalTitle.js'
+import {
+  initTerminalTitle,
+  updateTerminalTitle,
+  restoreTerminalTitle,
+} from '../../utils/terminalTitle.js'
 import { loadKeybindings, lookupAction } from '../keybindings.js'
 import type { OpenAIMessage } from '../../core/types.js'
 
@@ -75,6 +79,7 @@ export interface AppProps {
   dispatchSlash: (input: string) => Promise<boolean>
   /** Initial history (for resume). */
   initialHistory: OpenAIMessage[]
+  getHistory?: () => OpenAIMessage[]
   /** Max context tokens (for StatusBar). */
   maxContextTokens: number
   /** Working directory (for git branch display). */
@@ -91,13 +96,15 @@ export function App({
   runTurn,
   dispatchSlash,
   initialHistory,
+  getHistory,
   maxContextTokens,
   cwd,
 }: AppProps): React.ReactElement {
   const state: UIState = useUIStore(store)
   const { exit } = useApp()
   const { stdout } = useStdout()
-  const [history, setHistory] = useState<OpenAIMessage[]>(initialHistory)
+  const [fallbackHistory, setFallbackHistory] = useState<OpenAIMessage[]>(initialHistory)
+  const history = getHistory?.() ?? fallbackHistory
   const [showHelp, setShowHelp] = useState(false)
   const inputHistory = useRef<string[]>(loadInputHistory())
   const turnStartTime = useRef(0)
@@ -142,8 +149,12 @@ export function App({
       updateTerminalTitle(model, true)
 
       try {
-        const result = await runTurn(expandedText, history, images.length > 0 ? images : undefined)
-        setHistory(result.newHistory)
+        const result = await runTurn(
+          expandedText,
+          getHistory?.() ?? history,
+          images.length > 0 ? images : undefined,
+        )
+        if (!getHistory) setFallbackHistory(result.newHistory)
         store.addInfo(`Task ${result.status ?? result.reason}`)
       } catch (err: unknown) {
         const error = err as Error
@@ -161,7 +172,7 @@ export function App({
         }
       }
     },
-    [history, runTurn, dispatchSlash, store, model],
+    [history, getHistory, runTurn, dispatchSlash, store, model, cwd],
   )
 
   // ── Interrupt ─────────────────────────────────────────────────────────────
@@ -173,8 +184,9 @@ export function App({
   // ── Copy last reply ───────────────────────────────────────────────────────
 
   const handleCopy = useCallback(() => {
-    for (let i = history.length - 1; i >= 0; i--) {
-      const m = history[i]
+    const currentHistory = getHistory?.() ?? history
+    for (let i = currentHistory.length - 1; i >= 0; i--) {
+      const m = currentHistory[i]
       if (m.role === 'assistant' && typeof m.content === 'string' && m.content) {
         const ok = copyToClipboard(m.content)
         store.addInfo(ok ? '✓ Copied to clipboard' : '⚠ No clipboard tool found')
@@ -182,7 +194,7 @@ export function App({
       }
     }
     store.addInfo('No assistant reply to copy')
-  }, [history, store])
+  }, [history, getHistory, store])
 
   // ── Keybindings (loaded once per cwd) ─────────────────────────────────────
 
@@ -191,10 +203,14 @@ export function App({
   // Show config warnings on first load
   useEffect(() => {
     if (keybindings.errors.length > 0) {
-      store.addInfo(`⚠ Keybinding config errors (${keybindings.errors.length}). Run /keybindings to see details.`)
+      store.addInfo(
+        `⚠ Keybinding config errors (${keybindings.errors.length}). Run /keybindings to see details.`,
+      )
     }
     if (keybindings.conflicts.length > 0) {
-      store.addInfo(`⚠ ${keybindings.conflicts.length} keybinding conflict(s). Run /keybindings to see details.`)
+      store.addInfo(
+        `⚠ ${keybindings.conflicts.length} keybinding conflict(s). Run /keybindings to see details.`,
+      )
     }
   }, [])
 
@@ -216,7 +232,9 @@ export function App({
       if (sigintCount.current >= 2) {
         exit()
       }
-      setTimeout(() => { sigintCount.current = 0 }, 1500)
+      setTimeout(() => {
+        sigintCount.current = 0
+      }, 1500)
       return
     }
 
@@ -300,7 +318,9 @@ export function App({
       {state.pendingPermission ? (
         <PermissionDialog
           request={state.pendingPermission}
-          onResolve={(approved, alwaysAllow, feedback) => store.resolvePermission(approved, alwaysAllow, feedback)}
+          onResolve={(approved, alwaysAllow, feedback) =>
+            store.resolvePermission(approved, alwaysAllow, feedback)
+          }
         />
       ) : null}
 
@@ -321,12 +341,17 @@ export function App({
       {/* Input or "running..." indicator */}
       {state.running || store.hasOverlay() || showHelp ? (
         <Box marginTop={1}>
-          <Text dimColor italic>  (turn in progress — ESC to interrupt)</Text>
+          <Text dimColor italic>
+            {' '}
+            (turn in progress — ESC to interrupt)
+          </Text>
         </Box>
       ) : (
         <Box marginTop={1}>
           <PromptInput
-            onSubmit={(text) => { void handleSubmit(text) }}
+            onSubmit={(text) => {
+              void handleSubmit(text)
+            }}
             disabled={state.running}
             onInterrupt={handleInterrupt}
             skills={skills}

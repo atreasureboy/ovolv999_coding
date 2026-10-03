@@ -38,7 +38,13 @@ export type UIMessage =
       status: 'running' | 'done' | 'failed'
       summary?: string
     }
-  | { id: number; type: 'compact'; phase: 'start' | 'done'; origTokens?: number; sumTokens?: number }
+  | {
+      id: number
+      type: 'compact'
+      phase: 'start' | 'done'
+      origTokens?: number
+      sumTokens?: number
+    }
   | { id: number; type: 'context-warning'; tokens: number; max: number; pct: number }
 
 // ── Interactive overlay types (plan approval, permission, select picker) ─────
@@ -113,12 +119,14 @@ const INITIAL_STATE: UIState = {
 // ── Store implementation ────────────────────────────────────────────────────
 
 export class UIStore {
-  private state: UIState = { ...INITIAL_STATE }
+  private state: UIState = { ...INITIAL_STATE, messages: [] }
   private listeners = new Set<() => void>()
   private nextId = 1
   // Resolvers for interactive overlays (kept outside state — not serializable)
   private planResolver: ((approved: boolean) => void) | null = null
-  private permissionResolver: ((result: { approved: boolean; alwaysAllow: boolean; feedback?: string }) => void) | null = null
+  private permissionResolver:
+    | ((result: { approved: boolean; alwaysAllow: boolean; feedback?: string }) => void)
+    | null = null
   private selectResolver: ((value: unknown) => void) | null = null
 
   getState = (): UIState => this.state
@@ -128,33 +136,26 @@ export class UIStore {
     return () => this.listeners.delete(listener)
   }
 
-  private emit(): void {
-    // Shallow-clone the top-level object so useSyncExternalStore detects change.
-    // The `messages` array reference is updated on each mutation (see below).
-    this.state = { ...this.state }
+  private publish(patch: Partial<UIState>): void {
+    this.state = { ...this.state, ...patch }
     for (const l of this.listeners) l()
   }
 
   // ── Mutations ─────────────────────────────────────────────────────────────
 
-  private add(msg: NewUIMessage): number {
+  private add(msg: NewUIMessage, patch: Partial<UIState> = {}): number {
     const id = this.nextId++
-    this.state = {
-      ...this.state,
+    this.publish({
+      ...patch,
       messages: [...this.state.messages, { ...msg, id }],
-    }
-    this.emit()
+    })
     return id
   }
 
-  private update(id: number, patch: Partial<UIMessage>): void {
-    this.state = {
-      ...this.state,
-      messages: this.state.messages.map((m) =>
-        m.id === id ? ({ ...m, ...patch } as UIMessage) : m,
-      ),
-    }
-    this.emit()
+  private update(id: number, transform: (message: UIMessage) => UIMessage): void {
+    this.publish({
+      messages: this.state.messages.map((m) => (m.id === id ? transform(m) : m)),
+    })
   }
 
   // ── High-level operations ─────────────────────────────────────────────────
@@ -169,22 +170,20 @@ export class UIStore {
 
   /** Streaming: accumulate tokens into a temporary buffer. */
   appendStreamingToken(token: string): void {
-    this.state.streamingText += token
-    this.emit()
+    this.publish({ streamingText: this.state.streamingText + token })
   }
 
   /** Streaming: accumulate reasoning tokens (from <think> tags). */
   appendStreamingReasoning(token: string): void {
-    this.state.streamingReasoning += token
-    this.emit()
+    this.publish({ streamingReasoning: this.state.streamingReasoning + token })
   }
 
   /** Flush accumulated streaming text as a message, then clear the buffer. */
   flushStreamingText(): void {
     const text = this.state.streamingText.trim()
-    this.state = { ...this.state, streamingText: '', streamingReasoning: '' }
-    if (text) this.add({ type: 'assistant', text })
-    else this.emit()
+    const cleared = { streamingText: '', streamingReasoning: '' }
+    if (text) this.add({ type: 'assistant', text }, cleared)
+    else this.publish(cleared)
   }
 
   addToolStart(name: string, input: Record<string, unknown>): number {
@@ -192,24 +191,34 @@ export class UIStore {
   }
 
   setToolResult(id: number, result: string, isError: boolean): void {
-    const msg = this.state.messages.find((m) => m.id === id)
-    const elapsedMs = msg && msg.type === 'tool' && msg.startTime
-      ? Date.now() - msg.startTime
-      : undefined
-    this.update(id, { result, isError, elapsedMs })
+    this.update(id, (message) => {
+      if (message.type !== 'tool') return message
+      const elapsedMs = message.startTime === undefined ? undefined : Date.now() - message.startTime
+      return { ...message, result, isError, elapsedMs }
+    })
   }
 
-  addInfo(text: string): void { this.add({ type: 'info', text }) }
-  addSuccess(text: string): void { this.add({ type: 'success', text }) }
-  addWarn(text: string): void { if (text.trim()) this.add({ type: 'warn', text }) }
-  addError(text: string): void { this.add({ type: 'error', text }) }
+  addInfo(text: string): void {
+    this.add({ type: 'info', text })
+  }
+  addSuccess(text: string): void {
+    this.add({ type: 'success', text })
+  }
+  addWarn(text: string): void {
+    if (text.trim()) this.add({ type: 'warn', text })
+  }
+  addError(text: string): void {
+    this.add({ type: 'error', text })
+  }
 
   addAgentStart(desc: string, agentType: string): number {
     return this.add({ type: 'agent', desc, agentType, status: 'running' })
   }
 
   setAgentDone(id: number, ok: boolean, summary?: string): void {
-    this.update(id, { status: ok ? 'done' : 'failed', summary })
+    this.update(id, (message) =>
+      message.type === 'agent' ? { ...message, status: ok ? 'done' : 'failed', summary } : message,
+    )
   }
 
   addCompactStart(tokens: number): void {
@@ -227,43 +236,35 @@ export class UIStore {
   // ── State setters ─────────────────────────────────────────────────────────
 
   setRunning(running: boolean): void {
-    this.state = { ...this.state, running }
-    this.emit()
+    this.publish({ running })
   }
 
   setSpinner(active: boolean, verb = ''): void {
-    this.state = { ...this.state, spinnerActive: active, spinnerVerb: verb }
-    this.emit()
+    this.publish({ spinnerActive: active, spinnerVerb: verb })
   }
 
   setBanner(version: string, model: string): void {
-    this.state = { ...this.state, banner: { version, model } }
-    this.emit()
+    this.publish({ banner: { version, model } })
   }
 
   setInterrupt(active: boolean, feedback?: string): void {
-    this.state = { ...this.state, interrupt: active ? { active, feedback } : null }
-    this.emit()
+    this.publish({ interrupt: active ? { active, feedback } : null })
   }
 
   setPlanMode(active: boolean): void {
-    this.state = { ...this.state, planMode: active }
-    this.emit()
+    this.publish({ planMode: active })
   }
 
   setCost(cost: number, apiCalls: number): void {
-    this.state = { ...this.state, cost, apiCalls }
-    this.emit()
+    this.publish({ cost, apiCalls })
   }
 
   setModel(model: string): void {
-    this.state = { ...this.state, banner: this.state.banner ? { ...this.state.banner, model } : null }
-    this.emit()
+    this.publish({ banner: this.state.banner ? { ...this.state.banner, model } : null })
   }
 
   toggleVerbose(): void {
-    this.state = { ...this.state, verbose: !this.state.verbose }
-    this.emit()
+    this.publish({ verbose: !this.state.verbose })
   }
 
   // ── Interactive overlays (plan approval, permission, select picker) ───────
@@ -272,66 +273,64 @@ export class UIStore {
   showPlanApproval(plan: string): Promise<boolean> {
     return new Promise<boolean>((resolve) => {
       this.planResolver = resolve
-      this.state = { ...this.state, pendingPlan: { plan } }
-      this.emit()
+      this.publish({ pendingPlan: { plan } })
     })
   }
 
   resolvePlan(approved: boolean): void {
     this.planResolver?.(approved)
     this.planResolver = null
-    this.state = { ...this.state, pendingPlan: null }
-    this.emit()
+    this.publish({ pendingPlan: null })
   }
 
-  showPermissionDialog(request: UIPermissionRequest): Promise<{ approved: boolean; alwaysAllow: boolean; feedback?: string }> {
-    return new Promise<{ approved: boolean; alwaysAllow: boolean; feedback?: string }>((resolve) => {
-      this.permissionResolver = resolve
-      this.state = { ...this.state, pendingPermission: request }
-      this.emit()
-    })
+  showPermissionDialog(
+    request: UIPermissionRequest,
+  ): Promise<{ approved: boolean; alwaysAllow: boolean; feedback?: string }> {
+    return new Promise<{ approved: boolean; alwaysAllow: boolean; feedback?: string }>(
+      (resolve) => {
+        this.permissionResolver = resolve
+        this.publish({ pendingPermission: request })
+      },
+    )
   }
 
   resolvePermission(approved: boolean, alwaysAllow: boolean, feedback?: string): void {
     this.permissionResolver?.({ approved, alwaysAllow, feedback })
     this.permissionResolver = null
-    this.state = { ...this.state, pendingPermission: null }
-    this.emit()
+    this.publish({ pendingPermission: null })
   }
 
   showSelectPicker<T>(title: string, items: UISelectItem<T>[]): Promise<T | null> {
     return new Promise<T | null>((resolve) => {
       this.selectResolver = resolve as (value: unknown) => void
-      this.state = { ...this.state, selectOverlay: { title, items } }
-      this.emit()
+      this.publish({ selectOverlay: { title, items } })
     })
   }
 
   resolveSelect(value: unknown): void {
     this.selectResolver?.(value)
     this.selectResolver = null
-    this.state = { ...this.state, selectOverlay: null }
-    this.emit()
+    this.publish({ selectOverlay: null })
   }
 
   /** True when any interactive overlay is blocking input. */
   hasOverlay(): boolean {
-    return this.state.pendingPlan !== null
-      || this.state.pendingPermission !== null
-      || this.state.selectOverlay !== null
+    return (
+      this.state.pendingPlan !== null ||
+      this.state.pendingPermission !== null ||
+      this.state.selectOverlay !== null
+    )
   }
 
   /** Clear all messages (for /clear). */
   clearMessages(): void {
-    this.state = { ...this.state, messages: [] }
-    this.emit()
+    this.publish({ messages: [] })
   }
 
   /** Full reset (for testing). */
   reset(): void {
-    this.state = { ...INITIAL_STATE }
     this.nextId = 1
-    this.emit()
+    this.publish({ ...INITIAL_STATE, messages: [] })
   }
 }
 
