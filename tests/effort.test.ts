@@ -96,9 +96,9 @@ describe('effort', () => {
       expect(p).toBeTruthy()
     })
 
-    it('includes thinking tokens for high', () => {
+    it('does not promise an unenforced thinking token limit', () => {
       const p = getEffortPrompt('high')
-      expect(p).toContain('thinking tokens')
+      expect(p).not.toContain('thinking tokens')
     })
 
     it('includes multi-approach for high', () => {
@@ -128,9 +128,11 @@ describe('effort', () => {
       expect(s).toContain('★')
     })
 
-    it('includes thinking tokens', () => {
+    it('describes guidance and verification without claiming hard budgets', () => {
       const s = formatEffort('high')
-      expect(s).toContain('5000')
+      expect(s).toContain('verify: thorough')
+      expect(s).not.toContain('thinking:')
+      expect(s).not.toContain('search:')
     })
   })
 

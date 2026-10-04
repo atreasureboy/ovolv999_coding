@@ -130,7 +130,8 @@ export function App({
       if (text.startsWith('/')) {
         const handled = await dispatchSlash(text)
         if (handled) return
-        // Unknown command — let the engine try it as a prompt
+        store.addError(`Unknown command: ${text}. Type / for available commands.`)
+        return
       }
 
       // Normal turn — expand @file mentions before sending to engine

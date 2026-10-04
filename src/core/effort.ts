@@ -10,6 +10,16 @@
 
 export type EffortLevel = 'minimal' | 'low' | 'medium' | 'high' | 'maximum'
 
+export const EFFORT_LEVELS: readonly EffortLevel[] = ['minimal', 'low', 'medium', 'high', 'maximum']
+
+export function isEffortLevel(value: unknown): value is EffortLevel {
+  return typeof value === 'string' && EFFORT_LEVELS.some(level => level === value)
+}
+
+export function nextEffort(level: EffortLevel): EffortLevel {
+  return EFFORT_LEVELS[(EFFORT_LEVELS.indexOf(level) + 1) % EFFORT_LEVELS.length]
+}
+
 export interface EffortConfig {
   level: EffortLevel
   thinkingTokens: number
@@ -88,9 +98,7 @@ export function getEffortConfig(level?: EffortLevel): EffortConfig {
 }
 
 export function cycleEffort(): EffortLevel {
-  const levels: EffortLevel[] = ['minimal', 'low', 'medium', 'high', 'maximum']
-  const idx = levels.indexOf(currentEffort)
-  const next = levels[(idx + 1) % levels.length]
+  const next = nextEffort(currentEffort)
   currentEffort = next
   return next
 }
@@ -133,10 +141,6 @@ export function getEffortPrompt(level?: EffortLevel): string {
       break
   }
 
-  if (config.thinkingTokens > 0) {
-    parts.push(`Use up to ${config.thinkingTokens} thinking tokens for reasoning before responding.`)
-  }
-
   return parts.join(' ')
 }
 
@@ -154,17 +158,16 @@ export function formatEffort(level?: EffortLevel): string {
   const l = level ?? currentEffort
   const config = getEffortConfig(l)
   const icon = EFFORT_ICONS[l]
-  return `${icon} ${l} (thinking: ${config.thinkingTokens}, search: ${config.maxSearchResults}, verify: ${config.verificationDepth})`
+  return `${icon} ${l} (guidance: ${config.explanationDetail}, verify: ${config.verificationDepth})`
 }
 
-export function formatEffortList(): string {
-  const levels: EffortLevel[] = ['minimal', 'low', 'medium', 'high', 'maximum']
+export function formatEffortList(activeLevel: EffortLevel = currentEffort): string {
   const lines: string[] = ['Effort Levels:']
-  for (const level of levels) {
+  for (const level of EFFORT_LEVELS) {
     const config = EFFORT_PRESETS[level]
     const icon = EFFORT_ICONS[level]
-    const active = level === currentEffort ? ' ← active' : ''
-    lines.push(`  ${icon} ${level.padEnd(8)} think=${config.thinkingTokens} search=${config.maxSearchResults}${active}`)
+    const active = level === activeLevel ? ' ← active' : ''
+    lines.push(`  ${icon} ${level.padEnd(8)} guidance=${config.explanationDetail} verify=${config.verificationDepth}${active}`)
   }
   return lines.join('\n')
 }

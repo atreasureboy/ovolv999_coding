@@ -5,7 +5,9 @@ export interface HookEntry {
   
   matcher?: string
   
-  command: string
+  command: string | readonly string[]
+  kind?: 'notification' | 'policy'
+  timeout?: number
 }
 
 export interface HooksConfig {

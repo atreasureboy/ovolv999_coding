@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "cases": [
+    {
+      "id": "english-constraints",
+      "kind": "english",
+      "messages": [{ "role": "user", "content": "Keep the public API unchanged. Acceptance requires the failing regression to pass. The migration task is still pending." }],
+      "tools": [],
+      "expectedText": ["Keep the public API unchanged", "Acceptance requires", "migration task is still pending"]
+    },
+    {
+      "id": "cjk-correction",
+      "kind": "cjk",
+      "messages": [{ "role": "user", "content": "更正：只能修改 src/core/compact.ts。验收要求保留用户限制，未完成事项是迁移旧会话。" }],
+      "tools": [],
+      "expectedText": ["更正：只能修改 src/core/compact.ts", "验收要求保留用户限制", "未完成事项是迁移旧会话"]
+    },
+    {
+      "id": "code-task",
+      "kind": "code",
+      "messages": [{ "role": "user", "content": "Preserve this signature: export function serializeCompactionInput(messages: readonly OpenAIMessage[]): string { return messages.map(message => message.role).join('\\n') }" }],
+      "tools": [],
+      "expectedText": ["readonly OpenAIMessage[]", "serializeCompactionInput"]
+    },
+    {
+      "id": "tool-schema",
+      "kind": "schema",
+      "messages": [{ "role": "user", "content": "Read the requested file before editing, and report the verification result." }],
+      "tools": [{ "type": "function", "function": { "name": "Read", "description": "Read a file without modifying it", "parameters": { "type": "object", "properties": { "file_path": { "type": "string" }, "purpose": { "type": "string" } }, "required": ["file_path"] } } }],
+      "expectedText": ["Read the requested file before editing"]
+    },
+    {
+      "id": "image-text-constraints",
+      "kind": "image",
+      "messages": [{ "role": "user", "content": [{ "type": "text", "text": "Use the attachment only as a layout reference. Keep the public API unchanged." }, { "type": "image_url", "image_url": { "url": "data:image/png;base64,iVBORw0KGgo=" } }, { "type": "text", "text": "Correction: do not change authentication. Acceptance requires the failing regression to pass. The migration task is still pending." }, { "type": "image_url", "image_url": { "url": "https://example.invalid/reference.png" } }] }],
+      "tools": [],
+      "expectedText": ["Use the attachment only as a layout reference", "Keep the public API unchanged", "Correction: do not change authentication", "Acceptance requires the failing regression to pass", "migration task is still pending"]
+    }
+  ]
+}

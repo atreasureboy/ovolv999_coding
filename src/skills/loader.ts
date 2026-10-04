@@ -34,6 +34,14 @@ export interface Skill {
   description: string
   prompt: string
   source: 'builtin' | 'global' | 'project'
+  sourcePath?: string
+  requiredTools?: string[]
+  restrictedTools?: string[]
+  permissionGrants?: string[]
+  disableModelInvocation?: boolean
+  userInvocable?: boolean
+  diagnostics?: string[]
+  unsupportedMetadata?: string[]
   /** Tools this skill requires (parsed from frontmatter, optional) */
   tools?: string[]
   /** Skill version (parsed from frontmatter, optional) */
@@ -47,27 +55,54 @@ export interface Skill {
 function parseFrontmatter(content: string): {
   frontmatter: Record<string, string>
   body: string
+  structuredKeys: string[]
 } {
   const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/)
-  if (!match) return { frontmatter: {}, body: content }
+  if (!match) return { frontmatter: {}, body: content, structuredKeys: [] }
 
   const fm: Record<string, string> = {}
-  for (const line of match[1].split('\n')) {
+  const structuredKeys = new Set<string>()
+  let currentKey = ''
+  const lines = match[1].split('\n')
+  const indents = lines.filter(line => line.trim() && !line.trimStart().startsWith('#')).map(line => line.length - line.trimStart().length)
+  const rootIndent = indents.length ? Math.min(...indents) : 0
+  for (const rawLine of lines) {
+    const line = rawLine.slice(rootIndent)
+    if (!line.trim() || line.trimStart().startsWith('#')) continue
+    if (/^\s+\S/.test(line)) {
+      if (currentKey) structuredKeys.add(currentKey)
+      continue
+    }
     const colonIdx = line.indexOf(':')
     if (colonIdx > 0) {
-      const key = line.slice(0, colonIdx).trim()
+      const key = line.slice(0, colonIdx).trim().replace(/^(["'])(.*)\1$/, '$2')
       // Strip surrounding quotes from value
       const rawValue = line.slice(colonIdx + 1).trim()
       let value = rawValue.replace(/^["']|["']$/g, '')
       if (rawValue.startsWith('"') && rawValue.endsWith('"')) {
         try { value = JSON.parse(rawValue) as string } catch (error) { void error }
       }
-      if (key) fm[key] = value
+      if (key) {
+        fm[key] = value
+        currentKey = key
+      }
     }
   }
 
-  return { frontmatter: fm, body: (match[2] ?? '').trim() }
+  return { frontmatter: fm, body: (match[2] ?? '').trim(), structuredKeys: [...structuredKeys] }
 }
+
+function parseToolList(value: string | undefined): string[] {
+  if (!value) return []
+  return value.replace(/^\[|\]$/g, '').split(',').map((tool) => tool.trim().replace(/^["']|["']$/g, '')).filter(Boolean)
+}
+
+const supportedMetadata = new Set([
+  'name', 'description', 'version', 'tools', 'required-tools', 'restricted-tools',
+  'allowed-tools', 'permission-grants', 'disable-model-invocation', 'user-invocable',
+])
+
+const unsupportedExecutionMetadata = new Set(['context', 'fork', 'model', 'hooks', 'agent'])
 
 // ─────────────────────────────────────────────────────────────
 // File parser
@@ -80,7 +115,28 @@ function parseSkillFile(
 ): Skill | null {
   try {
     const raw = readFileSync(filePath, 'utf8').trim()
-    const { frontmatter, body } = parseFrontmatter(raw)
+    const { frontmatter, body, structuredKeys } = parseFrontmatter(raw)
+    const diagnostics: string[] = []
+    const unsupportedMetadata: string[] = []
+    for (const key of Object.keys(frontmatter)) {
+      if (unsupportedExecutionMetadata.has(key) || structuredKeys.includes(key) && supportedMetadata.has(key)) {
+        unsupportedMetadata.push(key)
+        diagnostics.push(`Unsupported skill metadata: ${key}`)
+      } else if (!supportedMetadata.has(key)) {
+        diagnostics.push(`Unknown skill metadata: ${key}`)
+      }
+    }
+    const readBoolean = (key: string): boolean | undefined => {
+      const value = frontmatter[key]
+      if (value === undefined) return undefined
+      if (value === 'true') return true
+      if (value === 'false') return false
+      unsupportedMetadata.push(key)
+      diagnostics.push(`Unsupported skill metadata: ${key} must be true or false`)
+      return undefined
+    }
+    const disableModelInvocation = readBoolean('disable-model-invocation')
+    const userInvocable = readBoolean('user-invocable')
 
     const name = (frontmatter.name ?? defaultName).trim()
 
@@ -92,9 +148,14 @@ function parseSkillFile(
     }
 
     // Tools: comma-separated list in frontmatter (e.g. tools: Bash, Read, Grep)
-    const tools = frontmatter.tools
-      ? frontmatter.tools.split(',').map((t) => t.trim()).filter(Boolean)
-      : undefined
+    const requirements = [...new Set([...parseToolList(frontmatter['required-tools']), ...parseToolList(frontmatter.tools)])]
+    const tools = requirements.length ? requirements : undefined
+    const restrictions = parseToolList(frontmatter['restricted-tools'])
+    const restrictedTools = restrictions.length ? restrictions : undefined
+    const grants = [...new Set([...parseToolList(frontmatter['allowed-tools']), ...parseToolList(frontmatter['permission-grants'])])]
+    const permissionGrants = grants.length ? grants : undefined
+    if (restrictedTools) diagnostics.push('Unsupported skill tool restrictions: restricted-tools enforcement is unavailable')
+    if (permissionGrants) diagnostics.push('Unsupported skill permission grants: allowed-tools / permission-grants are unavailable')
 
     // Version (optional)
     const version = frontmatter.version || undefined
@@ -102,7 +163,11 @@ function parseSkillFile(
     // Prompt: body (frontmatter stripped), or full raw if no frontmatter
     const prompt = body || raw
 
-    return { name, description, prompt, source, tools, version }
+    return {
+      name, description, prompt, source, sourcePath: resolve(filePath), tools, requiredTools: tools, version,
+      restrictedTools, permissionGrants, disableModelInvocation, userInvocable, diagnostics,
+      unsupportedMetadata: [...new Set(unsupportedMetadata)],
+    }
   } catch {
     return null
   }
@@ -315,7 +380,9 @@ export function formatSkillIndex(skills: Map<string, Skill>): string {
   if (skills.size === 0) return ''
   const lines: string[] = ['## Skills', '', 'Use load_skill tool to load full prompt:']
   for (const skill of skills.values()) {
-    const tools = skill.tools?.length ? ` [需要: ${skill.tools.join(', ')}]` : ''
+    if (skill.disableModelInvocation || skill.unsupportedMetadata?.length || skill.restrictedTools?.length || skill.permissionGrants?.length) continue
+    const requiredTools = skill.requiredTools ?? skill.tools
+    const tools = requiredTools?.length ? ` [需要: ${requiredTools.join(', ')}]` : ''
     lines.push(`- **${skill.name}** — ${skill.description}${tools}`)
   }
   lines.push('')

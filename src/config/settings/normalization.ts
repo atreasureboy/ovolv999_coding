@@ -18,9 +18,15 @@ function normalizeHooks(value: unknown): HooksConfig | undefined {
     const entries = value[name]
     if (!Array.isArray(entries)) continue
     hooks[name] = entries.filter((entry): entry is HookEntry => isObject(entry)
-      && typeof entry.command === 'string' && Boolean(entry.command.trim())
+      && ((typeof entry.command === 'string' && Boolean(entry.command.trim()))
+        || (Array.isArray(entry.command) && entry.command.length > 0 && entry.command.every(part => typeof part === 'string')))
       && (entry.matcher === undefined || typeof entry.matcher === 'string'))
-      .map(entry => entry.matcher === undefined ? { command: entry.command } : { command: entry.command, matcher: entry.matcher })
+      .map(entry => ({
+        command: typeof entry.command === 'string' ? entry.command : [...entry.command],
+        ...(entry.matcher === undefined ? {} : { matcher: entry.matcher }),
+        ...(entry.kind === undefined ? {} : { kind: entry.kind }),
+        ...(entry.timeout === undefined ? {} : { timeout: entry.timeout }),
+      }))
   }
   return hooks
 }

@@ -84,7 +84,7 @@ export function execManaged(executable: string, args: readonly string[], options
       clearTimeout(trackingTimer)
       signal?.removeEventListener('abort', abort)
       if (confirmed) releasePhysical()
-      if (error || code !== 0) reject(Object.assign(error ?? new Error(`Process exited with code ${code}`), { stdout, stderr, ...(!confirmed ? { unfinishedResources: [`process ${child.pid ?? 'unknown'}`] } : {}) }))
+      if (error || code !== 0) reject(Object.assign(error ?? new Error(`Process exited with code ${code}`), { stdout, stderr, status: code, ...(!confirmed ? { unfinishedResources: [`process ${child.pid ?? 'unknown'}`] } : {}) }))
       else resolve({ stdout, stderr })
     }
     const stop = (reason: Error): void => {

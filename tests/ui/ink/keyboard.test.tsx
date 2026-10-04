@@ -10,6 +10,26 @@ import { Markdown, StreamingMarkdown } from '../../../src/ui/ink/components/Mark
 afterEach(() => cleanup())
 
 describe('Ink keyboard ownership', () => {
+  it('reports unknown slash input without sending the command text to the engine', async () => {
+    const store = new UIStore()
+    const prompts: string[] = []
+    const view = render(createElement(App, {
+      store, _version: 'test', model: 'test', skills: [], initialHistory: [], maxContextTokens: 100, cwd: process.cwd(),
+      runTurn: (prompt) => { prompts.push(prompt); return Promise.resolve({ newHistory: [], reason: 'stop' }) },
+      dispatchSlash: () => Promise.resolve(false),
+    }))
+    await vi.waitFor(() => expect(view.stdin.listenerCount('readable')).toBeGreaterThan(0))
+    view.stdin.write('/missing-command')
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('/missing-command'))
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    view.stdin.write('\r')
+    await vi.waitFor(() => {
+      const message = store.getState().messages.at(-1)
+      expect(message?.type).toBe('error')
+      if (message?.type === 'error') expect(message.text).toContain('Unknown command')
+    })
+    expect(prompts).toEqual([])
+  })
   it('dismisses an empty picker with Escape', async () => {
     const cancel = vi.fn()
     const view = render(createElement(SelectPicker, { items: [], title: 'Empty', onSelect: () => {}, onCancel: cancel }))

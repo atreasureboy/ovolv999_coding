@@ -2,6 +2,7 @@ import type { AgentModule } from '../module.js'
 import { normalizeOutcome, type VerificationEvidence } from '../outcome.js'
 import { runOperation, withWorkspaceAccess, type RunContext } from '../runContext.js'
 import type { EngineConfig, OpenAIMessage, TurnResult } from '../types.js'
+import { runHookOperation } from '../hookLifecycle.js'
 import {
   captureArtifactVersion,
   executeVerification,
@@ -162,7 +163,13 @@ export async function acceptRunResult({
         : 'cancelled',
       unfinishedResources: [...run.pending.keys()],
     }
-  config.hookRunner?.runOnComplete?.(result)
+  if (!turnAbortController.signal.aborted) await runHookOperation(run, config, 'OnComplete', signal =>
+    config.hookRunner?.runOnComplete?.(result, signal),
+  ).catch(error => { eventLog?.append('tool_result', 'hook:OnComplete', { error: String(error) }) })
+  if (turnAbortController.signal.aborted) result = {
+    ...result, reason: 'error', status: String(turnAbortController.signal.reason).startsWith('timeout:') ? 'failed' : 'cancelled',
+    unfinishedResources: [...run.pending.keys()],
+  }
   if (result.status === 'completed') {
     const acceptedArtifact = verification.artifactVersion ?? startingArtifact
     const finalArtifact = await runOperation(

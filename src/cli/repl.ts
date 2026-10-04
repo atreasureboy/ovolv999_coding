@@ -17,7 +17,7 @@ import {
 import type { EngineConfig, OpenAIMessage } from '../core/types.js'
 import { consolidateSession } from '../modules/reflection.js'
 import type { Skill } from '../skills/loader.js'
-import { expandSkillPrompt } from '../skills/loader.js'
+import { createSkillRuntime, formatSkillInvocation } from '../skills/runtime.js'
 import { trimHistoryForNextTurn } from '../ui/historyTrimmer.js'
 import { InputHandler } from '../ui/input.js'
 import type { Renderer } from '../ui/renderer.js'
@@ -89,7 +89,7 @@ export async function runRepl(
   cwd: string,
   skills: Map<string, Skill>,
   hookRunner: {
-    runUserPromptSubmit: (p: string) => void
+    runUserPromptSubmit: (p: string) => unknown
   },
   consolidate?: {
     config: EngineConfig
@@ -100,6 +100,7 @@ export async function runRepl(
   resumedHistory?: OpenAIMessage[],
   signal?: AbortSignal,
 ): Promise<void> {
+  const skillRuntime = createSkillRuntime(skills)
   const history: OpenAIMessage[] = resumedHistory ? [...resumedHistory] : []
   let getLineFn: () => string = () => ''
   const slashSuggester = new SlashSuggester({
@@ -224,6 +225,15 @@ export async function runRepl(
   }
   process.on('SIGINT', onSigint)
   input.readline?.on('SIGINT', onSigint)
+  async function submitPrompt(prompt: string): Promise<boolean> {
+    try {
+      await hookRunner.runUserPromptSubmit(prompt)
+      return true
+    } catch (error) {
+      renderer.error(`Prompt submission failed: ${error instanceof Error ? error.message : String(error)}`)
+      return false
+    }
+  }
   async function runTask(
     prompt: string,
     taskHistory: OpenAIMessage[],
@@ -341,7 +351,7 @@ export async function runRepl(
           renderer.warn('Usage: /plan <task description>')
           continue
         }
-        hookRunner.runUserPromptSubmit(trimmed)
+        if (!await submitPrompt(trimmed)) continue
         await runPlanMode(planTask, engine, planConfig, renderer, input, history, cwd)
         continue
       }
@@ -366,7 +376,7 @@ export async function runRepl(
         const { getCommand: _getCmd, listCommands: _listCmds } =
           await import('../commands/index.js')
         const exactCmd = _getCmd(partialName)
-        if (!exactCmd && partialName && !trimmed.includes(' ')) {
+        if (!exactCmd && !skills.has(partialName) && partialName && !trimmed.includes(' ')) {
           const allCmds = _listCmds()
           const matches = allCmds.filter(
             (c) =>
@@ -402,6 +412,7 @@ export async function runRepl(
           }
           continue
         }
+        let blockedSkill = false
         const slashCtx: SlashCommandContext = {
           engine,
           renderer,
@@ -422,8 +433,11 @@ export async function runRepl(
             return getProjectSettingsPath(cwd)
           },
           resolveSkillPrompt: (name, args) => {
-            const skill = skills.get(name)
-            return skill ? expandSkillPrompt(skill, args) : null
+            if (!skills.has(name)) return null
+            const invocation = skillRuntime.resolveSkillInvocation(name, args, 'user')
+            renderer.info(formatSkillInvocation(invocation))
+            blockedSkill = !invocation.eligible
+            return invocation.eligible ? invocation.prompt : null
           },
           loadSession: (name: string) => loadSessionByRef(name),
         }
@@ -449,18 +463,19 @@ export async function runRepl(
             renderer.humanPrompt(
               pendingPrompt.slice(0, 80) + (pendingPrompt.length > 80 ? ' ...' : ''),
             )
-            hookRunner.runUserPromptSubmit(pendingPrompt)
+            if (!await submitPrompt(pendingPrompt)) continue
             updateProgressLog(cwd, 'running', pendingPrompt.slice(0, 100))
             await runTask(pendingPrompt, [...history], Date.now())
             updateProgressLog(cwd, 'idle', 'waiting for next task')
           }
           continue
         }
+        if (blockedSkill) continue
         renderer.warn('Unknown command: ' + trimmed + '. Type / for available commands.')
         continue
       }
       renderer.humanPrompt(trimmed)
-      hookRunner.runUserPromptSubmit(trimmed)
+      if (!await submitPrompt(trimmed)) continue
       updateProgressLog(cwd, 'running', trimmed.slice(0, 100))
       await runTask(trimmed, [...history], Date.now())
       updateProgressLog(cwd, 'idle', 'waiting for next task')

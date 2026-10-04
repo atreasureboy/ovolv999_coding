@@ -15,12 +15,15 @@ import {
 import { formatApiError } from '../../utils/apiError.js'
 import { normalizeOutcome, type OutcomeStatus } from '../../core/outcome.js'
 import { refreshGitBranch } from './gitInfo.js'
+import { formatSkillInvocation, type SkillInvocationResolver } from '../../skills/runtime.js'
 
 export interface InkReplControllerOptions {
   store: UIStore
   engine: ExecutionEngine
   inkRenderer: Renderer
   skills: Array<{ name: string; description: string }>
+  resolveSkillInvocation?: SkillInvocationResolver
+  onUserPromptSubmit?: (prompt: string) => void | Promise<unknown>
   sessionDir?: string
   cwd: string
   resumedHistory?: OpenAIMessage[]
@@ -61,6 +64,7 @@ export function createInkReplController(opts: InkReplControllerOptions): InkRepl
   const { store, engine } = opts
   let history: OpenAIMessage[] = opts.resumedHistory ? [...opts.resumedHistory] : []
   let currentSessionDir = opts.sessionDir
+  let blockedSkill = false
 
   function setHistory(messages: OpenAIMessage[]): void {
     history = [...messages]
@@ -115,6 +119,13 @@ export function createInkReplController(opts: InkReplControllerOptions): InkRepl
       opts.skills.length === 0
         ? 'No skills available.'
         : opts.skills.map((skill) => `/${skill.name.padEnd(16)} ${skill.description}`).join('\n'),
+    resolveSkillPrompt: (name, args) => {
+      if (!opts.resolveSkillInvocation || !opts.skills.some((skill) => skill.name === name)) return null
+      const invocation = opts.resolveSkillInvocation(name, args, 'user')
+      store.addInfo(formatSkillInvocation(invocation))
+      blockedSkill = !invocation.eligible
+      return invocation.eligible ? invocation.prompt : null
+    },
     getSessionsText: () => {
       const sessions = listSessions(opts.cwd)
       return sessions.length === 0
@@ -134,6 +145,7 @@ export function createInkReplController(opts: InkReplControllerOptions): InkRepl
     store.setRunning(true)
     store.setSpinner(true, 'Thinking')
     try {
+      await opts.onUserPromptSubmit?.(prompt)
       const result = await engine.runTurn(prompt, history, images)
       history = result.newHistory
       const tracker = engine.getCostTracker()
@@ -207,9 +219,10 @@ export function createInkReplController(opts: InkReplControllerOptions): InkRepl
       await selectModel()
       return true
     }
+    blockedSkill = false
     const result = await dispatchSlashCommand(input, slashContext)
     refreshGitBranch()
-    if (result === null) return false
+    if (result === null) return blockedSkill
     switch (result.type) {
       case 'text':
         store.addInfo(result.value)

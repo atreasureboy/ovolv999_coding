@@ -1,4 +1,5 @@
 import type OpenAI from 'openai'
+import { createHash } from 'node:crypto'
 import type { OpenAIMessage } from './types.js'
 import { safeHistoryStart } from './messageGroups.js'
 import { MODEL_MAX_CONTEXT_TOKENS } from './compact/budget.js'
@@ -153,44 +154,98 @@ function extractSummary(text: string): string {
     .trim()
 }
 
-/**
- * Serialize messages to text for the summarization prompt.
- *
- * An assistant message MAY carry both a non-empty `content` AND one or more
- * `tool_calls` — for example, the assistant says "Let me check." (content)
- * and at the same time issues a `Read` tool call. The previous
- * implementation used an `if / else if` chain that emitted ONLY the
- * content and silently dropped the tool_calls, which meant a compaction
- * summary lost every tool call that came bundled with spoken text. The
- * LLM rebuilding context from that summary would be unable to reason
- * about which tools the assistant had already invoked.
- *
- * This function now emits BOTH halves when both are present, in the
- * order: content first, then tool_calls — matching the natural reading
- * flow ("what the assistant said, then what it asked for"). Pure;
- * exported for tests so the contract is locked down without spinning
- * up a fake OpenAI client.
- */
-export function serializeMessages(messages: OpenAIMessage[]): string {
+function boundedPreview(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text
+  const marker = ` ...[truncated; original ${text.length} chars]... `
+  const remaining = Math.max(0, maxChars - marker.length)
+  const head = Math.ceil(remaining / 2)
+  const tail = remaining - head
+  return text.slice(0, head) + marker + (tail ? text.slice(-tail) : '')
+}
+
+function attachmentReference(url: string | undefined, location = ''): string {
+  if (!url) return `[IMAGE ATTACHMENT${location}: reference unavailable]`
+  if (/^data:/i.test(url)) {
+    const mime = /^data:([^;,]+)/i.exec(url)?.[1] ?? 'unknown'
+    const hash = createHash('sha256').update(url).digest('hex')
+    return `[IMAGE ATTACHMENT${location}: mime=${boundedPreview(mime, 100)} sha256=${hash}; inline data omitted; no retrievable URL supplied]`
+  }
+  return `[IMAGE ATTACHMENT${location}: original reference=${boundedPreview(url, 512)}; access not verified]`
+}
+
+function omitInlineImages(text: string): string {
+  return text.replace(/\bdata:image\\?\/[a-z0-9.+-]+(?:;[a-z0-9=.+-]+)*,[a-z0-9+/=_%\\-]+/gi, url => attachmentReference(url.replace(/\\\//g, '/')))
+}
+
+function salientArgumentFields(value: unknown): string {
+  const fields: string[] = []
+  let visited = 0
+  let truncated = false
+  const relevant = (key: string): boolean => /(?:^|_)(?:paths?|files?|cwd|directory|worktree|target|destination|purpose|description|reason|objective|task|prompt|command|url|uri)(?:$|_)/.test(key.replace(/[A-Z]/g, letter => '_' + letter.toLowerCase()))
+  const visit = (current: unknown, path: string, depth: number): void => {
+    visited++
+    if (depth > 8 || visited > 4096 || fields.length >= 64) {
+      truncated = true
+      return
+    }
+    if (!current || typeof current !== 'object') return
+    for (const key in current) {
+      if (!Object.hasOwn(current, key)) continue
+      if (visited >= 4096 || fields.length >= 64) { truncated = true; break }
+      const child = (current as Record<string, unknown>)[key]
+      const childPath = path ? `${path}.${key}` : key
+      if (relevant(key)) fields.push(`${boundedPreview(childPath, 160)}: ${boundedPreview(JSON.stringify(child), 600)}`)
+      visit(child, childPath, depth + 1)
+    }
+  }
+  visit(value, '', 0)
+  if (truncated) fields.push('[retained-field scan truncated]')
+  return fields.join('\n')
+}
+
+function serializeToolArguments(argumentsText: string): string {
+  const sanitized = omitInlineImages(argumentsText)
+  const maxChars = 4000
+  if (sanitized.length <= maxChars) return sanitized
+  let fields = ''
+  try {
+    fields = boundedPreview(salientArgumentFields(JSON.parse(sanitized)), 1800)
+  } catch (error) { void error }
+  const prefix = `[arguments truncated; original ${argumentsText.length} chars]${fields ? '\n[retained fields]\n' + fields : ''}\n[argument preview]\n`
+  return prefix + boundedPreview(sanitized, maxChars - prefix.length)
+}
+
+export function serializeCompactionInput(messages: readonly OpenAIMessage[]): string {
   const parts: string[] = []
-  for (const msg of messages) {
+  for (const [messageIndex, msg] of messages.entries()) {
     const role = msg.role.toUpperCase()
-    if (typeof msg.content === 'string' && msg.content) {
-      parts.push(`[${role}]: ${msg.content}`)
+    const content = typeof msg.content === 'string'
+      ? omitInlineImages(msg.content)
+      : Array.isArray(msg.content)
+        ? msg.content.map((part, partIndex) => part.type === 'text'
+          ? omitInlineImages(part.text ?? '')
+          : part.type === 'image_url'
+            ? attachmentReference(part.image_url?.url, ` message=${messageIndex + 1} part=${partIndex + 1}`)
+            : '').filter(Boolean).join('\n')
+        : ''
+    if (msg.role === 'tool') {
+      const identity = msg.tool_call_id ? `; tool_call_id=${msg.tool_call_id}` : ''
+      parts.push(`[TOOL RESULT: ${msg.name ?? '?'}${identity}]: ${boundedPreview(content, 500)}`)
+    } else if (content) {
+      parts.push(`[${role}]: ${content}`)
     }
     if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
       const calls = msg.tool_calls
-        .map(tc => `  → ${tc.function.name}(${tc.function.arguments.slice(0, 200)})`)
+        .map(tc => `  → ${tc.function.name}(${serializeToolArguments(tc.function.arguments)}) [tool_call_id=${tc.id}]`)
         .join('\n')
       parts.push(`[ASSISTANT tool calls]:\n${calls}`)
     }
-    if (msg.role === 'tool' && typeof msg.content === 'string') {
-      const preview = msg.content.slice(0, 500)
-      const truncated = msg.content.length > 500 ? ' ...[truncated]' : ''
-      parts.push(`[TOOL RESULT: ${msg.name ?? '?'}]: ${preview}${truncated}`)
-    }
   }
   return parts.join('\n\n')
+}
+
+export function serializeMessages(messages: OpenAIMessage[]): string {
+  return serializeCompactionInput(messages)
 }
 
 export interface CompactResult {
@@ -286,7 +341,7 @@ export async function maybeCompact(
   }
 
   // Build the summarization request
-  const conversationText = serializeMessages(olderMessages)
+  const conversationText = serializeCompactionInput(olderMessages)
   const userPrompt = `Please summarize the following conversation:\n\n${conversationText}`
 
   let summaryText: string

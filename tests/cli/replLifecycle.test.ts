@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -13,6 +13,10 @@ import type { Renderer } from '../../src/ui/renderer.js'
 import { InputHandler } from '../../src/ui/input.js'
 import { registerBuiltinCommands } from '../../src/commands/builtin.js'
 import { clearRegistry, registerCommand } from '../../src/commands/index.js'
+import { loadSkills } from '../../src/skills/loader.js'
+import { createSkillRuntime } from '../../src/skills/runtime.js'
+import { createInkReplController } from '../../src/ui/ink/replController.js'
+import { UIStore } from '../../src/ui/ink/store.js'
 import {
   createSessionDir,
   loadSession,
@@ -83,6 +87,84 @@ function setup() {
 }
 
 describe('terminal session resource ownership', () => {
+  it.each([
+    { input: 'first rejected', submitted: 'first rejected' },
+    { input: '/inspect-custom first', submitted: 'Inspect first' },
+    { input: '/plan first', submitted: '/plan first' },
+  ])('retains the REPL after an asynchronous prompt submission rejects for $input', async ({ input: firstInput, submitted }) => {
+    const { cwd, config, engine, state } = setup()
+    mkdirSync(join(cwd, '.ovogo/skills'), { recursive: true })
+    writeFileSync(join(cwd, '.ovogo/skills/inspect-custom.md'), 'Inspect $ARGS')
+    const skills = loadSkills(cwd)
+    const executed: string[] = []
+    vi.spyOn(ExecutionEngine.prototype, 'runTurn').mockImplementation((prompt) => {
+      executed.push(prompt)
+      return Promise.resolve({ result: { stopped: true, reason: 'stop_sequence', status: 'completed', output: 'done' }, newHistory: [] })
+    })
+    const submissions: string[] = []
+    const hookRunner = {
+      runUserPromptSubmit: (prompt: string) => {
+        submissions.push(prompt)
+        return submissions.length === 1 ? Promise.reject(new Error('submission unavailable')) : Promise.resolve([])
+      },
+    }
+    const chunks: string[] = []
+    const stream = new PassThrough()
+    stream.on('data', (chunk: Buffer) => chunks.push(chunk.toString()))
+    const renderer = new TerminalRenderer({ stream })
+    io.readLine
+      .mockResolvedValueOnce({ text: firstInput, eof: false })
+      .mockResolvedValueOnce({ text: 'second accepted', eof: false })
+      .mockResolvedValueOnce({ text: '', eof: true })
+    try {
+      await runRepl(state, engine, config, renderer, cwd, skills, hookRunner)
+      expect(submissions).toEqual([submitted, 'second accepted'])
+      expect(executed).toEqual(['second accepted'])
+      expect(chunks.join('')).toContain('submission unavailable')
+      expect(chunks.join('')).toContain('Goodbye.')
+      expect(state).toEqual({ prompt: null, saveOnExit: null })
+    } finally {
+      renderer.destroy()
+      stream.end()
+      await engine.dispose()
+    }
+  })
+  it.each(['src/core $&', ''])('invokes custom skills with the same prompt and source as Ink for arguments %s', async (args) => {
+    const { cwd, config, renderer, engine, state } = setup()
+    mkdirSync(join(cwd, '.ovogo/skills'), { recursive: true })
+    const sourcePath = join(cwd, '.ovogo/skills/inspect-custom.md')
+    writeFileSync(sourcePath, '---\ndisable-model-invocation: true\n---\nInspect $ARGS')
+    const skills = loadSkills(cwd)
+    const prompts: string[] = []
+    vi.spyOn(engine, 'runTurn').mockImplementation((prompt) => {
+      prompts.push(prompt)
+      return Promise.resolve({ result: { stopped: true, reason: 'stop_sequence', status: 'completed', output: 'done' }, newHistory: [] })
+    })
+    const cliMessages: string[] = []
+    const stream = new PassThrough()
+    stream.on('data', (chunk: Buffer) => cliMessages.push(chunk.toString()))
+    const terminalRenderer = new TerminalRenderer({ stream })
+    const hooks: string[] = []
+    const slash = `/inspect-custom ${args}`.trim()
+    io.readLine.mockResolvedValueOnce({ text: slash, eof: false }).mockResolvedValueOnce({ text: '', eof: true })
+    await runRepl(state, engine, config, terminalRenderer, cwd, skills, { runUserPromptSubmit: (prompt) => { hooks.push(prompt) } })
+    const store = new UIStore()
+    const ink = createInkReplController({
+      store, engine, inkRenderer: renderer, skills: [...skills.values()], cwd, onExit: () => {},
+      resolveSkillInvocation: createSkillRuntime(skills).resolveSkillInvocation,
+      onUserPromptSubmit: (prompt) => { hooks.push(prompt) },
+    })
+    expect(await ink.dispatchSlash(slash)).toBe(true)
+    await vi.waitFor(() => expect(store.getState().running).toBe(false))
+    const expectedPrompt = args ? `Inspect ${args}` : 'Inspect '
+    expect(prompts).toEqual([expectedPrompt, expectedPrompt])
+    expect(hooks).toEqual([expectedPrompt, expectedPrompt])
+    expect(cliMessages.join('\n')).toContain(sourcePath)
+    expect(store.getState().messages).toContainEqual(expect.objectContaining({ type: 'info', text: expect.stringContaining(sourcePath) }))
+    terminalRenderer.destroy()
+    stream.end()
+    await engine.dispose()
+  })
   it('reports blocked outcomes without a successful Done message', async () => {
     const { cwd, config, engine, state } = setup()
     const chunks: string[] = []

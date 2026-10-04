@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -261,5 +261,44 @@ describe('Ink REPL controller', () => {
     await expect(repl.dispatchSlash('/not-a-command')).resolves.toBe(false)
     await expect(repl.dispatchSlash('/q')).resolves.toBe(true)
     expect(exits).toBe(1)
+  })
+
+  it('runs an expanded custom skill and submits its prompt hook once', async () => {
+    const prompts: string[] = []
+    const hookPrompts: string[] = []
+    const origins: string[] = []
+    const options = {
+      store, cwd: directory, skills: [{ name: 'inspect-custom', description: 'Inspect' }], onExit: () => {},
+      inkRenderer: {} as Renderer,
+      engine: {
+        runTurn: (prompt: string) => { prompts.push(prompt); return Promise.resolve({ newHistory: [], result }) },
+        getCostTracker: () => ({ getTotalCost: () => 0, getTotalAPICalls: () => 1 }),
+      } as unknown as ExecutionEngine,
+      resolveSkillInvocation: (name: string, args: string, origin: string) => {
+        origins.push(origin)
+        return { name, args, prompt: `Inspect ${args}`, sourcePath: '/project/inspect.md', eligible: true, requiredTools: [], diagnostics: [] }
+      },
+      onUserPromptSubmit: (prompt: string) => { hookPrompts.push(prompt) },
+    }
+    const repl = createInkReplController(options)
+    expect(await repl.dispatchSlash('/inspect-custom src/core')).toBe(true)
+    await vi.waitFor(() => expect(store.getState().running).toBe(false))
+    expect(prompts).toEqual(['Inspect src/core'])
+    expect(hookPrompts).toEqual(['Inspect src/core'])
+    expect(origins).toEqual(['user'])
+    expect(store.getState().messages).toContainEqual(expect.objectContaining({ type: 'info', text: expect.stringContaining('/project/inspect.md') }))
+  })
+
+  it('handles a blocked skill with a diagnostic and no engine turn', async () => {
+    const prompts: string[] = []
+    const options = {
+      store, cwd: directory, skills: [{ name: 'complex-custom', description: 'Complex' }], onExit: () => {},
+      inkRenderer: {} as Renderer,
+      engine: { runTurn: (prompt: string) => { prompts.push(prompt); return Promise.resolve({ newHistory: [], result }) } } as unknown as ExecutionEngine,
+      resolveSkillInvocation: (name: string, args: string) => ({ name, args, prompt: 'Complex task', sourcePath: '/project/complex.md', eligible: false, requiredTools: [], diagnostics: ['Unsupported skill metadata: hooks'] }),
+    }
+    expect(await createInkReplController(options).dispatchSlash('/complex-custom')).toBe(true)
+    expect(prompts).toEqual([])
+    expect(store.getState().messages.at(-1)).toMatchObject({ type: 'info', text: expect.stringContaining('Unsupported skill metadata: hooks') })
   })
 })

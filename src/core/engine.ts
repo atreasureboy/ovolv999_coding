@@ -1,6 +1,8 @@
 import { assertExecutionProfile, createProcessScope } from './executionBackend.js'
 import { settleHistory, trimHistory } from './messageGroups.js'
 import { createModelGateway } from './modelGateway.js'
+import { getEffortPrompt, isEffortLevel, type EffortLevel } from './effort.js'
+import { runHookOperation } from './hookLifecycle.js'
 import { randomUUID } from 'crypto'
 import OpenAI from 'openai'
 import { getPlanModePrefix } from '../prompts/system.js'
@@ -110,8 +112,12 @@ export class ExecutionEngine {
   }
   constructor(config: EngineConfig, renderer: EngineObserver, client?: OpenAI) {
     assertExecutionProfile(config.executionProfile)
+    if (config.effort !== undefined && !isEffortLevel(config.effort)) {
+      throw new Error('Invalid reasoning effort level')
+    }
     this.config = applyAgentToConfig({
       ...config,
+      effort: config.effort ?? 'medium',
       extraTools: config.extraTools ? [...config.extraTools] : undefined,
       enabledModules: config.enabledModules ? [...config.enabledModules] : undefined,
       verificationExcludedPaths: config.verificationExcludedPaths
@@ -243,6 +249,8 @@ export class ExecutionEngine {
   }
   private buildSystemPrompt(planMode: boolean, moduleSections: string[] = []): string {
     const baseSystemPrompt = this.config.systemPrompt ?? ''
+    const effortPrompt = getEffortPrompt(this.getEffort())
+    moduleSections = [...moduleSections, '[Effort guidance]\n' + effortPrompt]
     const sections =
       moduleSections.length > 0
         ? baseSystemPrompt + '\n\n---\n\n' + moduleSections.join('\n\n---\n\n')
@@ -334,10 +342,9 @@ export class ExecutionEngine {
         })
         this._consecutiveCompactFailures = 0
         this._suppressCompactWarning = true
-        this.config.hookRunner?.runOnContextOverflow?.(
-          compactResult.originalTokens,
-          compactResult.summaryTokens,
-        )
+        if (this.activeRun) await runHookOperation(this.activeRun, this.config, 'OnContextOverflow', signal =>
+          this.config.hookRunner?.runOnContextOverflow?.(compactResult.originalTokens, compactResult.summaryTokens, signal),
+        ).catch(error => { this.renderer.warn('Context hook failed: ' + String(error)) })
       } else {
         this._consecutiveCompactFailures++
         if (this._consecutiveCompactFailures >= 3) {
@@ -422,6 +429,7 @@ export class ExecutionEngine {
     input: Record<string, unknown>,
     context: ToolContext,
     turnNumber: number,
+    forceApproval = false,
   ): Promise<ToolResult> {
     const tool = findTool(this.allTools, toolName)
     if (!tool) {
@@ -457,7 +465,7 @@ export class ExecutionEngine {
               this.permissionManager.getMode() === 'default' &&
               checkRules(this.permissionManager.getRules(), toolName, input)?.behavior !== 'allow'
             ? 'ask'
-            : managerPermission
+            : forceApproval ? 'ask' : managerPermission
     if (permission === 'deny') {
       return {
         content: `Permission denied for ${toolName}. Current mode: ${this.permissionManager.formatMode()}`,
@@ -532,18 +540,21 @@ export class ExecutionEngine {
   }> {
     const run = this.activeRun!
     const signal = turnAbortController.signal
-    const batches = partitionToolCalls(parsedCalls, this.allTools)
+    const mutableHooks = this.config.hookRunner && (this.config.hookRunner.canModifyToolInput?.() ?? true)
+    const batches = mutableHooks ? parsedCalls.map(call => ({ safe: false, calls: [call] })) : partitionToolCalls(parsedCalls, this.allTools)
     const limit = Math.max(1, Math.min(16, Math.floor(this.config.maxToolConcurrency ?? 4)))
     const settled = new Set<string>()
     let interrupted = false
-    const publish = (call: ParsedToolCall, result: ToolResult): void => {
+    const publish = async (call: ParsedToolCall, result: ToolResult): Promise<void> => {
       if (settled.has(call.tc.id)) return
       settled.add(call.tc.id)
       const { tc } = call
       const failureKey = tc.name === 'Agent' ? tc.id : tc.name + ':' + JSON.stringify(call.input)
       if (result.isError) run.toolFailures.set(failureKey, result)
       else run.toolFailures.delete(failureKey)
-      this.config.hookRunner?.runPostToolCall(tc.name, result.content, result.isError)
+      if (!signal.aborted) await runHookOperation(run, this.config, 'PostToolCall', signal =>
+        this.config.hookRunner?.runPostToolCall(tc.name, result.content, result.isError, signal),
+      ).catch(error => { this.renderer.warn('Post-tool hook failed: ' + String(error)) })
       this.renderer.toolResult(tc.name, result.content, result.isError)
       this.eventLog?.append('tool_result', tc.name, {
         content: result.content.slice(0, 500),
@@ -567,19 +578,29 @@ export class ExecutionEngine {
         return { content: 'Cancelled before execution', isError: true, status: 'cancelled' }
       try {
         this.renderer.toolStart(tc.name, input)
-        this.config.hookRunner?.runPreToolCall(tc.name, input)
-        this.eventLog?.append('tool_call', tc.name, { input, run_id: run.runId })
-        const tool = findTool(this.allTools, tc.name)
-        const readOnly =
-          tool?.metadata?.readOnly === true ||
-          (tc.name === 'Bash' && tool?.isConcurrencySafe?.(input) === true)
         return await runOperation(
           run,
           'tool:' + tc.name,
-          () =>
-            withWorkspaceAccess(toolContext.cwd, run.familyId, !readOnly, signal, () =>
-              this.executeToolCall(tc.name, input, toolContext, turnNumber),
-            ),
+          async () => {
+            const hooks = await runHookOperation(run, this.config, 'PreToolCall', signal =>
+              this.config.hookRunner?.runPreToolCall(tc.name, input, signal),
+            ) ?? []
+            signal.throwIfAborted()
+            const denial = hooks.find(hook => hook.decision?.action === 'deny')?.decision
+            if (denial) return { content: 'Hook denied ' + tc.name + ': ' + (denial.reason ?? 'policy denied the operation'), isError: true, status: 'blocked' }
+            let effectiveInput = input
+            for (const hook of hooks) {
+              if (hook.decision?.updatedInput) effectiveInput = hook.decision.updatedInput
+            }
+            this.eventLog?.append('tool_call', tc.name, { input: effectiveInput, run_id: run.runId })
+            const tool = findTool(this.allTools, tc.name)
+            const readOnly = tool?.metadata?.readOnly === true ||
+              (tc.name === 'Bash' && tool?.isConcurrencySafe?.(effectiveInput) === true)
+            return withWorkspaceAccess(toolContext.cwd, run.familyId, !readOnly, signal, () =>
+              this.executeToolCall(tc.name, effectiveInput, toolContext, turnNumber,
+                hooks.some(hook => hook.decision?.action === 'ask')),
+            )
+          },
           this.config.toolTimeoutMs ?? 1800000,
           this.config.cancellationGraceMs ?? 2000,
         )
@@ -606,9 +627,9 @@ export class ExecutionEngine {
             tc: calls[index].tc,
           }))
           enforceAggregateToolResultBudget(budgeted, this.config.sessionDir)
-          calls.forEach((call, index) =>
-            publish(call, { ...results[index], content: budgeted[index].content }),
-          )
+          for (const [index, call] of calls.entries()) {
+            await publish(call, { ...results[index], content: budgeted[index].content })
+          }
           if (this.claimSoftAbort(turnAbortController)) interrupted = true
           if (results.some((result) => result.status === 'needs_input')) interrupted = true
         }
@@ -617,7 +638,7 @@ export class ExecutionEngine {
     } finally {
       for (const call of parsedCalls) {
         if (!settled.has(call.tc.id))
-          publish(call, {
+          await publish(call, {
             content: 'Cancelled before execution; no side effects started',
             isError: true,
             status: 'cancelled',
@@ -1064,10 +1085,9 @@ export class ExecutionEngine {
       } catch (err) {
         const errMsg = (err as Error).message || String(err)
         const errorIteration = 'iteration' in state ? state.iteration : 0
-        this.config.hookRunner?.runOnError?.(err as Error, {
-          turnNumber: errorIteration,
-          lastToolName,
-        })
+        if (!turnAbortController.signal.aborted) await runHookOperation(run, this.config, 'OnError', signal =>
+          this.config.hookRunner?.runOnError?.(err as Error, { turnNumber: errorIteration, lastToolName }, signal),
+        ).catch(error => { this.renderer.warn('Error hook failed: ' + String(error)) })
         this.renderer.error(`Engine error: ${errMsg}`)
         result = { stopped: true, reason: 'error', output: finalOutput || `[Error: ${errMsg}]` }
       } finally {
@@ -1125,6 +1145,13 @@ export class ExecutionEngine {
   }
   getModel(): string {
     return this.config.model
+  }
+  getEffort(): EffortLevel {
+    return this.config.effort ?? 'medium'
+  }
+  setEffort(level: EffortLevel): void {
+    if (!isEffortLevel(level)) throw new Error('Invalid reasoning effort level')
+    this.config.effort = level
   }
   getModelClient(): OpenAI {
     return this.client

@@ -16,7 +16,8 @@ import { SESSION_SUBCOMMANDS, handleSessionSubcommand } from '../src/cli/session
 import type { CliSessionState } from '../src/cli/sessionState.js'
 import { runSingleTask } from '../src/cli/tasks.js'
 import '../src/commands/builtin.js'
-import { HookRunner, NoopHookRunner } from '../src/config/hooks.js'
+import { HookService } from '../src/core/hookService.js'
+import { createSkillRuntime } from '../src/skills/runtime.js'
 import { loadOvogoMd } from '../src/config/ovogomd.js'
 import { loadProjectConfig } from '../src/config/projectConfig.js'
 import { detectProjectContext, formatProjectContext } from '../src/config/projectContext.js'
@@ -205,9 +206,7 @@ async function main(): Promise<void> {
   if (projectConfig) {
     renderer.info(`Project config: .ovolv999.json loaded`)
   }
-  const hookRunner = settings.hooks
-    ? new HookRunner(settings.hooks, { sink: { warn: (m) => renderer.warn(m) } })
-    : new NoopHookRunner()
+  const hookRunner = new HookService(settings.hooks ?? {}, cwd, { sink: { warn: (m) => renderer.warn(m) } })
   const hookTypes = [
     'PreToolCall',
     'PostToolCall',
@@ -521,7 +520,7 @@ async function main(): Promise<void> {
     if (!process.stdin.isTTY) {
       const piped = await readStdin()
       if (piped) {
-        hookRunner.runUserPromptSubmit(piped)
+        await hookRunner.runUserPromptSubmit(piped)
         await runSingleTask(
           engine,
           renderer,
@@ -550,7 +549,7 @@ async function main(): Promise<void> {
       return
     }
     if (task) {
-      hookRunner.runUserPromptSubmit(task)
+      await hookRunner.runUserPromptSubmit(task)
       await runSingleTask(engine, renderer, task, cwd, resumedHistory, sessionDir, resumedHistory)
       return
     }
@@ -567,6 +566,8 @@ async function main(): Promise<void> {
         version: VERSION,
         model,
         skills: skillsArray,
+        resolveSkillInvocation: createSkillRuntime(skills).resolveSkillInvocation,
+        onUserPromptSubmit: (prompt) => hookRunner.runUserPromptSubmit(prompt),
         cwd,
         sessionDir,
         resumedHistory,

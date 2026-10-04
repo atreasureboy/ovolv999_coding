@@ -1,4 +1,5 @@
 import type { ModelGatewayPolicy } from './providerAdmission.js'
+import type { EffortLevel } from './effort.js'
 import type { ExecutionProfile } from './executionBackend.js'
 // Core types for ovolv999 execution engine
 
@@ -10,6 +11,7 @@ import type { BackgroundTaskManager } from './backgroundTaskManager.js'
 import type { FileHistory } from './fileHistory.js'
 import type { PermissionManager } from './permissionSystem.js'
 import type { McpServerConfig } from './mcpClient.js'
+import type { McpRegistryEntry } from './mcpRegistry.js'
 import type { FileReadState } from './fileState.js'
 import type { OutcomeStatus, VerificationEvidence } from './outcome.js'
 
@@ -131,6 +133,7 @@ export interface Tool {
 }
 
 export interface ToolContext {
+  mcpRegistry?: ReadonlyMap<string, McpRegistryEntry>
   executionProfile?: ExecutionProfile
   verificationExcludedPaths?: readonly string[]
   workspaceBound?: boolean
@@ -222,11 +225,8 @@ export type AskUserQuestionHandler = (
   signal?: AbortSignal,
 ) => Promise<Record<string, string>>
 
-/**
- * Structured outcome of a single hook command execution.
- * Returned (rather than thrown) so the engine never blocks on hook failures.
- */
 export interface HookResult {
+  decision?: HookDecision
   /** Which hook entry fired (PreToolCall, PostToolCall, ...). */
   hook: string
   /** The shell command that ran. */
@@ -252,25 +252,27 @@ export type HookErrorCode =
   | 'spawn_failed'    // other spawn errors
   | 'unknown'
 
-/**
- * Interface for hook runners — decouples engine from config layer.
- * Hooks are best-effort: implementations must never throw. Each method
- * returns the structured outcome of every hook entry that fired so callers
- * (and tests) can inspect success or failure without aborting the agent loop.
- */
+export interface HookDecision {
+  action: 'continue' | 'deny' | 'ask'
+  reason?: string
+  updatedInput?: Record<string, unknown>
+}
+
 export interface IHookRunner {
-  runPreToolCall(toolName: string, input: Record<string, unknown>): HookResult[]
-  runPostToolCall(toolName: string, result: string, isError: boolean): HookResult[]
-  runUserPromptSubmit(prompt: string): HookResult[]
+  canModifyToolInput?(): boolean
+  runPreToolCall(toolName: string, input: Record<string, unknown>, signal?: AbortSignal): HookResult[] | Promise<HookResult[]>
+  runPostToolCall(toolName: string, result: string, isError: boolean, signal?: AbortSignal): HookResult[] | Promise<HookResult[]>
+  runUserPromptSubmit(prompt: string, signal?: AbortSignal): HookResult[] | Promise<HookResult[]>
   /** Called when the engine encounters an unrecoverable error */
-  runOnError?(error: Error, context: { turnNumber: number; lastToolName?: string }): HookResult[]
+  runOnError?(error: Error, context: { turnNumber: number; lastToolName?: string }, signal?: AbortSignal): HookResult[] | Promise<HookResult[]>
   /** Called when a run completes (any reason: stop, max_iterations, error, interrupted) */
-  runOnComplete?(result: TurnResult): HookResult[]
+  runOnComplete?(result: TurnResult, signal?: AbortSignal): HookResult[] | Promise<HookResult[]>
   /** Called after context compaction (auto-summary of older messages) */
-  runOnContextOverflow?(tokensBefore: number, tokensAfter: number): HookResult[]
+  runOnContextOverflow?(tokensBefore: number, tokensAfter: number, signal?: AbortSignal): HookResult[] | Promise<HookResult[]>
 }
 
 export interface EngineConfig {
+  effort?: EffortLevel
   modelGateway?: Partial<ModelGatewayPolicy>
   executionProfile?: ExecutionProfile
   verificationExcludedPaths?: readonly string[]

@@ -15,7 +15,7 @@
  * leak credentials through logs.
  */
 
-import { execSync } from 'child_process'
+import { execSync, execFileSync } from 'child_process'
 import type { HooksConfig, HookEntry } from './settings.js'
 import type { HookErrorCode, HookResult, IHookRunner, TurnResult } from '../core/types.js'
 
@@ -88,7 +88,7 @@ function pickSensitiveFromProcessEnv(): Record<string, string> {
  * without spawning real processes.
  */
 export interface HookExecOptions {
-  command: string
+  command: string | readonly string[]
   env: Record<string, string>
   timeoutMs: number
 }
@@ -98,12 +98,14 @@ export type HookCommandRunner = (options: HookExecOptions) => Pick<HookResult, '
 function defaultRunner(options: HookExecOptions): ReturnType<HookCommandRunner> {
   const start = Date.now()
   try {
-    execSync(options.command, {
+    const execOptions = {
       env: { ...process.env, ...options.env },
-      encoding: 'utf8',
+      encoding: 'utf8' as const,
       timeout: options.timeoutMs,
-      stdio: 'ignore',
-    })
+      stdio: 'ignore' as const,
+    }
+    if (typeof options.command === 'string') execSync(options.command, execOptions)
+    else execFileSync(options.command[0], [...options.command.slice(1)], execOptions)
     return { ok: true, status: 0, signal: null, durationMs: Date.now() - start }
   } catch (err) {
     const { code, status, signal, message } = classifyError(err)
@@ -201,7 +203,7 @@ export class HookRunner implements IHookRunner {
       // cannot leak through exec error messages.
       const scrubbedEnv = { ...env, ...pickSensitiveFromProcessEnv() }
       const error = exec.error ? redactEnv(exec.error, scrubbedEnv) : undefined
-      const result: HookResult = { hook: hookName, command: entry.command, ...exec, error }
+      const result: HookResult = { hook: hookName, command: typeof entry.command === 'string' ? entry.command : entry.command.join(' '), ...exec, error }
       results.push(result)
       if (!result.ok) this.notifyFailure(result)
     }

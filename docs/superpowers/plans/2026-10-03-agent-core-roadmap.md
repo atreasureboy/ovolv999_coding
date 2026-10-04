@@ -253,11 +253,11 @@ type AgentEvent = { schemaVersion: 1; sequence: number; threadId: string; turnId
 
 **Interfaces:** Produces 正式 `ToolContext.mcpRegistry:ReadonlyMap<string,McpRegistryEntry>`，通过已存在 module `toolContextPatch` 注入；entry 提供现有 list/read/prompts 方法及取消信号。Consumes 当前 stdio client，不依赖 T15。
 
-- [ ] 写失败集成：配置一个真实 fixture server，同一个 engine turn 调 tool、list resource、read resource；不允许测试手工注入 registry。
-- [ ] 运行 `pnpm exec vitest run tests/modules/mcpResourcesIntegration.test.ts` 确认真实接线失败。
-- [ ] 将已连接 clients 注入 context；断开/重配时删旧 entry，去掉未声明类型的双断言。
-- [ ] 验证服务关闭、重复名称、读超限、取消和服务器错误仍走现有边界。
-- [ ] 跑 MCP lifecycle/discovery 测试与类型检查，审查提交。
+- [x] 写失败集成：配置一个真实 fixture server，同一个 engine turn 调 tool、list resource、read resource；不允许测试手工注入 registry。
+- [x] 运行目标测试确认真实接线失败；Windows 本地 pnpm exec shim 无法启动，使用现有 Node Vitest 入口，无依赖变更。
+- [x] 将已连接 clients 注入 context；断开/重配时删旧 entry，去掉未声明类型的双断言。
+- [x] 验证服务关闭、重复名称、读超限、取消和服务器错误仍走现有边界。
+- [x] 跑 MCP lifecycle/discovery 测试与类型检查、完整 264 文件测试，并完成独立审查；交付记录见 `docs/agent-core-progress.md`。
 
 ### T15：MCP 协商、分页、通知与远程服务（G15）
 

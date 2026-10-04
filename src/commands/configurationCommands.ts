@@ -367,25 +367,25 @@ export const configurationCommands: Command[] = [
   {
     name: 'effort',
     aliases: ['thinking'],
-    description: 'Set reasoning effort level. Usage: /effort [minimal|low|medium|high|maximum]',
-    handler: async (args) => {
-      const { setEffort, cycleEffort, getEffortPrompt, formatEffort, formatEffortList } =
+    description: 'Set effort guidance. Usage: /effort [minimal|low|medium|high|maximum]',
+    handler: async (args, ctx) => {
+      const { nextEffort, isEffortLevel, getEffortPrompt, formatEffort, formatEffortList } =
         await import('../core/effort.js')
       const parts = args.trim().split(/\s+/).filter(Boolean)
       const level = parts[0]
       if (level === 'list' || level === 'ls') {
-        return text(formatEffortList())
+        return text(formatEffortList(ctx.engine.getEffort()))
       }
       if (level === 'cycle' || level === 'next') {
-        cycleEffort()
-        return text(`Effort: ${formatEffort()}\n\nPrompt: ${getEffortPrompt()}`)
+        ctx.engine.setEffort(nextEffort(ctx.engine.getEffort()))
+        return text(`Effort: ${formatEffort(ctx.engine.getEffort())}\n\nGuidance: ${getEffortPrompt(ctx.engine.getEffort())}`)
       }
-      const validLevels = ['minimal', 'low', 'medium', 'high', 'maximum']
-      if (validLevels.includes(level)) {
-        setEffort(level as 'minimal' | 'low' | 'medium' | 'high' | 'maximum')
-        return text(`Effort set to: ${formatEffort()}\n\nPrompt: ${getEffortPrompt()}`)
+      if (isEffortLevel(level)) {
+        ctx.engine.setEffort(level)
+        return text(`Effort set to: ${formatEffort(level)}\n\nGuidance: ${getEffortPrompt(level)}`)
       }
-      return text(`Unknown level: ${level}\n${formatEffortList()}`)
+      if (!level) return text(`Effort: ${formatEffort(ctx.engine.getEffort())}`)
+      return text(`Unknown level: ${level}\n${formatEffortList(ctx.engine.getEffort())}`)
     },
   },
 ]

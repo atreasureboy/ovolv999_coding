@@ -39,6 +39,9 @@ export type HookEvent =
   | 'SessionStart'
   | 'SessionEnd'
   | 'Notification'
+  | 'OnError'
+  | 'OnComplete'
+  | 'OnContextOverflow'
 
 export interface HookConfig {
   /** Tool name matcher (glob pattern). Use '*' to match all. */

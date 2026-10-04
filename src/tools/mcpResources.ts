@@ -7,19 +7,7 @@
  */
 
 import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/types.js'
-
-interface McpRegistryEntry {
-  client: {
-    listResources: (signal?: AbortSignal) => Promise<Array<{ uri: string; name?: string; description?: string; mimeType?: string }>>
-    readResource: (uri: string, signal?: AbortSignal) => Promise<Array<{ uri: string; mimeType?: string; text?: string; blob?: string }>>
-    listPrompts: (signal?: AbortSignal) => Promise<Array<{ name: string; description?: string; arguments?: Array<{ name: string; description?: string; required?: boolean }> }>>
-  }
-  serverName: string
-}
-
-function getRegistry(ctx: ToolContext): Map<string, McpRegistryEntry> | undefined {
-  return (ctx as unknown as { mcpRegistry?: Map<string, McpRegistryEntry> }).mcpRegistry
-}
+import type { McpRegistryEntry } from '../core/mcpRegistry.js'
 
 // ── ListMcpResources ────────────────────────────────────────────────────────
 
@@ -57,7 +45,7 @@ Lists resources (with URIs, names, descriptions) and prompts from each connected
   }
 
   async execute(input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
-    const registry = getRegistry(ctx)
+    const registry = ctx.mcpRegistry
     if (!registry || registry.size === 0) {
       return { content: 'No MCP servers connected.', isError: false }
     }
@@ -153,7 +141,7 @@ export class ReadMcpResourceTool implements Tool {
   }
 
   async execute(input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
-    const registry = getRegistry(ctx)
+    const registry = ctx.mcpRegistry
     if (!registry || registry.size === 0) {
       return { content: 'No MCP servers connected.', isError: true }
     }
@@ -167,6 +155,7 @@ export class ReadMcpResourceTool implements Tool {
 
     // Find the server that has this resource
     let targetEntry: McpRegistryEntry | undefined
+    let discoveryError: unknown
     if (serverName) {
       targetEntry = registry.get(serverName)
       if (!targetEntry) {
@@ -178,10 +167,17 @@ export class ReadMcpResourceTool implements Tool {
       for (const [, entry] of registry) {
         try {
           const resources = await entry.client.listResources(ctx.signal)
+          ctx.signal?.throwIfAborted()
           if (resources.some(r => r.uri === uri)) {
             matches.push(entry)
           }
-        } catch { /* try next */ }
+        } catch (error: unknown) {
+          discoveryError = error
+          if (ctx.signal?.aborted) {
+            const reason: unknown = ctx.signal.reason
+            return { content: `Failed to discover resource "${uri}": ${reason instanceof Error ? reason.message : 'MCP resource discovery cancelled'}`, isError: true }
+          }
+        }
       }
       if (matches.length > 1) return { content: `Resource "${uri}" is exposed by multiple servers. Specify server to choose the resource.`, isError: true }
       targetEntry = matches[0]
@@ -192,8 +188,12 @@ export class ReadMcpResourceTool implements Tool {
       }
     }
 
+    if (!targetEntry) {
+      return { content: `Failed to discover resource "${uri}": ${discoveryError instanceof Error ? discoveryError.message : 'No MCP servers connected.'}`, isError: true }
+    }
+
     try {
-      const contents = await targetEntry!.client.readResource(uri, ctx.signal)
+      const contents = await targetEntry.client.readResource(uri, ctx.signal)
       if (contents.length === 0) {
         return { content: `Resource "${uri}" returned no content.`, isError: false }
       }
