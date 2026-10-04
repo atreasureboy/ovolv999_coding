@@ -1,5 +1,6 @@
 import type { PermissionMode, PermissionRule } from '../../core/permissionSystem.js'
 import type { McpServerConfig } from '../../core/mcpClient.js'
+import { ExecutionPolicyError, normalizeExecutionPolicyInput, normalizeExecutionProfile } from '../../core/executionPolicy.js'
 import type { HookEntry, HooksConfig, OvogoSettings, TaskContext } from './types.js'
 
 const PERMISSION_MODES = new Set(['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions'])
@@ -56,6 +57,20 @@ function normalizePermissionRule(value: unknown): PermissionRule | null {
 
 function normalizeMcpServer(value: unknown): McpServerConfig | null {
   if (!isObject(value)) return null
+  const executionProfile = value.executionProfile === undefined ? undefined : normalizeExecutionProfile(value.executionProfile)
+  const executionPolicy = value.executionPolicy === undefined ? undefined : normalizeExecutionPolicyInput(value.executionPolicy)
+  let limits: McpServerConfig['limits']
+  if (value.limits !== undefined) {
+    if (!isObject(value.limits)) throw new ExecutionPolicyError('Invalid MCP limits: expected an object')
+    limits = {}
+    const keys = ['maxFrameBytes', 'maxRequestBytes', 'maxQueuedBytes', 'maxPending'] as const
+    for (const key of Object.keys(value.limits)) {
+      if (!keys.includes(key as typeof keys[number])) throw new ExecutionPolicyError(`Invalid MCP limits: unknown field ${key}`)
+      const limit = value.limits[key]
+      if (!Number.isSafeInteger(limit) || Number(limit) < 1) throw new ExecutionPolicyError(`Invalid MCP limits.${key}: expected a positive safe integer`)
+      limits[key as typeof keys[number]] = Number(limit)
+    }
+  }
   if (typeof value.name !== 'string' || !value.name.trim()) return null
   if (!Array.isArray(value.command) || value.command.length === 0) return null
   if (!value.command.every((c) => typeof c === 'string')) return null
@@ -66,7 +81,11 @@ function normalizeMcpServer(value: unknown): McpServerConfig | null {
         ) as Record<string, string>)
       : undefined
   const cwd = typeof value.cwd === 'string' ? value.cwd : undefined
-  return { name: value.name, type: 'stdio', command: [...value.command], env, cwd }
+  return { name: value.name, type: 'stdio', command: [...value.command], env, cwd,
+    ...(executionProfile === undefined ? {} : { executionProfile }),
+    ...(executionPolicy === undefined ? {} : { executionPolicy }),
+    ...(limits === undefined ? {} : { limits }),
+  }
 }
 
 function normalizeMcp(value: unknown): { servers: McpServerConfig[] } | undefined {
@@ -87,6 +106,8 @@ export function normalizeSettings(value: unknown): OvogoSettings {
     .filter((rule): rule is PermissionRule => rule !== null)
 
   return {
+    executionPolicy: value.executionPolicy === undefined ? undefined : normalizeExecutionPolicyInput(value.executionPolicy),
+    executionProfile: value.executionProfile === undefined ? undefined : normalizeExecutionProfile(value.executionProfile),
     hooks: normalizeHooks(value.hooks),
     taskContext: normalizeTaskContext(value.taskContext),
     poor: isObject(value.poor) && typeof value.poor.enabled === 'boolean'

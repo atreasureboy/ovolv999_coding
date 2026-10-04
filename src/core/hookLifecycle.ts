@@ -5,7 +5,7 @@ import type { EngineConfig } from './types.js'
 
 export function runHookOperation<T>(run: RunContext, config: EngineConfig, event: string, operation: (signal: AbortSignal) => T | Promise<T>): Promise<T> {
   return runOperation(run, 'hook:' + event, () => withWorkspaceAccess(config.cwd, run.familyId, true, run.controller.signal, async () => {
-    const scope = createProcessScope(config.executionProfile)
+    const scope = createProcessScope(config.executionProfile, config.executionPolicy)
     try {
       return await scope.run(() => Promise.resolve(operation(run.controller.signal)))
     } finally {

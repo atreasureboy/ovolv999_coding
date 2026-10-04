@@ -1,5 +1,7 @@
 import type { PermissionMode, PermissionRule } from '../../core/permissionSystem.js'
 import type { McpServerConfig } from '../../core/mcpClient.js'
+import type { ExecutionProfile } from '../../core/executionBackend.js'
+import type { ExecutionPolicyInput } from '../../core/executionPolicy.js'
 
 export interface HookEntry {
   
@@ -38,6 +40,8 @@ export interface TaskContext {
 }
 
 export interface OvogoSettings {
+  executionPolicy?: ExecutionPolicyInput
+  executionProfile?: ExecutionProfile
   hooks?: HooksConfig
   taskContext?: TaskContext
   permissions?: PermissionsConfig

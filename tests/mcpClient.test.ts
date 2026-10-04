@@ -104,7 +104,7 @@ describe('McpModule — boot wiring', () => {
   it('T7: boot with echo server returns the mcp__echo__echo tool', async () => {
     const mod = new McpModule()
     const ctx: ModuleBootContext = {
-      cwd: '/tmp',
+      cwd: process.cwd(),
       config: {
         mcp: {
           servers: [{ name: 'echo', type: 'stdio', command: [process.execPath, FIXTURE] }],
@@ -119,14 +119,14 @@ describe('McpModule — boot wiring', () => {
 
   it('boot with no servers returns empty result', async () => {
     const mod = new McpModule()
-    const result = await mod.boot({ cwd: '/tmp', config: {} as EngineConfig })
+    const result = await mod.boot({ cwd: process.cwd(), config: {} as EngineConfig })
     expect(result.tools ?? []).toHaveLength(0)
   })
 
   it('boot with a broken server does NOT throw (isolated failure)', async () => {
     const mod = new McpModule()
     const ctx: ModuleBootContext = {
-      cwd: '/tmp',
+      cwd: process.cwd(),
       config: {
         mcp: {
           servers: [{ name: 'broken', type: 'stdio', command: [process.execPath, '/nonexistent/file.mjs'] }],

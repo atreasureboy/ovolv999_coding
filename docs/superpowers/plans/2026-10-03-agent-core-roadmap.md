@@ -217,11 +217,13 @@ type AgentEvent = { schemaVersion: 1; sequence: number; threadId: string; turnId
 
 **Interfaces:** Produces 显式 `supersedes?:string[]`、`state:'active'|'superseded'` 和 `sourceRef?:{sessionId:string,turnId:string,role:'user'|'assistant'}`；`supersedeMemory(oldIds:readonly string[],replacementId:string):void`。Consumes 现有词法检索，默认不自动用相似度判定矛盾。
 
-- [ ] 写失败测试：用户明确更正旧约定后，只注入新 active 约定；旧条目仍可审计；双语改写不自动撤销无关事实；导入旧数据可用。
-- [ ] 运行 `pnpm exec vitest run tests/core/memorySupersession.test.ts` 确认目标失败。
-- [ ] 只增加来源、显式替代和活动过滤，不引入向量数据库/新排序算法。自动抽取的意见不能覆盖用户规则。
-- [ ] 验证重启与并发持久写入保留所有权/版本边界。
-- [ ] 跑记忆相关测试，审查提交。
+- [x] 写失败测试：用户明确更正旧约定后，只注入新 active 约定；旧条目仍可审计；双语改写不自动撤销无关事实；导入旧数据可用。
+- [x] 运行 `pnpm exec vitest run tests/core/memorySupersession.test.ts` 确认目标失败。
+- [x] 只增加来源、显式替代和活动过滤，不引入向量数据库/新排序算法。自动抽取的意见不能覆盖用户规则。
+- [x] 验证重启与并发持久写入保留所有权/版本边界。
+- [x] 跑记忆相关测试，审查提交。
+
+2026-10-04 交付：原始 18 项 RED、两轮独立问题修复、181 项记忆回归和最终 4414 项整仓通过；来源仍是不认证身份的归属声明。详见 `docs/agent-core-progress.md`，临时审查证据保留在被忽略的 `.artifacts/agent-core/reports/`。
 
 ### T12：工作区并发与原生子代理续接（G11、G12）
 

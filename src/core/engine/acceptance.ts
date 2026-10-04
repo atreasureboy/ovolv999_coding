@@ -67,6 +67,7 @@ export async function acceptRunResult({
                 cwd: config.cwd,
                 plan: verificationPlan,
                 executionProfile: config.executionProfile,
+                executionPolicy: config.executionPolicy,
                 signal: turnAbortController.signal,
                 runId: run.runId,
                 artifactVersion: artifact,

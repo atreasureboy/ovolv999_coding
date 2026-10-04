@@ -110,8 +110,9 @@ describe('PermissionDialog rendering', () => {
     )
     const frame = lastFrame() ?? ''
     expect(frame).toContain('[y]')
+    expect(frame).toContain('[s]')
     expect(frame).toContain('[n]')
-    expect(frame).toContain('[a]')
+    expect(frame).not.toContain('[a]')
   })
 })
 

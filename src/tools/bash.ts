@@ -271,6 +271,7 @@ export class BashTool implements Tool {
           description,
           cwd: context.cwd,
           profile: context.executionProfile,
+          policy: context.executionPolicy,
           sessionDir: context.sessionDir,
           metadata: { source: 'Bash.run_in_background' },
           // Forward the caller's abort signal so a parent cancel stops
@@ -330,6 +331,7 @@ export class BashTool implements Tool {
         child = spawnManaged(SHELL, shellArgs, {
           cwd: context.cwd,
           profile: context.executionProfile,
+          policy: context.executionPolicy,
           env: process.env,
           detached: true,
           stdio: 'ignore',
@@ -475,11 +477,13 @@ export class BashTool implements Tool {
           spawnManaged('tmux', ['new-session', '-d', '-s', tmuxSessionName, '-x', '200', '-y', '50'], {
             cwd: context.cwd,
           profile: context.executionProfile,
+          policy: context.executionPolicy,
             detached: true,
           }).on('error', () => {})
           spawnManaged('tmux', ['send-keys', '-t', tmuxSessionName, `tail -n +1 -f "${followLogFile}"`, 'Enter'], {
             cwd: context.cwd,
           profile: context.executionProfile,
+          policy: context.executionPolicy,
           }).on('error', () => {})
           // Try to join the follow pane into the user's current tmux window
           try {
@@ -488,6 +492,7 @@ export class BashTool implements Tool {
               spawnManaged('tmux', ['join-pane', '-t', `${currentTmux}`, `-s`, `${tmuxSessionName}`, '-l', '15'], {
                 cwd: context.cwd,
           profile: context.executionProfile,
+          policy: context.executionPolicy,
               }).on('error', () => {})
               paneJoined = true
             }
@@ -498,7 +503,7 @@ export class BashTool implements Tool {
             : `[Spectator: tmux attach -t ${tmuxSessionName}]`
 
           followCleanup = () => {
-            try { spawnManaged('tmux', ['kill-session', '-t', tmuxSessionName], { detached: true, profile: context.executionProfile }).on('error', () => {}) } catch { /* ignore */ }
+            try { spawnManaged('tmux', ['kill-session', '-t', tmuxSessionName], { detached: true, profile: context.executionProfile, policy: context.executionPolicy }).on('error', () => {}) } catch { /* ignore */ }
           }
         } catch { /* tmux not available, degrade gracefully */ }
       }
@@ -513,6 +518,7 @@ export class BashTool implements Tool {
       const child: ChildProcess = spawnManaged(SHELL, shellArgs, {
         cwd: context.cwd,
           profile: context.executionProfile,
+          policy: context.executionPolicy,
         env: process.env,
         detached: true,
         stdio: ['ignore', 'pipe', 'pipe'],

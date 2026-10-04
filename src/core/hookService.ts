@@ -1,4 +1,5 @@
-import { execManaged, type ExecutionProfile } from './executionBackend.js'
+import { currentExecutionPolicy, execManaged, type ExecutionProfile } from './executionBackend.js'
+import { buildChildEnvironment, resolveManagedExecutionPolicy, type ExecutionPolicy } from './executionPolicy.js'
 import { loadHooksConfig, matchHook, type HookEvent } from './hooks.js'
 import type { HookEntry, HooksConfig } from '../config/settings.js'
 import type { HookDecision, HookResult, IHookRunner, TurnResult } from './types.js'
@@ -8,17 +9,11 @@ const EVENTS = {
   OnError: 'OnError', OnComplete: 'OnComplete', OnContextOverflow: 'OnContextOverflow',
 } as const satisfies Record<keyof HooksConfig, HookEvent>
 
-const ENV_KEYS = ['PATH', 'PATHEXT', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP', 'TMPDIR', 'HOME', 'USERPROFILE', 'LANG', 'LC_ALL']
-
 export interface HookServiceOptions {
   legacyHooks?: () => Partial<Record<HookEvent, readonly HookEntry[]>>
   sink?: { warn(message: string): void }
   executionProfile?: ExecutionProfile
-}
-
-function safeEnvironment(context: Record<string, string>): NodeJS.ProcessEnv {
-  const allowed = new Set(ENV_KEYS.map(key => key.toLowerCase()))
-  return { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => allowed.has(key.toLowerCase()))), ...context }
+  executionPolicy?: ExecutionPolicy
 }
 
 function redactSecrets(text: string): string {
@@ -76,16 +71,17 @@ export class HookService implements IHookRunner {
         OVOGO_TOOL_NAME: toolName ?? '', OVOGO_TOOL_INPUT: effectiveInput ? JSON.stringify(effectiveInput) : '',
         ...extra,
       }
-      const env = safeEnvironment(context)
-      const configured = this.options.executionProfile
-      const profile = configured?.envAllowlist ? { ...configured, envAllowlist: [...configured.envAllowlist, ...Object.keys(context)] } : configured
+      const configured = this.options.executionPolicy ?? currentExecutionPolicy(this.cwd)
+      const basePolicy = resolveManagedExecutionPolicy(this.options.executionProfile, configured, this.cwd)
+      const env = { ...buildChildEnvironment(basePolicy, process.env), ...context }
+      const processPolicy = { ...basePolicy, envAllowlist: [...basePolicy.envAllowlist, ...Object.keys(context)] }
       let result: HookResult
       try {
         const argv = typeof entry.command === 'string'
           ? process.platform === 'win32' ? [process.env.ComSpec ?? 'cmd.exe', '/d', '/s', '/c', '"' + entry.command + '"'] : ['/bin/sh', '-c', entry.command]
           : [...entry.command]
         if (!argv[0] || (entry.kind !== undefined && !['policy', 'notification'].includes(entry.kind))) throw new Error('Invalid hook configuration')
-        const output = await execManaged(argv[0], argv.slice(1), { cwd: this.cwd, env, profile, signal, windowsHide: true,
+        const output = await execManaged(argv[0], argv.slice(1), { cwd: this.cwd, env, policy: processPolicy, signal, windowsHide: true,
           windowsVerbatimArguments: process.platform === 'win32' && typeof entry.command === 'string',
           maxBuffer: 65536, timeoutMs: entry.timeout ?? 10000 })
         const parsed = policy ? decision(output.stdout) : undefined

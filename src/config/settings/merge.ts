@@ -1,4 +1,10 @@
 import type { HooksConfig, OvogoSettings } from './types.js'
+import type { ExecutionPolicyInput } from '../../core/executionPolicy.js'
+
+function mergeExecutionPolicy(base?: ExecutionPolicyInput, override?: ExecutionPolicyInput): ExecutionPolicyInput | undefined {
+  if (!override) return base
+  return { ...base, ...override, ...(base?.limits || override.limits ? { limits: { ...base?.limits, ...override.limits } } : {}) }
+}
 
 const HOOK_NAMES = ['PreToolCall', 'PostToolCall', 'UserPromptSubmit', 'OnError', 'OnComplete', 'OnContextOverflow'] as const satisfies readonly (keyof HooksConfig)[]
 
@@ -10,6 +16,8 @@ function mergeHooks(global?: HooksConfig, project?: HooksConfig): HooksConfig {
 
 export function mergeSettingsLayers(global: OvogoSettings, project: OvogoSettings): OvogoSettings {
   return {
+    executionPolicy: mergeExecutionPolicy(global.executionPolicy, project.executionPolicy),
+    executionProfile: project.executionProfile ?? global.executionProfile,
     hooks: mergeHooks(global.hooks, project.hooks),
     taskContext: project.taskContext
       ? {
@@ -33,6 +41,8 @@ export function applySettingsPatch(current: OvogoSettings, patch: OvogoSettings)
   return {
     ...current,
     ...patch,
+    executionPolicy: mergeExecutionPolicy(current.executionPolicy, patch.executionPolicy),
+    executionProfile: patch.executionProfile ?? current.executionProfile,
     hooks: patch.hooks ?? current.hooks,
     taskContext: patch.taskContext ?? current.taskContext,
     permissions: patch.permissions

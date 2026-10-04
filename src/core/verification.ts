@@ -1,4 +1,5 @@
 import { spawnManaged, type ExecutionProfile } from './executionBackend.js'
+import type { ExecutionPolicy } from './executionPolicy.js'
 import { createHash } from 'crypto'
 import { execFile } from 'child_process'
 import { existsSync, readFileSync, createReadStream } from 'fs'
@@ -156,18 +157,18 @@ export async function captureArtifactVersion(cwd: string, excludedPaths: readonl
   }
 }
 
-export function runVerificationCommand(command: string, cwd: string, signal?: AbortSignal, timeoutMs = 60_000, profile?: ExecutionProfile): Promise<VerificationCommandResult> {
-  return executeCommand(command, cwd, signal, timeoutMs, undefined, profile)
+export function runVerificationCommand(command: string, cwd: string, signal?: AbortSignal, timeoutMs = 60_000, profile?: ExecutionProfile, policy?: ExecutionPolicy): Promise<VerificationCommandResult> {
+  return executeCommand(command, cwd, signal, timeoutMs, undefined, profile, policy)
 }
 
-export function runFileVerificationCommand(executable: string, args: readonly string[], cwd: string, signal?: AbortSignal, timeoutMs = 60_000): Promise<VerificationCommandResult> {
-  return executeCommand([executable, ...args].join(' '), cwd, signal, timeoutMs, { executable, args })
+export function runFileVerificationCommand(executable: string, args: readonly string[], cwd: string, signal?: AbortSignal, timeoutMs = 60_000, policy?: ExecutionPolicy): Promise<VerificationCommandResult> {
+  return executeCommand([executable, ...args].join(' '), cwd, signal, timeoutMs, { executable, args }, undefined, policy)
 }
 
-async function executeCommand(command: string, cwd: string, signal: AbortSignal | undefined, timeoutMs: number, direct?: { executable: string; args: readonly string[] }, profile?: ExecutionProfile): Promise<VerificationCommandResult> {
+async function executeCommand(command: string, cwd: string, signal: AbortSignal | undefined, timeoutMs: number, direct?: { executable: string; args: readonly string[] }, profile?: ExecutionProfile, policy?: ExecutionPolicy): Promise<VerificationCommandResult> {
   if (signal?.aborted) return { command, passed: false, output: 'Cancelled before verification', exitCode: null, cancelled: true }
   return new Promise(resolveResult => {
-    const child = spawnManaged(direct?.executable ?? command, direct?.args ?? [], { cwd, profile, shell: !direct, detached: process.platform !== 'win32', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawnManaged(direct?.executable ?? command, direct?.args ?? [], { cwd, profile, policy, shell: !direct, detached: process.platform !== 'win32', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
     let output = ''
     let cancelled = false
     let timedOut = false
@@ -223,7 +224,7 @@ async function executeCommand(command: string, cwd: string, signal: AbortSignal 
   })
 }
 
-export async function executeVerification(options: { cwd: string; plan?: VerificationPlan; signal?: AbortSignal; runId?: string; artifactVersion?: string; timeoutMs?: number; executionProfile?: ExecutionProfile }): Promise<VerificationEvidence> {
+export async function executeVerification(options: { cwd: string; plan?: VerificationPlan; signal?: AbortSignal; runId?: string; artifactVersion?: string; timeoutMs?: number; executionProfile?: ExecutionProfile; executionPolicy?: ExecutionPolicy }): Promise<VerificationEvidence> {
   const { cwd, signal, runId, timeoutMs } = options
   const plan = options.plan ?? createVerificationPlan(cwd)
   const artifactVersion = options.artifactVersion ?? await captureArtifactVersion(cwd, plan.excludedPaths, { signal })
@@ -235,7 +236,7 @@ export async function executeVerification(options: { cwd: string; plan?: Verific
   if (artifactVersion !== await captureArtifactVersion(cwd, plan.excludedPaths, { signal })) return { ...evidence, status: 'failed', output: 'Artifact changed before verification began.' }
   if (!plan.commands.length) return { ...evidence, status: 'not_applicable', output: 'No executable project verification checks were discovered.' }
   for (const [index, command] of plan.commands.entries()) {
-    const result = await runVerificationCommand(command, cwd, signal, timeoutMs, options.executionProfile)
+    const result = await runVerificationCommand(command, cwd, signal, timeoutMs, options.executionProfile, options.executionPolicy)
     evidence.commands.push({ ...result, ...plan.checks[index] })
     if (result.cancelled || result.timedOut) break
   }

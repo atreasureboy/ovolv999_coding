@@ -10,6 +10,7 @@
  */
 
 import { useSyncExternalStore } from 'react'
+import type { ApprovalScope } from '../../core/approvalBroker.js'
 
 // ── Message model ───────────────────────────────────────────────────────────
 
@@ -53,6 +54,25 @@ export interface UIPermissionRequest {
   toolName: string
   preview: string
   riskLevel: 'safe' | 'needs-approval' | 'dangerous'
+  requestId?: string
+  inputDigest?: string
+  cwd?: string
+  signal?: AbortSignal
+  ruleSuggestion?: string
+}
+
+export interface UIPermissionResult {
+  approved: boolean
+  alwaysAllow: boolean
+  feedback?: string
+  scope?: ApprovalScope
+  rule?: string
+}
+
+interface PendingPermission {
+  request: UIPermissionRequest
+  resolve: (result: UIPermissionResult) => void
+  onAbort: () => void
 }
 
 export interface UISelectItem<T = unknown> {
@@ -124,9 +144,7 @@ export class UIStore {
   private nextId = 1
   // Resolvers for interactive overlays (kept outside state — not serializable)
   private planResolver: ((approved: boolean) => void) | null = null
-  private permissionResolver:
-    | ((result: { approved: boolean; alwaysAllow: boolean; feedback?: string }) => void)
-    | null = null
+  private permissionQueue: PendingPermission[] = []
   private selectResolver: ((value: unknown) => void) | null = null
 
   getState = (): UIState => this.state
@@ -286,20 +304,33 @@ export class UIStore {
 
   showPermissionDialog(
     request: UIPermissionRequest,
-  ): Promise<{ approved: boolean; alwaysAllow: boolean; feedback?: string }> {
-    this.cancelOverlays()
-    return new Promise<{ approved: boolean; alwaysAllow: boolean; feedback?: string }>(
-      (resolve) => {
-        this.permissionResolver = resolve
-        this.publish({ pendingPermission: request })
-      },
-    )
+  ): Promise<UIPermissionResult> {
+    if (request.signal?.aborted) return Promise.resolve({ approved: false, alwaysAllow: false })
+    if (!this.permissionQueue.length) this.cancelOverlays()
+    return new Promise<UIPermissionResult>((resolve) => {
+      const pending: PendingPermission = {
+        request: { ...request }, resolve,
+        onAbort: () => this.settlePermission(pending, { approved: false, alwaysAllow: false }),
+      }
+      this.permissionQueue.push(pending)
+      request.signal?.addEventListener('abort', pending.onAbort, { once: true })
+      if (this.permissionQueue.length === 1) this.publish({ pendingPermission: pending.request })
+    })
   }
 
-  resolvePermission(approved: boolean, alwaysAllow: boolean, feedback?: string): void {
-    this.permissionResolver?.({ approved, alwaysAllow, feedback })
-    this.permissionResolver = null
-    this.publish({ pendingPermission: null })
+  resolvePermission(approved: boolean, alwaysAllow: boolean, feedback?: string, scope?: ApprovalScope, rule?: string, displayedRequest?: UIPermissionRequest): void {
+    const pending = this.permissionQueue[0]
+    if (!pending || (displayedRequest && pending.request !== displayedRequest)) return
+    this.settlePermission(pending, { approved, alwaysAllow, feedback, ...(scope ? { scope } : {}), ...(rule ? { rule } : {}) })
+  }
+
+  private settlePermission(pending: PendingPermission, result: UIPermissionResult): void {
+    const index = this.permissionQueue.indexOf(pending)
+    if (index < 0) return
+    pending.request.signal?.removeEventListener('abort', pending.onAbort)
+    this.permissionQueue.splice(index, 1)
+    pending.resolve(result)
+    if (index === 0) this.publish({ pendingPermission: this.permissionQueue[0]?.request ?? null })
   }
 
   showSelectPicker<T>(title: string, items: UISelectItem<T>[]): Promise<T | null> {
@@ -318,10 +349,13 @@ export class UIStore {
 
   cancelOverlays(): void {
     this.planResolver?.(false)
-    this.permissionResolver?.({ approved: false, alwaysAllow: false })
+    for (const pending of this.permissionQueue) {
+      pending.request.signal?.removeEventListener('abort', pending.onAbort)
+      pending.resolve({ approved: false, alwaysAllow: false })
+    }
+    this.permissionQueue = []
     this.selectResolver?.(null)
     this.planResolver = null
-    this.permissionResolver = null
     this.selectResolver = null
     if (this.hasOverlay()) {
       this.publish({ pendingPlan: null, pendingPermission: null, selectOverlay: null })

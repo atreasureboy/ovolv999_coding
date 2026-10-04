@@ -93,10 +93,10 @@ describe('settings layers', () => {
     expect(saved.permissions).toEqual({ mode: 'plan', rules: [{ toolName: 'Read', ruleContent: '**', behavior: 'allow', source: 'project' }] })
   })
 
-  it('ignores malformed JSON and filters invalid MCP entries', () => {
+  it('filters invalid MCP entries and refuses malformed saved JSON', () => {
     writeSettings(cwd, { mcp: { servers: [null, { name: '', command: ['x'] }, { name: 'broken', command: [1] }, { name: 'ok', command: ['run'], type: 'http' }] } })
     expect(loadProjectSettings(cwd).mcp?.servers).toEqual([{ name: 'ok', type: 'stdio', command: ['run'], env: undefined, cwd: undefined }])
     writeFileSync(getProjectSettingsPath(cwd), '{broken')
-    expect(loadProjectSettings(cwd)).toEqual({})
+    expect(() => loadProjectSettings(cwd)).toThrow(getProjectSettingsPath(cwd))
   })
 })

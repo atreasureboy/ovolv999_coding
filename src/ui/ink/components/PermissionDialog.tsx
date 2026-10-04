@@ -1,33 +1,34 @@
-/**
- * PermissionDialog — y/n confirmation for tool execution approval.
- *
- * Shows the tool name, a preview of what it wants to do, and waits for
- * y/n/a/Escape. Pressing 'n' then Tab enters feedback mode, where the
- * user can type natural-language guidance for the model (e.g. "use a
- * different approach"). The feedback is passed back to the engine as
- * part of the rejection message.
- */
-
 import { Text, Box, useInput } from 'ink'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
+import type { ApprovalScope } from '../../../core/approvalBroker.js'
+import type { UIPermissionRequest } from '../store.js'
+import { formatApprovalDisplay } from '../../approvalDisplay.js'
 
-export interface PermissionRequest {
-  toolName: string
-  preview: string
-  riskLevel: 'safe' | 'needs-approval' | 'dangerous'
-}
+export type PermissionRequest = UIPermissionRequest
 
 export function PermissionDialog({
   request,
   onResolve,
 }: {
   request: PermissionRequest
-  onResolve: (approved: boolean, alwaysAllow: boolean, feedback?: string) => void
+  onResolve: (approved: boolean, alwaysAllow: boolean, feedback?: string, scope?: ApprovalScope, rule?: string) => void
 }): React.ReactElement {
   const [feedbackMode, setFeedbackMode] = useState(false)
   const [feedback, setFeedback] = useState('')
+  const [ruleMode, setRuleMode] = useState(false)
+
+  useEffect(() => {
+    setFeedbackMode(false)
+    setFeedback('')
+    setRuleMode(false)
+  }, [request])
 
   useInput((input, key) => {
+    if (ruleMode) {
+      if (input.toLowerCase() === 'y' && request.ruleSuggestion) onResolve(true, false, undefined, 'rule', request.ruleSuggestion)
+      else if (input.toLowerCase() === 'n' || key.escape) setRuleMode(false)
+      return
+    }
     if (feedbackMode) {
       if (key.return) {
         onResolve(false, false, feedback.trim() || undefined)
@@ -53,8 +54,10 @@ export function PermissionDialog({
       onResolve(false, false)
     } else if (key.escape) {
       onResolve(false, false)
-    } else if (input === 'a' || input === 'A') {
-      onResolve(true, true)
+    } else if (input === 's' || input === 'S') {
+      onResolve(true, false, undefined, 'session')
+    } else if ((input === 'r' || input === 'R') && request.ruleSuggestion) {
+      setRuleMode(true)
     } else if (input === 't' || input === 'T' || key.tab) {
       setFeedbackMode(true)
     }
@@ -73,6 +76,16 @@ export function PermissionDialog({
       : request.riskLevel === 'needs-approval'
         ? 'needs approval'
         : 'safe'
+
+  if (ruleMode) {
+    return (
+      <Box flexDirection="column" borderStyle="round" borderColor="yellowBright" paddingX={1} marginY={1}>
+        <Text bold color="yellowBright">Persist this exact approval rule</Text>
+        <Text>{formatApprovalDisplay(request.ruleSuggestion ?? '')}</Text>
+        <Text dimColor>[y] confirm this rule · [n] back · [ESC] back</Text>
+      </Box>
+    )
+  }
 
   if (feedbackMode) {
     return (
@@ -100,15 +113,18 @@ export function PermissionDialog({
         <Text dimColor> [{riskLabel}]</Text>
       </Box>
       <Box marginTop={1}>
-        <Text bold color="cyan">{request.toolName}</Text>
+        <Text bold color="cyan">{formatApprovalDisplay(request.toolName)}</Text>
       </Box>
       <Box marginLeft={2}>
-        <Text dimColor>{request.preview.slice(0, 100)}</Text>
+        <Text dimColor wrap="wrap">{formatApprovalDisplay(request.preview)}</Text>
       </Box>
+      {request.cwd && <Text dimColor>Directory: {formatApprovalDisplay(request.cwd)}</Text>}
+      <Text dimColor>Session approval applies only to this complete operation in this directory under the current settings.</Text>
       <Box marginTop={1}>
         <Text dimColor>
           {' '}
-          [y] approve · [n] deny · [a] always · [t] deny with feedback · [ESC] deny
+          [y] once · [s] this operation for session · [n] deny · [t] deny with feedback · [ESC] deny
+          {request.ruleSuggestion ? ' · [r] review persistent rule' : ''}
         </Text>
       </Box>
     </Box>

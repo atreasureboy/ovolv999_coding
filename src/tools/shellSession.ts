@@ -97,6 +97,7 @@ export class ShellSessionTool implements Tool {
       if (input.action !== 'kill') context.signal?.throwIfAborted()
       assertExecutionProfile(context.executionProfile)
       if (context.executionProfile?.envAllowlist) throw new Error('Remote shell environment cannot be verified against an allowlist; execution refused')
+      if (context.executionPolicy && !['list', 'kill'].includes(String(input.action))) throw new Error('Remote shell environment cannot enforce this execution policy; execution refused')
     } catch (error) {
       return { content: `ShellSession error: ${(error as Error).message}`, isError: true }
     }

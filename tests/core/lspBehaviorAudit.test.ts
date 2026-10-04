@@ -4,6 +4,8 @@ import { PassThrough, Writable } from 'node:stream'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { detectServer, fileUriToPath, getDefaultLspClient, LspClient, pathToFileUri, shutdownDefaultLspClient } from '../../src/core/lspClient.js'
 import { resolve } from 'node:path'
+import { createProcessScope } from '../../src/core/executionBackend.js'
+import { resolveExecutionPolicy } from '../../src/core/executionPolicy.js'
 
 const transport = vi.hoisted(() => ({ spawn: vi.fn(), execFileSync: vi.fn(() => { throw new Error('Not installed') }) }))
 vi.mock('child_process', async importOriginal => ({ ...(await importOriginal<typeof ChildProcessModule>()), ...transport }))
@@ -62,6 +64,14 @@ describe('LSP lifecycle boundaries', () => {
     const value = client()
     expect(await Promise.all([value.start(), value.start()])).toEqual([true, true])
     expect(transport.spawn).toHaveBeenCalledTimes(1)
+  })
+
+  it('refuses server launch beneath an unsupported execution policy scope', async () => {
+    server()
+    const value = client()
+    const result = await createProcessScope(undefined, resolveExecutionPolicy({ mode: 'isolated-worker' }, process.cwd())).run(() => value.start())
+    expect(result).toBe(false)
+    expect(transport.spawn).not.toHaveBeenCalled()
   })
 
   it('settles pending requests promptly when the server exits', async () => {

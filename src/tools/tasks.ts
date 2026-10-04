@@ -102,6 +102,7 @@ The task runs detached. Use TaskGet with block=true to wait for completion.`,
         metadata: input.metadata as Record<string, unknown> | undefined,
         signal: ctx.signal,
         profile: ctx.executionProfile,
+        policy: ctx.executionPolicy,
       })
     } catch (error) {
       return Promise.resolve({ content: `Task creation failed: ${(error as Error).message}`, isError: true })

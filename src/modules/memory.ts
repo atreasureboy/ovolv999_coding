@@ -10,7 +10,7 @@
 
 import type { Tool, ToolDefinition, ToolResult } from '../core/types.js'
 import type { AgentModule, ModuleBootContext, ModuleBootResult } from '../core/module.js'
-import type { SemanticMemory } from '../core/semanticMemory.js'
+import { isMemorySourceRef, isMemorySupersedes, type SemanticMemory } from '../core/semanticMemory.js'
 import type { EpisodicMemory } from '../core/episodicMemory.js'
 import { str } from '../core/strings.js'
 
@@ -33,7 +33,7 @@ Use this when you learn something reusable:
 - **agent_inferred**: You deduced something from observations
 - **tool_observed**: A tool returned factual data worth remembering
 
-Higher-priority sources override lower ones on conflict.`,
+Use memory_search to find entry IDs. When the user explicitly corrects saved knowledge, provide those IDs in supersedes. Similar wording alone does not replace earlier entries. Lower-priority sources cannot replace user rules. Source references and attribution remain unverified claims.`,
         parameters: {
           type: 'object',
           properties: {
@@ -54,6 +54,21 @@ Higher-priority sources override lower ones on conflict.`,
               type: 'string',
               enum: ['user_stated', 'agent_inferred', 'tool_observed'],
               description: 'Knowledge source (default: agent_inferred)',
+            },
+            supersedes: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Active memory IDs explicitly replaced by this correction; omitted for ordinary additions',
+            },
+            sourceRef: {
+              type: 'object',
+              properties: {
+                sessionId: { type: 'string' },
+                turnId: { type: 'string' },
+                role: { type: 'string', enum: ['user', 'assistant'] },
+              },
+              required: ['sessionId', 'turnId', 'role'],
+              description: 'Claimed origin of the knowledge; does not establish verified provenance',
             },
           },
           required: ['content'],
@@ -77,6 +92,10 @@ Higher-priority sources override lower ones on conflict.`,
         ? Math.min(Math.max(input.confidence, 0), 1)
         : 0.7
       const source = str(input.source, 'agent_inferred') as 'user_stated' | 'agent_inferred' | 'tool_observed'
+      if ((input.supersedes !== undefined && !isMemorySupersedes(input.supersedes))
+        || (input.sourceRef !== undefined && !isMemorySourceRef(input.sourceRef))) {
+        return { content: 'Invalid memory correction metadata; write was not committed', isError: true }
+      }
 
       const entry = await semantic.writeAsync({
         content: content.slice(0, 500),
@@ -84,10 +103,16 @@ Higher-priority sources override lower ones on conflict.`,
         source,
         confidence,
         timestamp: new Date().toISOString(),
+        supersedes: input.supersedes,
+        sourceRef: input.sourceRef,
       })
 
       if (entry.persistence !== 'persisted') {
         return Promise.resolve({ content: `Memory persistence failed: ${entry.persistenceError ?? 'write was not committed'}`, isError: true })
+      }
+
+      if (entry.state === 'superseded') {
+        return { content: `Memory ${entry.id} was previously superseded. An explicit correction is required to replace the current rule.`, isError: false }
       }
 
       return Promise.resolve({
@@ -152,7 +177,7 @@ Use this to recall past learnings, user preferences, or project conventions that
 
       const lines = results.map((e, i) => {
         const tagStr = e.tags.length > 0 ? ` [${e.tags.join(', ')}]` : ''
-        return `${i + 1}. (claimed ${e.source}; ${e.provenance?.status ?? 'unverified'}) ${e.content}${tagStr} (conf: ${e.confidence})`
+        return `${i + 1}. (id: ${e.id}; claimed ${e.source}; ${e.provenance?.status ?? 'unverified'}) ${e.content}${tagStr} (conf: ${e.confidence})`
       })
 
       return Promise.resolve({
@@ -281,7 +306,7 @@ export class MemoryModule implements AgentModule {
   boot(ctx: ModuleBootContext): ModuleBootResult {
     // Relevance-based memory retrieval (AgentOS pattern)
     // Score entries by keyword overlap with user message, inject top-K
-    const allEntries = this.semantic.readAll()
+    const allEntries = this.semantic.readAll().filter(entry => entry.state === 'active')
     let section = ''
 
     if (allEntries.length > 0 && ctx.userMessage) {

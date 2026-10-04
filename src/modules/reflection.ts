@@ -12,7 +12,7 @@
 import type OpenAI from 'openai'
 import type { OpenAIMessage } from '../core/types.js'
 import type { AgentModule, ModuleBootResult, ModuleRunContext } from '../core/module.js'
-import type { SemanticMemory } from '../core/semanticMemory.js'
+import type { MemorySourceRef, SemanticMemory } from '../core/semanticMemory.js'
 import type { EpisodicMemory } from '../core/episodicMemory.js'
 
 const REFLECTION_SYSTEM_PROMPT = `You are a reflection engine. Analyze the agent run with its recorded outcome and verification status and extract reusable knowledge.
@@ -50,6 +50,7 @@ interface ReflectionAttribution {
   source: 'agent_inferred' | 'consolidation'
   outcome: string
   verification: string
+  sourceRef?: MemorySourceRef
 }
 
 async function requestReflection(client: OpenAI, model: string, prompt: string, signal?: AbortSignal): Promise<ReflectionKnowledge[]> {
@@ -73,6 +74,7 @@ async function persistReflection(semantic: SemanticMemory, entries: ReflectionKn
       source: attribution.source,
       confidence: entry.confidence,
       timestamp: new Date().toISOString(),
+      sourceRef: attribution.sourceRef,
     })
     if (result.persistence === 'persisted') persisted++
   }
@@ -114,7 +116,9 @@ export class ReflectionModule implements AgentModule {
       const parsed = await requestReflection(this.client, ctx.model ?? this.model,
         `Analyze this agent run (outcome: ${outcome}; verification: ${verification}):\n\n${conversationSummary}`, ctx.abortSignal)
       const persisted = await persistReflection(this.semantic, parsed,
-        { scope: 'run', source: 'agent_inferred', outcome, verification }, ctx.abortSignal)
+        { scope: 'run', source: 'agent_inferred', outcome, verification,
+          sourceRef: ctx.sessionDir && ctx.turnResult.runId
+            ? { sessionId: ctx.sessionDir, turnId: ctx.turnResult.runId, role: 'assistant' } : undefined }, ctx.abortSignal)
 
       if (parsed.length > 0) {
         ctx.eventLog?.append('memory_write', 'reflection', {

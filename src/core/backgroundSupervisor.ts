@@ -1,5 +1,6 @@
 import { appendFileSync, existsSync, renameSync, statSync, unlinkSync, writeFileSync } from 'fs'
 import { spawnManaged } from './executionBackend.js'
+import type { ExecutionPolicy } from './executionPolicy.js'
 import { captureProcessIdentity, inspectProcessIdentity } from './processIdentity.js'
 import { captureOwnedProcessTree, stopOwnedProcessTree, type OwnedProcessTree } from './processTree.js'
 import { getExitPath, getLogPath, loadMetadata, updateMetadataAsync, type SessionStatus } from './backgroundSession.js'
@@ -10,6 +11,8 @@ interface LaunchRequest {
   args: string[]
   cwd: string
   timeoutMs: number
+  env: NodeJS.ProcessEnv
+  executionPolicy: ExecutionPolicy
 }
 
 function notify(message: object): void {
@@ -25,7 +28,8 @@ async function supervise(request: LaunchRequest): Promise<void> {
     detached: process.platform !== 'win32',
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-    env: { ...process.env, OVOGV999_SESSION_ID: request.id, OVOGV999_SUPERVISED: '1' },
+    env: { ...request.env, OVOGV999_SESSION_ID: request.id, OVOGV999_SUPERVISED: '1' },
+    policy: request.executionPolicy,
   })
   let exited = false
   let closed = false

@@ -43,7 +43,7 @@ it('rejects primitive configuration roots and filters invalid startup values', (
   const root = directory()
   const path = join(root, '.ovolv999.json')
   writeFileSync(path, '"invalid"')
-  expect(loadProjectConfig(root)).toBeNull()
+  expect(() => loadProjectConfig(root)).toThrowError(`Invalid project settings at ${path}: Project configuration must be a JSON object`)
   writeFileSync(path, JSON.stringify({ model: 42, permissionMode: 'fictional', maxIterations: -1, maxContextTokens: '2000', enabledModules: [1, 'memory'], poor: true, temperature: 1, systemPrompt: 'retain' }))
   expect(loadProjectConfig(root)).toEqual({ enabledModules: ['memory'], temperature: 1, systemPrompt: 'retain' })
 })

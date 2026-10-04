@@ -183,6 +183,8 @@ Session 整合 (REPL 退出):
   下次 Boot → 相关性检索 → 自动注入
 ```
 
+更正已有约定时，先通过 `memory_search` 获取旧记录 ID，再在 `memory_write` 中明确提供 `supersedes`。替代写入会同时保存新 active 记录和旧 superseded 历史；启动注入与检索只使用 active。相似内容不会自动撤销旧记录。`sourceRef` 保留会话、轮次和角色归属声明，但不认证用户身份。
+
 ### Verification Gate — 验证闸门 (No Tuple, No Merge)
 
 ```typescript
@@ -435,9 +437,18 @@ CLI 参数优先；项目模型与运行参数来自工作目录向 Git 根查�
   },
   "mcp": {
     "servers": [{ "name": "my-server", "type": "stdio", "command": ["my-mcp-server"] }]
+  },
+  "executionPolicy": {
+    "mode": "trusted-local",
+    "envAllowlist": ["CI"],
+    "limits": { "processes": 8 }
   }
 }
 ```
+
+执行策略按用户设置、项目设置和项目运行配置合并；省略字段继承，显式数组替换。managed 命令、MCP、异步 Hooks 和验收命令默认只获得平台必需环境；项目需要额外变量时通过 `envAllowlist` 明确提供，MCP 的显式 `env` 只授予对应服务。仍有同步辅助入口未迁移，进程容量也只统计 managed 根进程。`trusted-local` 没有内核文件或网络隔离；隔离模式、非空文件根限制、网络限制和内存/CPU 配额目前会在启动前拒绝。已有配置文件无法读取或不是有效对象时，启动报告文件路径并停止。
+
+交互 REPL 的批准可选一次或本次会话中的相同完整操作，绑定工具、参数、目录和有效策略；设置变化后需要重新审批。单次任务、loop 和无界面入口没有审批 host，需要批准时返回 `needs_input`。当前没有新规则持久化、远程审批或审批重连功能。
 
 ## 项目结构
 

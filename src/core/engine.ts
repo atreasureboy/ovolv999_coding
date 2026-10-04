@@ -1,9 +1,13 @@
 import { assertExecutionProfile, createProcessScope } from './executionBackend.js'
+import { assertSupportedExecutionPolicy, resolveManagedExecutionPolicy } from './executionPolicy.js'
+import { approvalInputDigest } from './approvalBroker.js'
+import { requestOperationApproval } from './engine/approval.js'
 import { settleHistory, trimHistory } from './messageGroups.js'
 import { createModelGateway } from './modelGateway.js'
 import { getEffortPrompt, isEffortLevel, type EffortLevel } from './effort.js'
 import { runHookOperation } from './hookLifecycle.js'
 import { randomUUID } from 'crypto'
+import { resolve } from 'node:path'
 import OpenAI from 'openai'
 import { getPlanModePrefix } from '../prompts/system.js'
 import { createTools, findTool, getToolDefinitions } from '../tools/index.js'
@@ -111,12 +115,16 @@ export class ExecutionEngine {
     return clampMaxOutputTokens(this.config.maxOutputTokens, this.getModelContextWindow())
   }
   constructor(config: EngineConfig, renderer: EngineObserver, client?: OpenAI) {
+    config = { ...config, cwd: resolve(config.cwd) }
     assertExecutionProfile(config.executionProfile)
+    const executionPolicy = resolveManagedExecutionPolicy(config.executionProfile, config.executionPolicy, config.cwd)
+    assertSupportedExecutionPolicy(executionPolicy)
     if (config.effort !== undefined && !isEffortLevel(config.effort)) {
       throw new Error('Invalid reasoning effort level')
     }
     this.config = applyAgentToConfig({
       ...config,
+      executionPolicy,
       effort: config.effort ?? 'medium',
       extraTools: config.extraTools ? [...config.extraTools] : undefined,
       enabledModules: config.enabledModules ? [...config.enabledModules] : undefined,
@@ -449,12 +457,13 @@ export class ExecutionEngine {
     ) {
       return { content: `Tool "${toolName}" is not available to this agent.`, isError: true }
     }
+    const commandRisk = toolName === 'Bash' && typeof input.command === 'string'
+      ? classifyCommandRisk(input.command) : undefined
     const isDangerous =
       (toolName === 'ExitWorktree' && input.action === 'discard') ||
-      (toolName === 'Bash' && typeof input.command === 'string'
-        ? classifyCommandRisk(input.command) === 'dangerous'
-        : false)
-    const managerPermission = this.permissionManager.check(toolName, input, isDangerous)
+      commandRisk === 'dangerous'
+    const cautiousUnknown = commandRisk === 'needs_approval' && ['default', 'acceptEdits'].includes(this.permissionManager.getMode())
+    const managerPermission = this.permissionManager.check(toolName, input, isDangerous || cautiousUnknown)
     const permission =
       managerPermission === 'deny'
         ? 'deny'
@@ -474,9 +483,9 @@ export class ExecutionEngine {
     }
     let permissionApproved = permission === 'allow'
     if (permission === 'ask') {
-      if (this.config.requestPermission) {
+      if (this.config.approvalBroker || this.config.requestPermission) {
         const riskLevel = isDangerous ? 'dangerous' : 'needs-approval'
-        const permResult = await this.config.requestPermission(toolName, input, riskLevel)
+        const permResult = await this.requestToolPermission(toolName, input, riskLevel, context)
         context.signal?.throwIfAborted()
         permissionApproved = permResult.approved
         if (!permResult.approved) {
@@ -486,6 +495,7 @@ export class ExecutionEngine {
               ? `Permission denied by user for ${toolName}. Feedback: ${feedback}`
               : `Permission denied by user for ${toolName}.`,
             isError: true,
+            ...(permResult.status ? { status: permResult.status } : {}),
           }
         }
       } else {
@@ -499,9 +509,11 @@ export class ExecutionEngine {
     context.signal?.throwIfAborted()
     const run = this.activeRun
     const operationId = run?.store?.intent(toolName, tool.metadata?.readOnly === true)
-    const processScope = createProcessScope(this.config.executionProfile)
+    const processScope = createProcessScope(this.config.executionProfile, this.config.executionPolicy)
     const result = await processScope.run(() =>
-      tool.execute(input, { ...context, permissionApproved }),
+      tool.execute(input, { ...context, permissionApproved,
+        ...(permissionApproved ? { permissionApproval: { tool: toolName, inputDigest: approvalInputDigest(input), cwd: context.cwd } } : {}),
+      }),
     )
     if (operationId && run?.store) {
       if (processScope.pending.size) {
@@ -528,6 +540,14 @@ export class ExecutionEngine {
       await module.onToolCall?.(toolName, input, result, turnNumber)
     }
     return result
+  }
+  private async requestToolPermission(
+    tool: string,
+    input: Record<string, unknown>,
+    riskLevel: 'safe' | 'needs-approval' | 'dangerous',
+    context: Pick<ToolContext, 'cwd' | 'runId' | 'signal'>,
+  ): Promise<{ approved: boolean; feedback?: string; status?: ToolResult['status'] }> {
+    return requestOperationApproval({ config: this.config, permissions: this.permissionManager, getRun: () => this.activeRun }, tool, input, riskLevel, context)
   }
   private async scheduleToolCalls(
     parsedCalls: ParsedToolCall[],
@@ -654,9 +674,12 @@ export class ExecutionEngine {
     return {
       cwd: this.config.cwd,
       executionProfile: this.config.executionProfile,
+      executionPolicy: this.config.executionPolicy,
       permissionMode: this.config.permissionMode,
       permissionManager: this.permissionManager,
-      requestPermission: this.config.requestPermission,
+      requestPermission: this.config.approvalBroker || this.config.requestPermission
+        ? (tool, input, riskLevel) => this.requestToolPermission(tool, input, riskLevel, { cwd: this.config.cwd, runId: this.activeRun?.runId, signal: turnAbortSignal })
+        : undefined,
       runId: this.activeRun?.runId,
       parentRunId: this.activeRun?.parentRunId,
       workspaceBound: (this.config.initialAgentDepth ?? 0) > 0,

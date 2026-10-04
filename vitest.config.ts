@@ -7,6 +7,7 @@ export default defineConfig({
     exclude: [
       '**/node_modules/**',
       '**/dist/**',
+      '**/.artifacts/**',
       '**/.claude/worktrees/**',
       '**/claude-code/**',
       '**/loop-kit/**',

@@ -10,6 +10,8 @@ import { relative } from 'path'
 import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/types.js'
 import { GREP_DESCRIPTION } from '../prompts/tools.js'
 import { resolveWorkspacePath } from '../core/workspacePath.js'
+import { currentExecutionPolicy } from '../core/executionBackend.js'
+import { assertSupportedExecutionPolicy, buildChildEnvironment } from '../core/executionPolicy.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -89,8 +91,13 @@ export class GrepTool implements Tool {
     }
 
     let searchDir: string
+    let childEnvironment: NodeJS.ProcessEnv
     try {
       context.signal?.throwIfAborted()
+      const inheritedPolicy = currentExecutionPolicy(context.cwd)
+      const policy = context.executionPolicy ?? inheritedPolicy
+      assertSupportedExecutionPolicy(policy)
+      childEnvironment = buildChildEnvironment(policy, process.env)
       searchDir = resolveWorkspacePath(context, searchPath ?? '.')
     } catch (error) {
       return { content: `Grep error: ${(error as Error).message}`, isError: true }
@@ -148,6 +155,7 @@ export class GrepTool implements Tool {
           maxBuffer: 10 * 1024 * 1024,
           timeout: 30_000,
           signal: context.signal,
+          env: childEnvironment,
         })
         stdout = result.stdout
       } catch (err: unknown) {
@@ -166,6 +174,7 @@ export class GrepTool implements Tool {
         try {
           const fallback = await execFileAsync('grep', grepFlags, {
             cwd: context.cwd,
+            env: childEnvironment,
             maxBuffer: 10 * 1024 * 1024,
             timeout: 30_000,
             signal: context.signal,

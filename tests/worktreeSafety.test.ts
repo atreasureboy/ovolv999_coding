@@ -291,6 +291,21 @@ describe('worktree data preservation', () => {
     expect(existsSync(info.path)).toBe(false)
   })
 
+  it('retains an implicitly selected worktree until approval names the resolved target', async () => {
+    const info = getWorktreeManager(cwd).createWorktree('resolved-approval')
+    const result = await new ExitWorktreeTool().execute({ action: 'discard' }, {
+      cwd, permissionMode: 'ask', permissionApproved: true,
+      permissionApproval: { tool: 'ExitWorktree', cwd, inputDigest: 'approval-without-resolved-target' },
+      requestPermission: (tool, input) => {
+        expect(tool).toBe('ExitWorktree')
+        expect(input).toMatchObject({ name: info.name, action: 'discard' })
+        return Promise.resolve({ approved: false, status: 'needs_input' })
+      },
+    })
+    expect(result.status).toBe('needs_input')
+    expect(existsSync(info.path)).toBe(true)
+  })
+
   it('includes uncommitted artifacts in the discard result', async () => {
     const info = getWorktreeManager(cwd).createWorktree('discard-summary')
     writeFileSync(join(info.path, 'new.txt'), 'discarded artifact')

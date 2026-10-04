@@ -89,7 +89,7 @@ export class TerminalCaptureTool implements Tool {
 
   private async captureTmux(target: string, lines: number | undefined, ctx: ToolContext): Promise<ToolResult> {
     const args = ['capture-pane', ...(target ? ['-t', target] : []), '-S', lines === undefined ? '-' : `-${lines}`, '-E', '-', '-p']
-    const { stdout: output } = await execManaged('tmux', args, { cwd: ctx.cwd, profile: ctx.executionProfile, signal: ctx.signal, timeoutMs: 5000 })
+    const { stdout: output } = await execManaged('tmux', args, { cwd: ctx.cwd, profile: ctx.executionProfile, policy: ctx.executionPolicy, signal: ctx.signal, timeoutMs: 5000 })
 
     const cleaned = stripAnsi(output).trimEnd()
     if (cleaned.length === 0) {

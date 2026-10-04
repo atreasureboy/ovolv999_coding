@@ -32,6 +32,7 @@ import type { OutcomeStatus, VerificationEvidence } from './outcome.js'
 import { withPersistenceLock, withPersistenceLockAsync } from './persistenceLock.js'
 import { inspectProcessIdentity, type ProcessIdentity } from './processIdentity.js'
 import { spawnManaged } from './executionBackend.js'
+import { buildChildEnvironment, mergeChildEnvironment, resolveExecutionPolicy, type ExecutionPolicy } from './executionPolicy.js'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -71,6 +72,7 @@ export interface StartSessionOptions {
   env?: NodeJS.ProcessEnv
   readyTimeoutMs?: number
   executable?: string
+  executionPolicy?: ExecutionPolicy
 }
 
 export interface StartSessionResult {
@@ -284,6 +286,9 @@ export async function startBackgroundSession(options: StartSessionOptions): Prom
   const id = generateSessionId()
   const logPath = getLogPath(id)
   const cwd = options.cwd ?? process.cwd()
+  const executionPolicy = options.executionPolicy ?? resolveExecutionPolicy(undefined, cwd)
+  const workerEnvironment = mergeChildEnvironment(buildChildEnvironment(executionPolicy, process.env), options.env ?? {})
+  const workerPolicy = { ...executionPolicy, envAllowlist: [...executionPolicy.envAllowlist, ...Object.keys(options.env ?? {}), 'OVOGV999_SESSION_ID', 'OVOGV999_SUPERVISED'] }
   const spawnArgs = [options.task, '--cwd', cwd]
   if (options.model) spawnArgs.push('--model', options.model)
   if (options.extraArgs) spawnArgs.push(...options.extraArgs)
@@ -298,7 +303,8 @@ export async function startBackgroundSession(options: StartSessionOptions): Prom
       detached: true,
       windowsHide: true,
       stdio: ['ignore', diagnosticFd, diagnosticFd, 'ipc'],
-      env: { ...process.env, ...options.env },
+      env: buildChildEnvironment(executionPolicy, process.env),
+      policy: executionPolicy,
     })
   } finally { closeSync(diagnosticFd) }
   const timeoutMs = options.readyTimeoutMs ?? 30_000
@@ -329,7 +335,7 @@ export async function startBackgroundSession(options: StartSessionOptions): Prom
       if (response.type === 'ready') finish(undefined, response.pid)
       if (response.type === 'error') finish(new Error(response.error ?? 'Background start failed'))
     })
-    supervisor.send({ id, executable: options.executable ?? process.execPath, args: [resolveOvogogogoBin(), ...spawnArgs], cwd, timeoutMs }, error => { if (error) finish(error) })
+    supervisor.send({ id, executable: options.executable ?? process.execPath, args: [resolveOvogogogoBin(), ...spawnArgs], cwd, timeoutMs, env: workerEnvironment, executionPolicy: workerPolicy }, error => { if (error) finish(error) })
   })
 }
 

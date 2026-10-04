@@ -1,6 +1,8 @@
 import type { ModelGatewayPolicy } from './providerAdmission.js'
 import type { EffortLevel } from './effort.js'
 import type { ExecutionProfile } from './executionBackend.js'
+import type { ExecutionPolicy } from './executionPolicy.js'
+import type { ApprovalBroker } from './approvalBroker.js'
 // Core types for ovolv999 execution engine
 
 import type { EventLog } from './eventLog.js'
@@ -135,6 +137,7 @@ export interface Tool {
 export interface ToolContext {
   mcpRegistry?: ReadonlyMap<string, McpRegistryEntry>
   executionProfile?: ExecutionProfile
+  executionPolicy?: ExecutionPolicy
   verificationExcludedPaths?: readonly string[]
   workspaceBound?: boolean
   cwd: string
@@ -144,6 +147,7 @@ export interface ToolContext {
   runFamilyId?: string
   fileState?: FileReadState
   permissionApproved?: boolean
+  permissionApproval?: { tool: string; inputDigest: string; cwd: string }
   requestPermission?: EngineConfig['requestPermission']
   permissionMode: 'auto' | 'ask' | 'deny'
   /** Unified permission manager used by the engine before tool execution. */
@@ -275,6 +279,8 @@ export interface EngineConfig {
   effort?: EffortLevel
   modelGateway?: Partial<ModelGatewayPolicy>
   executionProfile?: ExecutionProfile
+  executionPolicy?: ExecutionPolicy
+  approvalBroker?: ApprovalBroker
   verificationExcludedPaths?: readonly string[]
   model: string
   baseURL?: string
@@ -374,7 +380,7 @@ export interface EngineConfig {
     toolName: string,
     input: Record<string, unknown>,
     riskLevel: 'safe' | 'needs-approval' | 'dangerous',
-  ) => Promise<{ approved: boolean; feedback?: string }>
+  ) => Promise<{ approved: boolean; feedback?: string; status?: OutcomeStatus }>
   /**
    * Factory for spawning a child engine from AgentTool. Optional: an
    * ExecutionEngine can be built without one (e.g. for tests / REPLs that

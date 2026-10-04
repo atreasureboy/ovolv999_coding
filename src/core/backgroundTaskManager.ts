@@ -24,6 +24,7 @@ import { randomUUID } from 'crypto'
 import { writeFileSync, mkdirSync, appendFileSync, renameSync } from 'fs'
 import { join } from 'path'
 import { registerPhysicalResource, spawnManaged, type ExecutionProfile } from './executionBackend.js'
+import type { ExecutionPolicy } from './executionPolicy.js'
 import { inspectProcessIdentity, type ProcessIdentity } from './processIdentity.js'
 import { captureOwnedProcessTreeFromPid, mergeOwnedProcessTrees, OwnedProcessTreeCaptureError, stopOwnedProcessTree, type OwnedProcessTree } from './processTree.js'
 import { StringDecoder } from 'string_decoder'
@@ -251,6 +252,7 @@ export class BackgroundTaskManager {
       signal?: AbortSignal
       onSettled?: () => void
       profile?: ExecutionProfile
+      policy?: ExecutionPolicy
     },
   ): string {
     let releasePhysical!: () => void
@@ -393,6 +395,7 @@ export class BackgroundTaskManager {
       windowsHide: true,
       windowsVerbatimArguments: process.platform === 'win32',
       profile: options?.profile,
+      policy: options?.policy,
     })
     registerPhysicalResource(physical)
 

@@ -4,6 +4,8 @@ import type { Tool } from '../core/types.js'
 import { McpStdioClient, type McpServerConfig } from '../core/mcpClient.js'
 import type { McpRegistryEntry } from '../core/mcpRegistry.js'
 import { McpToolAdapter } from '../tools/mcpToolAdapter.js'
+import { currentExecutionPolicy } from '../core/executionBackend.js'
+import { assertSupportedExecutionPolicy, normalizeExecutionPolicyInput, normalizeExecutionProfile, resolveManagedExecutionPolicy } from '../core/executionPolicy.js'
 
 interface Connection {
   client: McpStdioClient
@@ -46,7 +48,22 @@ export class McpModule implements AgentModule {
   private async refresh(ctx: ModuleBootContext): Promise<ModuleBootResult> {
     if (this.disposed) throw new Error('MCP module disposed')
     ctx.abortSignal?.throwIfAborted()
-    const servers = (ctx.config.mcp?.servers ?? []).map(server => ({ ...server, executionProfile: ctx.config.executionProfile ?? server.executionProfile }))
+    const inheritedPolicy = resolveManagedExecutionPolicy(ctx.config.executionProfile, ctx.config.executionPolicy ?? currentExecutionPolicy(ctx.cwd), ctx.cwd)
+    assertSupportedExecutionPolicy(inheritedPolicy)
+    const servers = (ctx.config.mcp?.servers ?? []).map(server => {
+      const requested = normalizeExecutionPolicyInput(server.executionPolicy ?? {})
+      const legacy = server.executionProfile === undefined ? undefined : normalizeExecutionProfile(server.executionProfile)
+      const cwd = server.cwd ?? ctx.cwd
+      const executionPolicy = resolveManagedExecutionPolicy(legacy, {
+        ...inheritedPolicy, ...requested,
+        envAllowlist: requested.envAllowlist ?? [...inheritedPolicy.envAllowlist, ...(legacy?.envAllowlist ?? [])],
+        limits: { ...inheritedPolicy.limits, ...requested.limits,
+          processes: Math.min(inheritedPolicy.limits.processes, requested.limits?.processes ?? legacy?.maxProcesses ?? inheritedPolicy.limits.processes),
+        },
+      }, cwd)
+      assertSupportedExecutionPolicy(executionPolicy)
+      return { ...server, cwd, executionProfile: undefined, executionPolicy }
+    })
     const names = new Set<string>()
     for (const server of servers) {
       if (names.has(server.name)) throw new Error(`Duplicate MCP server name: ${server.name}`)

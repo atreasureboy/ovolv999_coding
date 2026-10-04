@@ -103,7 +103,7 @@ export async function runLoop(engine: ExecutionEngine, renderer: Renderer, confi
       }
       try {
         verification = await withWorkspaceAccess(cwd, runId, true, signal ?? new AbortController().signal, async () =>
-          executeVerification({ cwd, plan, signal, runId, executionProfile: engine.getConfig?.().executionProfile, artifactVersion: await captureArtifactVersion(cwd, plan.excludedPaths, { signal }) }),
+          executeVerification({ cwd, plan, signal, runId, executionProfile: engine.getConfig?.().executionProfile, executionPolicy: engine.getConfig?.().executionPolicy, artifactVersion: await captureArtifactVersion(cwd, plan.excludedPaths, { signal }) }),
         )
       } catch (error) {
         verification = { ...verification, status: 'not_run', output: String(error) }

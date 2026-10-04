@@ -58,7 +58,7 @@ function readSemanticEntries(memoryDir: string): SemanticMemoryEntry[] {
 
 /** Build the memory section for the system prompt */
 export function buildMemorySystemSection(memoryDir: string): string {
-  const entries = readSemanticEntries(memoryDir)
+  const entries = readSemanticEntries(memoryDir).filter(entry => entry.state !== 'superseded')
   if (entries.length === 0) return ''
 
   // Sort by confidence descending, take top entries

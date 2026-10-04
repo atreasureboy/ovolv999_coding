@@ -1,4 +1,5 @@
-import { spawnManaged, type ExecutionProfile } from './executionBackend.js'
+import { currentExecutionPolicy, spawnManaged, type ExecutionProfile } from './executionBackend.js'
+import { executionPolicyFromProfile, mergeChildEnvironment, resolveManagedExecutionPolicy, type ExecutionPolicyInput } from './executionPolicy.js'
 /**
  * McpStdioClient — minimal MCP (Model Context Protocol) stdio client.
  *
@@ -16,6 +17,7 @@ import { spawn, type ChildProcess } from 'child_process'
 
 export interface McpServerConfig {
   executionProfile?: ExecutionProfile
+  executionPolicy?: ExecutionPolicyInput
   limits?: { maxFrameBytes?: number; maxRequestBytes?: number; maxQueuedBytes?: number; maxPending?: number }
   /** Logical name; used to namespace tool names (mcp__<name>__<tool>) */
   name: string
@@ -106,12 +108,18 @@ export class McpStdioClient {
       throw new Error(`MCP server "${this.server.name}": empty command`)
     }
 
-    const env = { ...process.env, ...(this.server.env ?? {}) }
+    const cwd = this.server.cwd ?? process.cwd()
+    const policy = this.server.executionPolicy === undefined && this.server.executionProfile !== undefined
+      ? executionPolicyFromProfile(this.server.executionProfile, cwd)
+      : resolveManagedExecutionPolicy(this.server.executionProfile, this.server.executionPolicy ?? currentExecutionPolicy(cwd), cwd)
+    const explicitNames = Object.keys(this.server.env ?? {})
+    policy.envAllowlist = [...new Set([...policy.envAllowlist, ...explicitNames])]
+    const env = mergeChildEnvironment(process.env, this.server.env ?? {})
     this.proc = spawnManaged(this.server.command[0], this.server.command.slice(1), {
       stdio: ['pipe', 'pipe', 'pipe'],
       env,
       cwd: this.server.cwd,
-      profile: this.server.executionProfile,
+      policy,
       detached: process.platform !== 'win32',
       windowsHide: true,
     })

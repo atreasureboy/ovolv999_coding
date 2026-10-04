@@ -98,6 +98,7 @@ Use narrow tasks with explicit file scope and required tests. ClaudeCode workers
     try {
       assertExecutionProfile(ctx.executionProfile)
       if (ctx.executionProfile?.envAllowlist) throw new Error('Persistent tmux worker environment cannot be verified against an allowlist; execution refused')
+      if (ctx.executionPolicy && !['capture', 'list', 'stop'].includes(String(input.action))) throw new Error('Persistent tmux worker environment cannot enforce this execution policy; execution refused')
       switch (String(input.action)) {
         case 'start':
           return await this.start(input, ctx)

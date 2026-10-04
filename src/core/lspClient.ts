@@ -23,6 +23,8 @@ import { resolve } from 'path'
 import { existsSync, readFileSync } from 'fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { isRecord } from './persistedData.js'
+import { currentExecutionPolicy } from './executionBackend.js'
+import { assertSupportedExecutionPolicy, buildChildEnvironment } from './executionPolicy.js'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -105,6 +107,7 @@ const SERVER_PATTERNS: Record<LanguageId, ServerSpec[]> = {
 }
 
 export function detectServer(languageId: LanguageId = 'typescript', cwd = process.cwd()): ServerSpec | null {
+  assertSupportedExecutionPolicy(currentExecutionPolicy(cwd))
   const specs = SERVER_PATTERNS[languageId]
   if (!specs) return null
 
@@ -119,7 +122,7 @@ export function detectServer(languageId: LanguageId = 'typescript', cwd = proces
 
   for (const spec of specs) {
     try {
-      execFileSync(process.platform === 'win32' ? 'where.exe' : 'which', [spec.command], { stdio: 'pipe', timeout: 2000, windowsHide: true })
+      execFileSync(process.platform === 'win32' ? 'where.exe' : 'which', [spec.command], { stdio: 'pipe', timeout: 2000, windowsHide: true, env: buildChildEnvironment(currentExecutionPolicy(cwd), process.env) })
       return spec
     } catch { /* not found */ }
   }
@@ -168,9 +171,12 @@ export class LspClient extends EventEmitter {
     if (!this.serverSpec) return false
 
     try {
+      const policy = currentExecutionPolicy(fileUriToPath(this.options.rootUri))
+      assertSupportedExecutionPolicy(policy)
       this.proc = spawn(this.serverSpec.command, this.serverSpec.args, {
         stdio: ['pipe', 'pipe', 'pipe'],
         cwd: fileUriToPath(this.options.rootUri),
+        env: buildChildEnvironment(policy, process.env),
         windowsHide: true,
       })
     } catch {

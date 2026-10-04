@@ -3,6 +3,7 @@ import { AsyncLocalStorage } from 'async_hooks'
 import { StringDecoder } from 'string_decoder'
 import { captureProcessIdentity, inspectProcessIdentity } from './processIdentity.js'
 import { captureOwnedProcessTree, captureOwnedProcessTreeFromPid, mergeOwnedProcessTrees, OwnedProcessTreeCaptureError, stopOwnedProcessTree, type OwnedProcessTree } from './processTree.js'
+import { assertSupportedExecutionPolicy, buildChildEnvironment, resolveManagedExecutionPolicy, type ExecutionPolicy } from './executionPolicy.js'
 
 export interface ExecutionProfile {
   mode: 'trusted-local' | 'isolated-worker'
@@ -11,7 +12,7 @@ export interface ExecutionProfile {
 }
 
 const active = new Set<ChildProcess>()
-interface ProcessScope { pending: Set<Promise<void>>; parent?: ProcessScope; profile?: ExecutionProfile }
+interface ProcessScope { pending: Set<Promise<void>>; parent?: ProcessScope; policy?: ExecutionPolicy }
 const scopes = new AsyncLocalStorage<ProcessScope>()
 
 export function registerPhysicalResource(settled: Promise<void>): void {
@@ -24,29 +25,54 @@ export function registerPhysicalResource(settled: Promise<void>): void {
   }
 }
 
-export function createProcessScope(profile?: ExecutionProfile): { pending: Set<Promise<void>>; run<T>(operation: () => Promise<T>): Promise<T> } {
+export function createProcessScope(profile?: ExecutionProfile, policy?: ExecutionPolicy): { pending: Set<Promise<void>>; run<T>(operation: () => Promise<T>): Promise<T> } {
   const parent = scopes.getStore()
-  const scope: ProcessScope = { pending: new Set(), parent, profile: profile ?? parent?.profile }
+  const effective = profile === undefined && policy === undefined ? parent?.policy : resolveManagedExecutionPolicy(profile, policy ?? parent?.policy, process.cwd())
+  const scope: ProcessScope = { pending: new Set(), parent, policy: effective }
   return { pending: scope.pending, run: operation => scopes.run(scope, operation) }
 }
 
+export function currentExecutionPolicy(cwd = process.cwd()): ExecutionPolicy {
+  for (let scope = scopes.getStore(); scope; scope = scope.parent) if (scope.policy) assertSupportedExecutionPolicy(scope.policy)
+  const policy = resolveManagedExecutionPolicy(undefined, scopes.getStore()?.policy, cwd)
+  for (let scope = scopes.getStore()?.parent; scope; scope = scope.parent) if (scope.policy) {
+    const inherited = scope.policy
+    if (inherited.mode === 'isolated-worker') policy.mode = inherited.mode
+    for (const key of ['readableRoots', 'writableRoots', 'deniedPaths'] as const) policy[key] = [...new Set([...policy[key], ...inherited[key]])]
+    if (inherited.network === 'deny' || policy.network === 'deny') {
+      policy.network = 'deny'
+      policy.allowedHosts = []
+    } else if (inherited.network === 'allowlist') {
+      policy.allowedHosts = policy.network === 'allowlist' ? policy.allowedHosts.filter(host => inherited.allowedHosts.includes(host)) : [...inherited.allowedHosts]
+      policy.network = policy.allowedHosts.length ? 'allowlist' : 'deny'
+    }
+    policy.limits.processes = Math.min(policy.limits.processes, inherited.limits.processes)
+    for (const key of ['memoryBytes', 'cpuMs'] as const) if (inherited.limits[key] !== undefined) policy.limits[key] = Math.min(policy.limits[key] ?? inherited.limits[key], inherited.limits[key])
+  }
+  return policy
+}
+
 export function assertExecutionProfile(profile?: ExecutionProfile): void {
-  if (profile?.mode === 'isolated-worker') throw new Error(`Process isolation is unavailable on ${process.platform}; isolated-worker execution refused`)
-  if (profile?.maxProcesses !== undefined && (!Number.isSafeInteger(profile.maxProcesses) || profile.maxProcesses < 1)) throw new Error('Invalid process capacity')
+  assertSupportedExecutionPolicy(resolveManagedExecutionPolicy(profile, undefined, process.cwd()))
 }
 
 export function getExecutionHealth(): { activeProcesses: number } {
   return { activeProcesses: active.size }
 }
 
-export function spawnManaged(executable: string, args: readonly string[] = [], options: SpawnOptions & { profile?: ExecutionProfile } = {}): ChildProcess {
-  const { profile: configured, ...spawnOptions } = options
-  const profile = configured ?? scopes.getStore()?.profile
-  assertExecutionProfile(profile)
-  if (active.size >= (profile?.maxProcesses ?? 64)) throw new Error('Host process capacity exceeded')
+export function spawnManaged(executable: string, args: readonly string[] = [], options: SpawnOptions & { profile?: ExecutionProfile; policy?: ExecutionPolicy } = {}): ChildProcess {
+  const { profile, policy: configured, ...spawnOptions } = options
+  const cwd = typeof spawnOptions.cwd === 'string' ? spawnOptions.cwd : process.cwd()
+  const policy = resolveManagedExecutionPolicy(profile, configured ?? scopes.getStore()?.policy, cwd)
+  assertSupportedExecutionPolicy(policy)
+  let capacity = policy.limits.processes
+  for (let scope = scopes.getStore(); scope; scope = scope.parent) if (scope.policy) {
+    assertSupportedExecutionPolicy(scope.policy)
+    capacity = Math.min(capacity, scope.policy.limits.processes)
+  }
+  if (active.size >= capacity) throw new Error('Host process capacity exceeded')
   const source = spawnOptions.env ?? process.env
-  const allowed = profile?.envAllowlist && new Set(profile.envAllowlist.map(key => process.platform === 'win32' ? key.toLowerCase() : key))
-  const env = allowed ? Object.fromEntries(Object.entries(source).filter(([key]) => allowed.has(process.platform === 'win32' ? key.toLowerCase() : key))) : source
+  const env = buildChildEnvironment(policy, source)
   const child = spawn(executable, [...args], { ...spawnOptions, env })
   active.add(child)
   const closed = new Promise<void>(resolve => { child.once('close', () => resolve()); child.once('error', () => { if (!child.pid) resolve() }) })
@@ -56,7 +82,7 @@ export function spawnManaged(executable: string, args: readonly string[] = [], o
   return child
 }
 
-export function execManaged(executable: string, args: readonly string[], options: SpawnOptions & { profile?: ExecutionProfile; maxBuffer?: number; timeoutMs?: number } = {}): Promise<{ stdout: string; stderr: string }> {
+export function execManaged(executable: string, args: readonly string[], options: SpawnOptions & { profile?: ExecutionProfile; policy?: ExecutionPolicy; maxBuffer?: number; timeoutMs?: number } = {}): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const { maxBuffer = 1024 * 1024, timeoutMs = 30_000, signal, ...spawnOptions } = options
     signal?.throwIfAborted()

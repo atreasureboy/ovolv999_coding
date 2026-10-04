@@ -55,7 +55,7 @@ describe('persistence failure contracts', () => {
     expect(result.content).not.toContain('Stored')
   })
 
-  it('a transient read failure preserves the previous view and retries unchanged file metadata', () => {
+  it('a transient read failure withholds stale knowledge and retries unchanged file metadata', () => {
     const dir = directory()
     const semantic = new SemanticMemory(dir)
     semantic.write(entry('previous valid memory'))
@@ -63,7 +63,7 @@ describe('persistence failure contracts', () => {
     other.write(entry('new externally written memory'))
     const read = vi.spyOn(fs, 'readFileSync')
     read.mockImplementationOnce(() => { throw new Error('temporary read failure') })
-    expect(semantic.readAll().map(value => value.content)).toEqual(['previous valid memory'])
+    expect(semantic.readAll()).toEqual([])
     read.mockRestore()
     expect(semantic.readAll()).toHaveLength(2)
   })

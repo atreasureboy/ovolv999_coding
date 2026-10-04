@@ -126,6 +126,29 @@ function classifyGit(segment: string): RiskLevel {
   return 'safe'
 }
 
+function hasUnparsedSyntax(command: string): boolean {
+  if (/^[;&|]|(?:&&|\|\||\||&)\s*$/.test(command.trim())) return true
+  let quote = ''
+  for (let index = 0; index < command.length; index++) {
+    const character = command[index]
+    if (character === '\\' && quote !== "'") {
+      if (index === command.length - 1) return true
+      index++
+      continue
+    }
+    if (character === quote) {
+      quote = ''
+      continue
+    }
+    if (!quote && (character === "'" || character === '"')) {
+      quote = character
+      continue
+    }
+    if ((!quote && /[(){}^]/.test(character)) || (character === '%' && command.indexOf('%', index + 1) >= 0)) return true
+  }
+  return quote !== ''
+}
+
 /**
  * Classify a shell command's risk level.
  * Checks each segment (split by |, ;, &&) and returns the worst level.
@@ -137,6 +160,8 @@ export function classifyCommandRisk(command: string): RiskLevel {
   for (const pattern of DANGEROUS_PATTERNS) {
     if (pattern.test(command)) return 'dangerous'
   }
+
+  if (hasUnparsedSyntax(command)) return 'needs_approval'
 
   // Split by command separators and check each segment
   const lines = command.trim().split('\n')

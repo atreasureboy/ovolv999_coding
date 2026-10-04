@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { root, runNode, isolatedEnv } from '../../scripts/release-utils.mjs'
@@ -33,4 +33,26 @@ describe('real CLI finalization', () => {
     expect(sessions).toHaveLength(1)
     expect(readdirSync(join(workspace, 'sessions', sessions[0], 'writer.lock.owners'))).toEqual([])
   }, 20_000)
+
+  it.each(['task', 'stdin'])('returns needs_input for an unmounted Ink approval in %s execution', async (entryMode) => {
+    const workspace = join(directory, `approval-${entryMode}-workspace`)
+    const home = join(directory, `approval-${entryMode}-home`)
+    mkdirSync(workspace); mkdirSync(home)
+    writeFileSync(join(workspace, '.ovolv999.json'), JSON.stringify({ enabledModules: [], permissionMode: 'ask' }))
+    provider.state.scenario = 'write'
+    const args = [join(directory, 'compiled', 'bin', 'ovogogogo.js'), '--cwd', workspace, '--ink']
+    if (entryMode === 'task') args.push('request a fixture write')
+    const result = await runNode(args, {
+      env: isolatedEnv(home, { OPENAI_API_KEY: 'offline-fixture', OPENAI_BASE_URL: provider.url }),
+      input: entryMode === 'stdin' ? 'request a fixture write\n' : '',
+      timeout: 6000, allowFailure: true,
+    })
+    expect(result.code).toBe(2)
+    expect(result.stdout).toContain('needs_input')
+    expect(result.stdout).not.toContain('OFFLINE_SMOKE_OK')
+    expect(existsSync(join(workspace, 'product.txt'))).toBe(false)
+    const sessions = readdirSync(join(workspace, 'sessions')).filter(name => name.startsWith('session_'))
+    expect(sessions).toHaveLength(1)
+    expect(readdirSync(join(workspace, 'sessions', sessions[0], 'writer.lock.owners'))).toEqual([])
+  }, 10_000)
 })

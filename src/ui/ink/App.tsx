@@ -325,8 +325,8 @@ export function App({
       {state.pendingPermission ? (
         <PermissionDialog
           request={state.pendingPermission}
-          onResolve={(approved, alwaysAllow, feedback) =>
-            store.resolvePermission(approved, alwaysAllow, feedback)
+            onResolve={(approved, alwaysAllow, feedback, scope, rule) =>
+              store.resolvePermission(approved, alwaysAllow, feedback, scope, rule, state.pendingPermission ?? undefined)
           }
         />
       ) : null}

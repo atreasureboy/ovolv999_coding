@@ -15,6 +15,7 @@
  */
 
 import { execFileSync } from 'child_process'
+import { approvalInputDigest } from '../core/approvalBroker.js'
 import { createHash } from 'crypto'
 import { existsSync, mkdirSync, writeFileSync, readFileSync, realpathSync } from 'fs'
 import { isAbsolute, join, relative, resolve, sep } from 'path'
@@ -526,12 +527,14 @@ If only one worktree is active, you can omit \`name\`.`,
           if (permission === 'deny') {
             return { content: 'Discard denied; worktree and changes were retained', isError: true }
           }
-          if (permission === 'ask' && !ctx.permissionApproved) {
+          const approvalMatches = !ctx.permissionApproval || (ctx.permissionApproval.tool === this.name &&
+            ctx.permissionApproval.cwd === ctx.cwd && ctx.permissionApproval.inputDigest === approvalInputDigest({ ...input, name: selected, action }))
+          if (permission === 'ask' && (!ctx.permissionApproved || !approvalMatches)) {
             if (!ctx.requestPermission) {
               return { content: 'Discard needs approval; no approval channel is available. Worktree was retained', isError: true, status: 'needs_input' }
             }
             const decision = await ctx.requestPermission(this.name, { ...input, name: selected, action }, 'dangerous')
-            if (!decision.approved) return { content: 'Discard denied; worktree was retained', isError: true }
+            if (!decision.approved) return { content: 'Discard denied; worktree was retained', isError: true, ...(decision.status ? { status: decision.status } : {}) }
           }
         }
         if (ctx.signal?.aborted) return { content: 'Worktree exit cancelled; changes were retained', isError: true, status: 'cancelled' }

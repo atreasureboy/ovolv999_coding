@@ -20,7 +20,7 @@ import { assertExecutionProfile, execManaged } from '../core/executionBackend.js
 /** Run a tmux sub-command and return stdout+stderr */
 async function tmux(args: string[], context: ToolContext): Promise<string> {
   try {
-    const { stdout, stderr } = await execManaged('tmux', args, { cwd: context.cwd, profile: context.executionProfile, signal: context.signal, timeoutMs: 5000 })
+    const { stdout, stderr } = await execManaged('tmux', args, { cwd: context.cwd, profile: context.executionProfile, policy: context.executionPolicy, signal: context.signal, timeoutMs: 5000 })
     return (stdout + stderr).trim()
   } catch (e: unknown) {
     const err = e as { stdout?: string; stderr?: string; message?: string }
@@ -136,6 +136,7 @@ TmuxSession({ action: "capture", session: "py", lines: 5 })
       context.signal?.throwIfAborted()
       assertExecutionProfile(context.executionProfile)
       if (context.executionProfile?.envAllowlist) throw new Error('Persistent tmux environment cannot be verified against an allowlist; execution refused')
+      if (context.executionPolicy && !['capture', 'wait_for', 'list', 'kill'].includes(String(input.action))) throw new Error('Persistent tmux environment cannot enforce this execution policy; execution refused')
     } catch (error) {
       return { content: `TmuxSession error: ${(error as Error).message}`, isError: true, status: context.signal?.aborted ? 'cancelled' : 'blocked' }
     }

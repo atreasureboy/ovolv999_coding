@@ -22,6 +22,10 @@ import { loadOvogoMd } from '../src/config/ovogomd.js'
 import { loadProjectConfig } from '../src/config/projectConfig.js'
 import { detectProjectContext, formatProjectContext } from '../src/config/projectContext.js'
 import { loadSettings } from '../src/config/settings.js'
+import { mergeSettingsLayers } from '../src/config/settings/merge.js'
+import { assertSupportedExecutionPolicy, resolveManagedExecutionPolicy } from '../src/core/executionPolicy.js'
+import { ApprovalBroker } from '../src/core/approvalBroker.js'
+import { createInkApprovalHost, createTerminalApprovalHost } from '../src/cli/approvalHost.js'
 import { recordBackgroundOutcome } from '../src/core/backgroundSession.js'
 import { resolveContextWindow } from '../src/core/compact.js'
 import { ExecutionEngine } from '../src/core/engine.js'
@@ -181,6 +185,15 @@ async function main(): Promise<void> {
     )
     process.exit(1)
   }
+  const settings = loadSettings(cwd)
+  const projectConfig = loadProjectConfig(cwd)
+  const executionSettings = mergeSettingsLayers(settings, {
+    executionPolicy: projectConfig?.executionPolicy,
+    executionProfile: projectConfig?.executionProfile,
+  })
+  const executionProfile = executionSettings.executionProfile
+  const executionPolicy = resolveManagedExecutionPolicy(executionProfile, executionSettings.executionPolicy, cwd)
+  assertSupportedExecutionPolicy(executionPolicy)
   if (bg) {
     if (!task) {
       process.stderr.write('Error: --bg requires a task to run in the background\n')
@@ -188,7 +201,9 @@ async function main(): Promise<void> {
     }
     const { startBackgroundSession, formatSessionDetail, loadMetadata } =
       await import('../src/core/backgroundSession.js')
-    const result = await startBackgroundSession({ task, cwd, model })
+    const result = await startBackgroundSession({ task, cwd, model, executionPolicy,
+      env: { OPENAI_API_KEY: apiKey, OPENAI_BASE_URL: apiEnvironment.baseURL, OVOGO_MODEL: model },
+    })
     const meta = loadMetadata(result.sessionId)
     if (meta) {
       process.stdout.write(formatSessionDetail(meta) + '\n')
@@ -201,12 +216,10 @@ async function main(): Promise<void> {
   const renderer = new Renderer()
   renderer.banner(VERSION, model)
   renderer.info(`cwd: ${cwd}`)
-  const settings = loadSettings(cwd)
-  const projectConfig = loadProjectConfig(cwd)
   if (projectConfig) {
     renderer.info(`Project config: .ovolv999.json loaded`)
   }
-  const hookRunner = new HookService(settings.hooks ?? {}, cwd, { sink: { warn: (m) => renderer.warn(m) } })
+  const hookRunner = new HookService(settings.hooks ?? {}, cwd, { executionPolicy, sink: { warn: (m) => renderer.warn(m) } })
   const hookTypes = [
     'PreToolCall',
     'PostToolCall',
@@ -341,11 +354,25 @@ async function main(): Promise<void> {
     new ExecutionEngine(childConfig, childRenderer as Renderer)
   let uiStore: UIStore | undefined
   let inkRendererInstance: InkRenderer | undefined
-  if (ink) {
+  const interactiveRepl = !loop && !task && Boolean(process.stdin.isTTY)
+  if (ink && interactiveRepl) {
     const { UIStore: UIStoreClass } = await import('../src/ui/ink/store.js')
     const { InkRenderer: InkRendererClass } = await import('../src/ui/ink/inkRenderer.js')
     uiStore = new UIStoreClass()
     inkRendererInstance = new InkRendererClass(uiStore)
+  }
+  const approvalBroker = new ApprovalBroker()
+  if (uiStore) {
+    approvalBroker.attachHost(createInkApprovalHost(uiStore))
+  } else if (interactiveRepl && process.stdout.isTTY) {
+    approvalBroker.attachHost(createTerminalApprovalHost({
+      prompt: {
+        get isTTY(): boolean { return sessionState.prompt?.isTTY ?? false },
+        readLine: (prompt, signal) => sessionState.prompt?.readLine(prompt, signal) ?? Promise.resolve({ text: '', eof: true }),
+        close: () => sessionState.prompt?.close(),
+      },
+      writeOut: message => process.stdout.write(message),
+    }))
   }
   const config: EngineConfig = {
     model: projectConfig?.model ?? model,
@@ -353,6 +380,9 @@ async function main(): Promise<void> {
     baseURL: apiEnvironment.baseURL,
     maxIterations: projectConfig?.maxIterations ?? maxIter,
     cwd,
+    executionProfile,
+    executionPolicy,
+    approvalBroker,
     permissionMode: projectConfig?.permissionMode ?? 'auto',
     permissionManager,
     hookRunner,
@@ -418,24 +448,6 @@ async function main(): Promise<void> {
             return answer.trim().toLowerCase().startsWith('y')
           }
         : undefined,
-    requestPermission: uiStore
-      ? async (toolName, input, riskLevel) => {
-          const preview =
-            toolName === 'Bash' && typeof input.command === 'string'
-              ? input.command
-              : JSON.stringify(input).slice(0, 100)
-          const result = await uiStore.showPermissionDialog({ toolName, preview, riskLevel })
-          if (result.alwaysAllow) {
-            permissionManager.addRule({
-              toolName,
-              ruleContent: '*',
-              behavior: 'allow',
-              source: 'user',
-            })
-          }
-          return { approved: result.approved, feedback: result.feedback }
-        }
-      : undefined,
   }
   const planPermissionManager = new PermissionManager()
   planPermissionManager.setMode('plan')
@@ -453,6 +465,7 @@ async function main(): Promise<void> {
   const cleanup = (): Promise<void> => {
     if (cleanupPromise) return cleanupPromise
     cleanupPromise = (async () => {
+      approvalBroker.disconnectHost('Session cleanup')
       try {
         sessionState.saveOnExit?.()
       } catch (error) {
