@@ -328,6 +328,7 @@ Failed or unavailable verification prevents acceptance of code changes.
       agent: agentConfig,
       cwd: context.cwd,
       parentRunId: context.runId,
+      usageOwnerId: undefined,
       runFamilyId: context.runFamilyId,
       parentSignal: context.signal,
       workspace: context.workspace,

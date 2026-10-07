@@ -114,6 +114,7 @@ export interface UIState {
   /** Cost tracking (updated after each turn). */
   cost: number
   apiCalls: number
+  unknownPriceRequests: number
   /** Verbose mode (Ctrl+O) — show all tool results expanded. */
   verbose: boolean
 }
@@ -133,6 +134,7 @@ const INITIAL_STATE: UIState = {
   selectOverlay: null,
   cost: 0,
   apiCalls: 0,
+  unknownPriceRequests: 0,
   verbose: false,
 }
 
@@ -273,8 +275,8 @@ export class UIStore {
     this.publish({ planMode: active })
   }
 
-  setCost(cost: number, apiCalls: number): void {
-    this.publish({ cost, apiCalls })
+  setCost(cost: number, apiCalls: number, unknownPriceRequests = 0): void {
+    this.publish({ cost, apiCalls, unknownPriceRequests })
   }
 
   setModel(model: string): void {

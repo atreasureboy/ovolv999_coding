@@ -2,6 +2,7 @@ import type { PermissionMode, PermissionRule } from '../../core/permissionSystem
 import type { McpServerConfig } from '../../core/mcpClient.js'
 import { ExecutionPolicyError, normalizeExecutionPolicyInput, normalizeExecutionProfile } from '../../core/executionPolicy.js'
 import type { HookEntry, HooksConfig, OvogoSettings, TaskContext } from './types.js'
+import { normalizeModelSettings } from '../modelSettings.js'
 
 const PERMISSION_MODES = new Set(['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions'])
 const PERMISSION_BEHAVIORS = new Set(['allow', 'deny', 'ask'])
@@ -106,6 +107,7 @@ export function normalizeSettings(value: unknown): OvogoSettings {
     .filter((rule): rule is PermissionRule => rule !== null)
 
   return {
+    modelSettings: value.modelSettings === undefined ? undefined : normalizeModelSettings(value.modelSettings),
     executionPolicy: value.executionPolicy === undefined ? undefined : normalizeExecutionPolicyInput(value.executionPolicy),
     executionProfile: value.executionProfile === undefined ? undefined : normalizeExecutionProfile(value.executionProfile),
     hooks: normalizeHooks(value.hooks),

@@ -1,4 +1,5 @@
 import type { Command } from './index.js'
+import { formatTrackedCost } from '../core/costTracker.js'
 import { text } from './results.js'
 import type { SlashCommandResult } from './index.js'
 import { estimateTokens, calculateContextState, microCompact } from '../core/compact.js'
@@ -212,7 +213,7 @@ export const sessionCommands: Command[] = [
           state.maxTokens.toLocaleString() +
           ' tokens)',
         'API calls: ' + cost.getTotalAPICalls(),
-        'Cost: $' + cost.getTotalCost().toFixed(4),
+        'Cost: ' + formatTrackedCost(cost),
         'Plan mode: ' + (ctx.engine.isPlanMode() ? 'ON' : 'OFF'),
       ]
       if (fh) {

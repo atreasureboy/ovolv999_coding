@@ -5,6 +5,7 @@ import { tmpdir } from 'os'
 import { createProcessScope, execManaged } from '../../src/core/executionBackend.js'
 import { captureProcessIdentity, inspectProcessIdentity, type ProcessIdentity } from '../../src/core/processIdentity.js'
 import * as processTree from '../../src/core/processTree.js'
+import * as nativeFacade from '../../src/core/managedChildProcess.js'
 
 const pause = (): Promise<void> => new Promise(resolve => setTimeout(resolve, 25))
 
@@ -42,11 +43,12 @@ it('retains physical ownership when the root closes during cancellation discover
   }
 }, 25_000)
 
-it('settles observed owned descendants before releasing a normally closed command', async () => {
+it('settles owned descendants before releasing a normally closed command', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'managed-observed-orphan-'))
   const scope = createProcessScope()
   let leaf: ProcessIdentity | null = null
   let tracked = false
+  const nativeLaunch = vi.spyOn(nativeFacade, 'spawnManagedChildProcess')
   const originalCapture = processTree.captureOwnedProcessTreeFromPid
   const snapshot = vi.spyOn(processTree, 'captureOwnedProcessTreeFromPid').mockImplementation(async (...args) => {
     const tree = await originalCapture(...args)
@@ -61,17 +63,28 @@ it('settles observed owned descendants before releasing a normally closed comman
     expect(existsSync(join(directory, 'leaf.pid'))).toBe(true)
     leaf = await captureProcessIdentity(Number(readFileSync(join(directory, 'leaf.pid'), 'utf8')))
     expect(leaf).not.toBeNull()
-    const snapshotDeadline = Date.now() + 5000
-    while (!tracked && Date.now() < snapshotDeadline) await pause()
+    if (process.platform !== 'win32') {
+      const snapshotDeadline = Date.now() + 5000
+      while (!tracked && Date.now() < snapshotDeadline) await pause()
+    }
     writeFileSync(join(directory, 'exit-root'), '')
     const result = await observed
     const descendantState = await inspectProcessIdentity(leaf!)
     expect({ completed: result.error === undefined, pending: scope.pending.size, descendantState }).not.toEqual({ completed: true, pending: 0, descendantState: 'matching' })
-    expect(tracked).toBe(true)
-    if (descendantState === 'matching') {
+    if (process.platform === 'win32') {
+      const child = nativeLaunch.mock.results[0]?.value as ReturnType<typeof nativeFacade.spawnManagedChildProcess>
+      expect(child.accounting).toBe('contained')
+      expect(child.physicalState).toBe('settled')
+      expect(snapshot).not.toHaveBeenCalled()
+      expect(descendantState).toBe('dead')
+      expect(result.error).toBeUndefined()
+      expect(scope.pending.size).toBe(0)
+    } else if (descendantState === 'matching') {
+      expect(tracked).toBe(true)
       expect(result.error?.unfinishedResources?.length).toBeGreaterThan(0)
       expect(scope.pending.size).toBeGreaterThan(0)
     } else {
+      expect(tracked).toBe(true)
       expect(descendantState).toBe('dead')
       expect(result.error?.message).toContain('owned descendants')
       expect(scope.pending.size).toBe(0)
@@ -83,6 +96,7 @@ it('settles observed owned descendants before releasing a normally closed comman
     while (leaf && await inspectProcessIdentity(leaf) === 'matching' && Date.now() < stopDeadline) await pause()
     await observed
     snapshot.mockRestore()
+    nativeLaunch.mockRestore()
     rmSync(directory, { recursive: true, force: true })
   }
 }, 30_000)

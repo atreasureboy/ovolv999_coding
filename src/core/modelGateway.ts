@@ -1,11 +1,16 @@
 import type OpenAI from 'openai'
 import { APIConnectionError } from 'openai'
 import { createHash, randomUUID } from 'node:crypto'
-import { clampMaxOutputTokens, estimateTokens, estimateToolDefinitionTokens, resolveContextWindow } from './compact.js'
+import { clampMaxOutputTokens, estimateTokens, estimateToolDefinitionTokens } from './compact.js'
 import type { EngineConfig, OpenAIMessage } from './types.js'
 import type { RunContext } from './runContext.js'
 import { runOperation } from './runContext.js'
-import { modelGatewayPolicy, providerAdmission, type UsageSettlement } from './providerAdmission.js'
+import { modelGatewayPolicy, providerAdmission } from './providerAdmission.js'
+import { UsageLedger } from './usageLedger.js'
+import { gatewayModelRequest, nativeModelAdapter, resolveModelRuntime, sendNativeModelRequest, validateGatewayModelRequest } from './modelRuntime.js'
+import type { NormalizedUsage } from './model/types.js'
+import { usagePricing } from './modelPricing.js'
+import { AdapterError } from './model/common.js'
 
 const anonymousClients = new WeakMap<object, string>()
 
@@ -16,16 +21,22 @@ function providerKey(client: OpenAI, config: EngineConfig): string {
   return key
 }
 
-function usageOf(value: unknown): UsageSettlement | null {
+function usageOf(value: unknown, native = false): NormalizedUsage | null {
   if (!value || typeof value !== 'object') return null
-  const usage = (value as { usage?: { prompt_tokens?: unknown; completion_tokens?: unknown } }).usage
+  if (native && 'normalizedUsage' in value && value.normalizedUsage) return value.normalizedUsage as NormalizedUsage
+  const usage = (value as { usage?: { prompt_tokens?: unknown; completion_tokens?: unknown; prompt_tokens_details?: { cached_tokens?: unknown }; completion_tokens_details?: { reasoning_tokens?: unknown } } }).usage
   if (!usage || !Number.isSafeInteger(usage.prompt_tokens) || Number(usage.prompt_tokens) < 0 || !Number.isSafeInteger(usage.completion_tokens) || Number(usage.completion_tokens) < 0) return null
-  return { kind: 'actual', inputTokens: Number(usage.prompt_tokens), outputTokens: Number(usage.completion_tokens) }
+  const cached = usage.prompt_tokens_details?.cached_tokens
+  const reasoning = usage.completion_tokens_details?.reasoning_tokens
+  return { kind: 'actual', inputTokens: Number(usage.prompt_tokens), outputTokens: Number(usage.completion_tokens),
+    ...(Number.isSafeInteger(cached) && Number(cached) >= 0 && Number(cached) <= Number(usage.prompt_tokens) ? { cachedInputTokens: Number(cached) } : {}),
+    ...(Number.isSafeInteger(reasoning) && Number(reasoning) >= 0 && Number(reasoning) <= Number(usage.completion_tokens) ? { reasoningTokens: Number(reasoning) } : {}),
+  }
 }
 
 function retryable(error: unknown): boolean {
   const value = error as { status?: number; name?: string }
-  return value.status === 429 || value.status === 408 || (value.status !== undefined && value.status >= 500 && value.status <= 599) || error instanceof APIConnectionError || value.name === 'APIConnectionError' || value.name === 'APIConnectionTimeoutError'
+  return (error as { retryable?: boolean }).retryable === true || value.status === 429 || value.status === 408 || (value.status !== undefined && value.status >= 500 && value.status <= 599) || error instanceof APIConnectionError || value.name === 'APIConnectionError' || value.name === 'APIConnectionTimeoutError'
 }
 
 function retryAfter(error: unknown): number | null {
@@ -57,16 +68,37 @@ export function createModelGateway(client: OpenAI, config: EngineConfig, current
   const policy = modelGatewayPolicy(config.modelGateway)
   const admission = providerAdmission(providerKey(client, config), policy)
   const standaloneRun = randomUUID()
+  const ledger = config.usageLedger ?? new UsageLedger({ pricing: model => config.modelSettings && Object.hasOwn(config.modelSettings, model) ? config.modelSettings[model].pricing ?? usagePricing(model) : usagePricing(model) })
   const create = (async (params: OpenAI.Chat.ChatCompletionCreateParams, options?: OpenAI.RequestOptions) => {
     const run = currentRun()
     const parentSignal = options?.signal ?? run?.controller.signal
     parentSignal?.throwIfAborted()
     const model = params.model
-    const window = resolveContextWindow(model, config.maxContextTokens)
+    const runtime = resolveModelRuntime(config, model)
+    const window = runtime.options.capabilities.contextWindow
     const maxTokens = clampMaxOutputTokens(params.max_tokens, window)
+    const request = gatewayModelRequest(config, params, maxTokens)
+    if (runtime.protocol !== 'chat-completions' && config.temperature === undefined) delete request.temperature
+    const adapter = nativeModelAdapter(runtime.protocol, { ...runtime.options, ...(runtime.protocol === 'chat-completions' ? { client: {
+      async create(body: Record<string, unknown>, transport: { signal: AbortSignal }) {
+        let response: OpenAI.Chat.ChatCompletion | AsyncIterable<OpenAI.Chat.ChatCompletionChunk>
+        try {
+          response = await original({ ...params, ...body, stream: params.stream === true, stream_options: params.stream === true ? params.stream_options : undefined } as OpenAI.Chat.ChatCompletionCreateParams, { ...options, timeout: Math.max(1, deadline - Date.now()), signal: transport.signal, maxRetries: 0 })
+        } catch (error) {
+          throw new AdapterError('chat_transport_error', error instanceof Error ? error.message : 'Chat transport failed', retryable(error), retryAfter(error) ?? undefined)
+        }
+        if (iterable(response)) return response
+        if (!response || !Array.isArray(response.choices)) throw new AdapterError('invalid_stream', 'Invalid Chat completion')
+        return (async function* () {
+          yield await Promise.resolve({ choices: response.choices.map(choice => ({ index: choice.index ?? 0, delta: { ...choice.message, ...(choice.message.tool_calls ? { tool_calls: choice.message.tool_calls.map((call, index) => ({ ...call, index })) } : {}) }, finish_reason: choice.finish_reason })), usage: response.usage })
+        })()
+      },
+    } } : {}) })
+    validateGatewayModelRequest(request, runtime.protocol, runtime.options, adapter)
     const messages = params.messages.map(message => {
       const wire = { ...message } as OpenAIMessage
       delete wire.source
+      delete wire.providerState
       return wire
     })
     const estimated = estimateTokens(messages) + estimateToolDefinitionTokens(params.tools)
@@ -86,25 +118,33 @@ export function createModelGateway(client: OpenAI, config: EngineConfig, current
       for (let attempt = 1; attempt <= policy.maxAttempts; attempt++) {
         signal.throwIfAborted()
         const reservation = await admission.acquire(estimated + maxTokens, run?.familyId ?? config.runFamilyId ?? standaloneRun, signal, deadline)
+        const requestId = randomUUID()
+        const startedAt = Date.now()
         let settled = false
-        const settle = (usage: UsageSettlement, phase: string) => {
+        let settlementError: Error | undefined
+        const identity = { requestId, runId: run?.runId ?? standaloneRun, familyId: run?.familyId ?? config.runFamilyId ?? standaloneRun, model, ownerId: config.usageOwnerId }
+        const settle = (usage: NormalizedUsage, phase: string) => {
           if (settled) return
           settled = true
           reservation.settle(usage)
-          emit(phase, { attempt, usage: usage.kind, input_tokens: usage.inputTokens, output_tokens: usage.outputTokens })
+          try {
+            ledger.recordUsage({ ...usage, ...identity, durationMs: Date.now() - startedAt })
+            emit(phase, { attempt, usage: usage.kind, input_tokens: usage.inputTokens, output_tokens: usage.outputTokens })
+          } catch (error) { settlementError = new Error('Model usage settlement failed; preserve pending usage for recovery', { cause: error }) }
         }
         try {
+          ledger.beginUsage({ ...identity, kind: 'unknown' })
           emit('started', { attempt, usage: 'unknown' })
-          const send = () => Promise.resolve(original({ ...params, messages: messages as OpenAI.Chat.ChatCompletionMessageParam[], max_tokens: maxTokens }, { ...options, timeout: Math.max(1, deadline - Date.now()), signal, maxRetries: 0 }))
+          const send = () => sendNativeModelRequest(adapter, request, params.stream === true, signal)
           const response = await (run ? runOperation(run, 'model:' + model, send, duration, config.cancellationGraceMs ?? 2000) : send())
           if (iterable(response)) {
-            let usage: UsageSettlement | null = null
+            let usage: NormalizedUsage | null = null
             let bytes = 0
             let finished = false
             const onAbort = () => {
               if (finished) return
               finished = true
-              settle({ kind: 'unknown' }, 'stream_aborted')
+              settle(usage ?? { kind: 'unknown' }, 'stream_aborted')
               cleanup()
             }
             signal.addEventListener('abort', onAbort, { once: true })
@@ -117,37 +157,40 @@ export function createModelGateway(client: OpenAI, config: EngineConfig, current
                   signal.throwIfAborted()
                   for await (const chunk of response) {
                     signal.throwIfAborted()
-                    usage = usageOf(chunk) ?? usage
+                    usage = usageOf(chunk, Boolean(adapter)) ?? usage
                     bytes += Buffer.byteLength(JSON.stringify(chunk.choices ?? []), 'utf8')
                     yield chunk
                   }
                   completed = true
                   admission.success()
                   settle(usage ?? { kind: 'estimated', inputTokens: estimated, outputTokens: Math.ceil(bytes / 4) }, 'completed')
+                  if (settlementError) throw settlementError
                 } catch (error) {
                   if (!signal.aborted) admission.failure()
-                  settle({ kind: 'unknown' }, 'stream_failed')
-                  throw error
+                  settle(usage ?? { kind: 'unknown' }, 'stream_failed')
+                  throw settlementError ?? error
                 } finally {
                   finished = true
                   signal.removeEventListener('abort', onAbort)
-                  if (!completed) { controller.abort(new Error('Model stream consumer stopped')); settle({ kind: 'unknown' }, 'stream_abandoned') }
+                  if (!completed) { controller.abort(new Error('Model stream consumer stopped')); settle(usage ?? { kind: 'unknown' }, 'stream_abandoned') }
                   cleanup()
                 }
               },
             }
           }
           admission.success()
-          const completion = response as OpenAI.Chat.ChatCompletion
+          const completion = response
           const output = JSON.stringify(completion.choices ?? [])
-          settle(usageOf(response) ?? { kind: 'estimated', inputTokens: estimated, outputTokens: Math.ceil(Buffer.byteLength(output, 'utf8') / 4) }, 'completed')
+          settle(usageOf(response, Boolean(adapter)) ?? { kind: 'estimated', inputTokens: estimated, outputTokens: Math.ceil(Buffer.byteLength(output, 'utf8') / 4) }, 'completed')
+          if (settlementError) throw settlementError
           cleanup()
           return response
         } catch (error) {
-          if (signal.aborted) { settle({ kind: 'unknown' }, 'request_aborted'); throw signal.reason instanceof Error ? signal.reason : error }
+          if (signal.aborted) { settle(usageOf(error, Boolean(adapter)) ?? { kind: 'unknown' }, 'request_aborted'); throw settlementError ?? (signal.reason instanceof Error ? signal.reason : error) }
           const retry = retryable(error)
           if (retry) admission.failure()
-          settle({ kind: 'unknown' }, 'request_failed')
+          settle(usageOf(error, Boolean(adapter)) ?? { kind: 'unknown' }, 'request_failed')
+          if (settlementError) throw settlementError
           if (!retry || attempt === policy.maxAttempts) throw error
           const backoff = Math.min(policy.maxDelayMs, policy.baseDelayMs * (2 ** (attempt - 1))) * (0.5 + Math.random() * 0.5)
           const delay = retryAfter(error) ?? backoff

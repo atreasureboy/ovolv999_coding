@@ -149,7 +149,7 @@ export function createInkReplController(opts: InkReplControllerOptions): InkRepl
       const result = await engine.runTurn(prompt, history, images)
       history = result.newHistory
       const tracker = engine.getCostTracker()
-      store.setCost(tracker.getTotalCost(), tracker.getTotalAPICalls())
+      store.setCost(tracker.getTotalCost(), tracker.getTotalAPICalls(), tracker.getUsageSummary?.()?.unknownPriceRequestCount ?? 0)
       save()
       const status = normalizeOutcome(result.result)
       if (status !== 'completed') {

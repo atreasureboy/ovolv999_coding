@@ -51,7 +51,8 @@ describe('model request compatibility', () => {
       expect(requests[1].tool_choice).toBeUndefined()
       expect(requests[1].stream_options).toBeUndefined()
       expect(engine.getCostTracker().getTotalInputTokens()).toBe(5)
-      expect(engine.getCostTracker().getTotalAPICalls()).toBe(1)
+      expect(engine.getCostTracker().getTotalAPICalls()).toBe(2)
+      expect(engine.getCostTracker().getUsageSummary()).toMatchObject({ actualRequestCount: 1, unknownRequestCount: 1 })
     } finally {
       await engine.dispose()
       rmSync(cwd, { recursive: true, force: true })

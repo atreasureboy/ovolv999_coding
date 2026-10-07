@@ -1,14 +1,27 @@
 import { readFileSync } from 'fs'
+import { normalizeModelProtocol } from '../config/modelSettings.js'
+import type { ModelProtocol } from '../core/model/types.js'
 export const VERSION = '0.1.0'
 export interface ResolvedApiEnvironment {
   apiKey: string | undefined
   baseURL: string | undefined
   model: string
-  provider: 'minimax' | 'openai'
+  provider: 'minimax' | 'openai' | 'anthropic'
+  protocol: ModelProtocol
 }
-export function resolveApiEnvironment(): ResolvedApiEnvironment {
+export function resolveApiEnvironment(configuredProtocol?: ModelProtocol): ResolvedApiEnvironment {
+  const protocol = configuredProtocol ?? (process.env.OVOGO_MODEL_PROTOCOL ? normalizeModelProtocol(process.env.OVOGO_MODEL_PROTOCOL) : undefined)
   const anthropicBaseURL = process.env.ANTHROPIC_BASE_URL
   const anthropicApiKey = process.env.ANTHROPIC_AUTH_TOKEN ?? process.env.ANTHROPIC_API_KEY
+  if (protocol === 'anthropic') {
+    return {
+      apiKey: anthropicApiKey,
+      baseURL: anthropicBaseURL ?? 'https://api.anthropic.com/v1',
+      model: process.env.OVOGO_MODEL ?? process.env.ANTHROPIC_MODEL ?? '',
+      provider: 'anthropic',
+      protocol,
+    }
+  }
   const isMiniMax = Boolean(
     anthropicApiKey &&
     anthropicBaseURL &&
@@ -20,6 +33,7 @@ export function resolveApiEnvironment(): ResolvedApiEnvironment {
       baseURL: anthropicBaseURL!.replace(/\/anthropic\/?$/i, '/v1'),
       model: process.env.OVOGO_MODEL ?? process.env.ANTHROPIC_MODEL ?? 'MiniMax-M3',
       provider: 'minimax',
+      protocol: protocol ?? 'chat-completions',
     }
   }
   return {
@@ -27,6 +41,7 @@ export function resolveApiEnvironment(): ResolvedApiEnvironment {
     baseURL: process.env.OPENAI_BASE_URL,
     model: process.env.OVOGO_MODEL ?? 'gpt-4o',
     provider: 'openai',
+    protocol: protocol ?? 'chat-completions',
   }
 }
 export function buildVersion(entryUrl: string): string {

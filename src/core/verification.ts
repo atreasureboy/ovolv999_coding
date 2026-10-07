@@ -1,4 +1,4 @@
-import { spawnManaged, type ExecutionProfile } from './executionBackend.js'
+import { isManagedChild, spawnManaged, type ExecutionProfile } from './executionBackend.js'
 import type { ExecutionPolicy } from './executionPolicy.js'
 import { createHash } from 'crypto'
 import { execFile } from 'child_process'
@@ -191,6 +191,7 @@ async function executeCommand(command: string, cwd: string, signal: AbortSignal 
       resolveResult({ command, passed: exitCode === 0 && !cancelled && !timedOut, output: output.trim(), exitCode, cancelled, timedOut, unfinishedResources })
     }
     const kill = (force: boolean): void => {
+      if (isManagedChild(child)) { child.kill(force ? 'SIGKILL' : 'SIGTERM'); return }
       if (!child.pid) return
       if (process.platform === 'win32') {
         execFile('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, timeout: 2000 }, (error) => {
@@ -218,7 +219,14 @@ async function executeCommand(command: string, cwd: string, signal: AbortSignal 
     const abort = (): void => { cancelled = true; stop() }
     const timer = setTimeout(() => { timedOut = true; stop() }, timeoutMs)
     signal?.addEventListener('abort', abort, { once: true })
-    child.once('error', error => { output += error.message; resolveClosed(); finish(null) })
+    child.once('error', error => {
+      output += error.message
+      if (isManagedChild(child) && child.physicalState !== 'settled') {
+        unfinishedResources = [`verification process ${child.pid ?? 'unknown'}`]
+        quarantineWorkspace(cwd, child.physicallySettled)
+      } else resolveClosed()
+      finish(null)
+    })
     child.once('close', code => { resolveClosed(); finish(code) })
     if (signal?.aborted) abort()
   })

@@ -1,6 +1,9 @@
 import type { Command } from './index.js'
 import { text } from './results.js'
 import { calculateContextState } from '../core/compact.js'
+import { formatTrackedCost } from '../core/costTracker.js'
+import { resolveModelRuntime } from '../core/modelRuntime.js'
+import { resolveApiEnvironment } from '../cli/environment.js'
 import { resolve } from 'path'
 
 function truncate(s: string, max: number): string {
@@ -17,29 +20,14 @@ export const diagnosticsCommands: Command[] = [
       const FAIL = '\x1b[31m\u2717\x1b[0m'
       const INFO = '\x1b[36mi\x1b[0m'
       const checks: string[] = []
-      const anthropicBaseURL = process.env.ANTHROPIC_BASE_URL
-      const anthropicApiKey = process.env.ANTHROPIC_AUTH_TOKEN ?? process.env.ANTHROPIC_API_KEY
-      const isMiniMax = Boolean(
-        anthropicApiKey &&
-        anthropicBaseURL &&
-        /^https:\/\/api\.(?:minimax\.io|minimaxi\.com)\/anthropic\/?$/i.test(anthropicBaseURL),
-      )
-      if (isMiniMax) {
-        checks.push('  ' + OK + ' Provider: MiniMax (Anthropic-compatible endpoint)')
-        checks.push('  ' + OK + ' API key: set (ANTHROPIC_AUTH_TOKEN)')
-        checks.push('  ' + INFO + ' Base URL: ' + anthropicBaseURL)
-      } else {
-        const apiKey = process.env.OPENAI_API_KEY
-        if (apiKey && apiKey.length > 10) {
-          checks.push(
-            '  ' + OK + ' API key: set (' + apiKey.slice(0, 6) + '...' + apiKey.slice(-4) + ')',
-          )
-        } else {
-          checks.push('  ' + FAIL + ' API key: NOT SET (export OPENAI_API_KEY=...)')
-        }
-        const baseURL = process.env.OPENAI_BASE_URL
-        checks.push('  ' + INFO + ' Base URL: ' + (baseURL || 'default (OpenAI)'))
-      }
+      const config = ctx.engine.getConfig?.()
+      const protocol = config?.model ? resolveModelRuntime(config).protocol : undefined
+      const api = resolveApiEnvironment(protocol)
+      const apiKey = config?.apiKey ?? api.apiKey
+      checks.push('  ' + INFO + ' Provider protocol: ' + api.protocol)
+      if (api.provider === 'minimax') checks.push('  ' + INFO + ' Provider: MiniMax')
+      checks.push('  ' + (apiKey ? OK + ' API key: set' : FAIL + ' API key: NOT SET'))
+      checks.push('  ' + INFO + ' Base URL: ' + (config?.baseURL ?? api.baseURL ?? 'default (OpenAI)'))
       checks.push('  ' + INFO + ' Model: ' + ctx.engine.getModel())
       checks.push('  ' + INFO + ' CWD: ' + ctx.cwd)
       checks.push('  ' + INFO + ' Session: ' + (ctx.sessionDir || 'none'))
@@ -47,7 +35,7 @@ export const diagnosticsCommands: Command[] = [
       const cost = ctx.engine.getCostTracker()
       checks.push('  ' + INFO + ' API calls: ' + cost.getTotalAPICalls())
       if (cost.getTotalAPICalls() > 0) {
-        checks.push('  ' + INFO + ' Cost: $' + cost.getTotalCost().toFixed(4))
+        checks.push('  ' + INFO + ' Cost: ' + formatTrackedCost(cost))
       }
       const fh = ctx.engine.getFileHistory()
       if (fh) {
@@ -298,23 +286,26 @@ export const diagnosticsCommands: Command[] = [
   {
     name: 'cache',
     description: 'Prompt cache statistics. Usage: /cache [stats | reset | health]',
-    handler: async (args) => {
+    handler: async (args, ctx) => {
       const cs = await import('../utils/cacheStats.js')
+      const ledger = ctx.engine.getConfig?.().usageLedger
       const parts = args.trim().split(/\s+/).filter(Boolean)
       const sub = parts[0] ?? 'stats'
       if (sub === 'stats') {
-        return text(cs.formatCacheStats(cs.getCacheStats()))
+        return text(cs.formatCacheStats(ledger ? cs.getLedgerCacheStats(ledger) : cs.getCacheStats()))
       }
       if (sub === 'reset') {
-        cs.resetCacheStats()
+        if (ledger) cs.resetLedgerCacheStats(ledger)
+        else cs.resetCacheStats()
         return text('Cache statistics reset.')
       }
       if (sub === 'health') {
+        if (ledger) return text(cs.formatCacheStats(cs.getLedgerCacheStats(ledger)))
         const warning = cs.checkCacheHealth()
         if (!warning) return text('Cache health: OK')
         return text(cs.formatCacheWarning(warning))
       }
-      return text(cs.formatCacheStats(cs.getCacheStats()))
+      return text(cs.formatCacheStats(ledger ? cs.getLedgerCacheStats(ledger) : cs.getCacheStats()))
     },
   },
   {

@@ -427,6 +427,34 @@ CLI 参数优先；项目模型与运行参数来自工作目录向 Git 根查�
 }
 ```
 
+原生模型协议可在上述项目配置或分层 settings 的 `modelSettings` 中按完整模型名选择：
+
+```json
+{
+  "model": "my-model",
+  "modelSettings": {
+    "my-model": {
+      "protocol": "responses",
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "reasoning": true,
+        "contextWindow": 128000,
+        "maxOutputTokens": 8192
+      },
+      "effort": {
+        "parameter": "reasoning.effort",
+        "values": { "low": "low", "medium": "medium", "high": "high" }
+      }
+    }
+  }
+}
+```
+
+这些能力、窗口和 effort 值必须符合所用模型与服务。协议支持 `chat-completions`、`responses`、`anthropic`；省略时保留兼容入口，也可用 `OVOGO_MODEL_PROTOCOL` 设置环境默认。Anthropic 原生入口使用 `ANTHROPIC_API_KEY` 或 `ANTHROPIC_AUTH_TOKEN`，地址来自 `ANTHROPIC_BASE_URL`；OpenAI 协议使用原有 `OPENAI_*` 环境。MiniMax 默认保留原兼容转换。`/effort` 在配置了参数映射后进入原生请求，缺少映射时不会猜测参数。历史保留原生续接状态，裁剪后显式重新建立续接。
+
+费用统计覆盖主请求、摘要、critic/reflection 和子代理，未知用量或缓存单价会显示未知费用。内置历史价格不是最新账单保证；需要精确单价时，在对应模型下设置含 `version`、`inputPer1M`、`outputPer1M` 及可选缓存读写单价的 `pricing`。`pnpm run eval:offline` 用 12 个确定性临时仓库任务验证实际工具链，完整说明见 [发布与基线说明](docs/release-support.md)。
+
 项目 `.ovogo/settings.json` 示例：
 
 ```json
@@ -446,7 +474,7 @@ CLI 参数优先；项目模型与运行参数来自工作目录向 Git 根查�
 }
 ```
 
-执行策略按用户设置、项目设置和项目运行配置合并；省略字段继承，显式数组替换。managed 命令、MCP、异步 Hooks 和验收命令默认只获得平台必需环境；项目需要额外变量时通过 `envAllowlist` 明确提供，MCP 的显式 `env` 只授予对应服务。仍有同步辅助入口未迁移，进程容量也只统计 managed 根进程。`trusted-local` 没有内核文件或网络隔离；隔离模式、非空文件根限制、网络限制和内存/CPU 配额目前会在启动前拒绝。已有配置文件无法读取或不是有效对象时，启动报告文件路径并停止。
+执行策略按用户设置、项目设置和项目运行配置合并；省略字段继承，显式数组替换。managed 命令、MCP、异步 Hooks 和验收命令默认只获得平台必需环境；项目需要额外变量时通过 `envAllowlist` 明确提供，MCP 的显式 `env` 只授予对应服务。Windows x64 的非 IPC managed 启动通过原生 Job Object 包含进程树，先挂起创建、确认加入再运行，物理关闭后才释放容量；未知关闭状态继续占用。IPC、非 Windows 和未迁移的同步辅助入口不具有此保证。`trusted-local` 没有内核文件或网络隔离；隔离模式、非空文件根限制、网络限制和内存/CPU 配额目前会在启动前拒绝。已有配置文件无法读取或不是有效对象时，启动报告文件路径并停止。
 
 交互 REPL 的批准可选一次或本次会话中的相同完整操作，绑定工具、参数、目录和有效策略；设置变化后需要重新审批。单次任务、loop 和无界面入口没有审批 host，需要批准时返回 `needs_input`。当前没有新规则持久化、远程审批或审批重连功能。
 
@@ -461,6 +489,9 @@ ovolv999/
 │   │   ├── engine.ts / engine/       # turn 调度、策略、流解析、结果验收
 │   │   ├── compact.ts / compact/     # 压缩策略、预算与 token 估算
 │   │   ├── providers.ts / providers/ # 兼容导出、元数据、识别与能力
+│   │   ├── model/ / modelRuntime.ts  # 协议适配、能力与原生续接
+│   │   ├── usageLedger.ts           # 请求与 run family 的持久用量
+│   │   ├── managedProcess.ts        # 进程归属、物理关闭与原始字节
 │   │   └── *.ts                     # 运行状态、持久化、进程、权限及独立能力
 │   ├── commands/
 │   │   ├── builtin.ts               # 一处注册装配，保留有效顺序和别名
@@ -477,6 +508,7 @@ ovolv999/
 │   └── utils/                       # 独立工具函数
 ├── tests/                           # 行为回归测试；新增用例对应源码目录
 ├── scripts/                         # clean build、安装后验收与发布门禁
+├── native/execution-host/           # Windows Job 宿主源文件和构建
 └── docs/module-refinement.md         # 入口职责、修复依据与本轮验证
 ```
 

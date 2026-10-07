@@ -51,7 +51,7 @@ describe('BackgroundTaskManager', () => {
   // ── createTask ────────────────────────────────────────────────────────────
 
   describe('createTask', () => {
-    it('creates a task and returns an ID', () => {
+    it('creates a task and returns an ID', async () => {
       const id = manager.createTask(ECHO, { description: 'test echo' })
       expect(id).toMatch(/^task_/)
       const task = manager.getTask(id)
@@ -59,7 +59,8 @@ describe('BackgroundTaskManager', () => {
       expect(task!.command).toBe(ECHO)
       expect(task!.description).toBe('test echo')
       expect(task!.status).toBe('running')
-      expect(task!.pid).not.toBeNull()
+      await waitForDone(manager, id)
+      expect(manager.getTask(id)!.pid).not.toBeNull()
     })
 
     it('defaults description to command', () => {

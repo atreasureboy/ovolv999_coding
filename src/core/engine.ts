@@ -6,8 +6,12 @@ import { settleHistory, trimHistory } from './messageGroups.js'
 import { createModelGateway } from './modelGateway.js'
 import { getEffortPrompt, isEffortLevel, type EffortLevel } from './effort.js'
 import { runHookOperation } from './hookLifecycle.js'
-import { randomUUID } from 'crypto'
-import { resolve } from 'node:path'
+import { createHash, randomUUID } from 'crypto'
+import { join, resolve } from 'node:path'
+import { UsageLedger } from './usageLedger.js'
+import { resolveModelRuntime } from './modelRuntime.js'
+import { usagePricing } from './modelPricing.js'
+import { normalizeModelSettings, normalizeModelProtocol } from '../config/modelSettings.js'
 import OpenAI from 'openai'
 import { getPlanModePrefix } from '../prompts/system.js'
 import { createTools, findTool, getToolDefinitions } from '../tools/index.js'
@@ -25,7 +29,6 @@ import {
   maybeCompact,
   maybeTimeBasedMicroCompact,
   microCompact,
-  resolveContextWindow,
 } from './compact.js'
 import { CostTracker, type TokenUsage } from './costTracker.js'
 import { acceptRunResult } from './engine/acceptance.js'
@@ -109,13 +112,15 @@ export class ExecutionEngine {
   private lastAssistantTs: number | undefined = undefined
   private pendingSnipCount: number | null = null
   private getModelContextWindow(): number {
-    return resolveContextWindow(this.config.model, this.config.maxContextTokens)
+    return resolveModelRuntime(this.config).options.capabilities.contextWindow
   }
   private getEffectiveMaxOutputTokens(): number {
-    return clampMaxOutputTokens(this.config.maxOutputTokens, this.getModelContextWindow())
+    return Math.min(clampMaxOutputTokens(this.config.maxOutputTokens, this.getModelContextWindow()), resolveModelRuntime(this.config).options.capabilities.maxOutputTokens)
   }
   constructor(config: EngineConfig, renderer: EngineObserver, client?: OpenAI) {
     config = { ...config, cwd: resolve(config.cwd) }
+    if (config.modelSettings !== undefined) config.modelSettings = normalizeModelSettings(config.modelSettings)
+    if (config.modelProtocol !== undefined) config.modelProtocol = normalizeModelProtocol(config.modelProtocol)
     assertExecutionProfile(config.executionProfile)
     const executionPolicy = resolveManagedExecutionPolicy(config.executionProfile, config.executionPolicy, config.cwd)
     assertSupportedExecutionPolicy(executionPolicy)
@@ -124,6 +129,8 @@ export class ExecutionEngine {
     }
     this.config = applyAgentToConfig({
       ...config,
+      usageLedger: config.usageLedger ?? new UsageLedger({ root: config.sessionDir ? join(config.sessionDir, 'usage') : undefined, pricing: model => config.modelSettings && Object.hasOwn(config.modelSettings, model) ? config.modelSettings[model].pricing ?? usagePricing(model) : usagePricing(model) }),
+      usageOwnerId: config.usageOwnerId ?? (config.sessionDir ? createHash('sha256').update(resolve(config.sessionDir)).digest('hex') : randomUUID()),
       executionPolicy,
       effort: config.effort ?? 'medium',
       extraTools: config.extraTools ? [...config.extraTools] : undefined,
@@ -165,7 +172,7 @@ export class ExecutionEngine {
       : createTools(config.extraTools ?? [])
     this.allTools = this.tools
     this.eventLog = config.eventLog
-    this.costTracker = new CostTracker()
+    this.costTracker = new CostTracker(config.usageLedger, config.parentRunId ? config.usageOwnerId : undefined)
     this.backgroundTaskManager = new BackgroundTaskManager()
     this.planModeActive = config.planMode ?? false
     this.fileHistory = config.sessionDir ? new FileHistory(config.sessionDir) : null
@@ -304,6 +311,7 @@ export class ExecutionEngine {
     if (!shouldCompact) {
       const tbResult = maybeTimeBasedMicroCompact(messages, this.lastAssistantTs)
       if (tbResult.compacted) {
+        this.discardProviderContinuation(messages)
         this.eventLog?.append('context_compact', 'engine', {
           type: 'time_based_microcompact',
           tokens_before: tbResult.tokensBefore,
@@ -315,6 +323,7 @@ export class ExecutionEngine {
     if (shouldMicroCompact && !shouldCompact) {
       const mcResult = microCompact(messages)
       if (mcResult.compacted) {
+        this.discardProviderContinuation(messages)
         this.eventLog?.append('context_compact', 'engine', {
           type: 'microcompact',
           tokens_before: mcResult.tokensBefore,
@@ -343,6 +352,7 @@ export class ExecutionEngine {
       if (compactResult.compacted) {
         messages.length = 0
         messages.push(...compactResult.messages)
+        this.discardProviderContinuation(messages)
         this.renderer.compactDone(compactResult.originalTokens, compactResult.summaryTokens)
         this.eventLog?.append('context_compact', 'engine', {
           tokens_after: compactResult.summaryTokens,
@@ -376,7 +386,7 @@ export class ExecutionEngine {
         {
           model: this.config.model,
           messages: [
-            { role: 'system', content: systemPrompt },
+            { role: 'system', content: systemPrompt, source: 'runtime' } as OpenAI.Chat.ChatCompletionMessageParam,
             ...(messages as OpenAI.Chat.ChatCompletionMessageParam[]),
           ],
           tools: toolDefs.length ? toolDefs : undefined,
@@ -388,32 +398,34 @@ export class ExecutionEngine {
         },
         { signal: turnAbortSignal },
       )
-    let stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>
-    try {
-      stream = await createStream()
-    } catch (error) {
-      this.renderer.stopSpinner()
-      const message = error instanceof Error ? error.message : ''
-      if (message.includes('stream_options')) {
-        this._streamUsageSupported = false
-      } else if (isContextOverflowError(message)) {
-        this.renderer.warn('Context too long — auto-compacting and retrying...')
-        const compact = await maybeCompact(
-          this.client,
-          this.config.model,
-          messages,
-          turnAbortSignal,
-        )
-        if (!compact.compacted) throw error
-        messages.splice(0, messages.length, ...compact.messages)
-        this.renderer.compactDone(compact.originalTokens, compact.summaryTokens)
-      } else {
-        throw error
+    const openStream = async (): Promise<AsyncIterable<OpenAI.Chat.ChatCompletionChunk>> => {
+      try {
+        return await createStream()
+      } catch (error) {
+        this.renderer.stopSpinner()
+        const message = error instanceof Error ? error.message : ''
+        if (message.includes('stream_options')) {
+          this._streamUsageSupported = false
+        } else if (isContextOverflowError(message)) {
+          this.renderer.warn('Context too long — auto-compacting and retrying...')
+          const compact = await maybeCompact(
+            this.client,
+            this.config.model,
+            messages,
+            turnAbortSignal,
+          )
+          if (!compact.compacted) throw error
+          messages.splice(0, messages.length, ...compact.messages)
+          this.discardProviderContinuation(messages)
+          this.renderer.compactDone(compact.originalTokens, compact.summaryTokens)
+        } else {
+          throw error
+        }
+        return createStream()
       }
-      stream = await createStream()
     }
     const result = await consumeModelStream(
-      stream,
+      openStream,
       turnAbortSignal,
       this.renderer,
       this.currentTurnAbortController,
@@ -424,7 +436,6 @@ export class ExecutionEngine {
   private recordUsage(usage: TokenUsage | null, callStartMs: number): void {
     if (usage) {
       const durationMs = Date.now() - callStartMs
-      this.costTracker.addUsage(this.config.model, usage, durationMs)
       this.eventLog?.append('tool_call', 'llm_api', {
         input_tokens: usage.inputTokens,
         output_tokens: usage.outputTokens,
@@ -912,7 +923,7 @@ export class ExecutionEngine {
               toolDefs = this.getToolDefinitions(this.isPlanMode(), moduleTools)
               toolContext.availableToolNames = toolDefs.map((def) => def.function.name)
               await this.evaluateContextBudget(messages, toolDefs, turnAbortController.signal)
-              const { assistantText, finishReason, rawToolCalls } = await runOperation(
+              const { assistantText, finishReason, rawToolCalls, providerState } = await runOperation(
                 run,
                 'model:stream',
                 () => this.callLLM(systemPrompt, messages, toolDefs, turnAbortController.signal),
@@ -927,12 +938,14 @@ export class ExecutionEngine {
                 messages.flatMap((message) => message.tool_calls?.map((call) => call.id) ?? []),
               )
               for (const call of rawToolCalls) {
+                if (providerState && knownIds.has(call.id)) throw new Error('Native model reused an existing tool call identity')
                 if (knownIds.has(call.id)) call.id = `call_${randomUUID()}`
                 knownIds.add(call.id)
               }
               const assistantMsg: OpenAIMessage = {
                 role: 'assistant',
                 content: assistantText || null,
+                ...(providerState ? { providerState } : {}),
                 tool_calls:
                   rawToolCalls.length > 0
                     ? rawToolCalls.map((tc) => ({
@@ -942,6 +955,7 @@ export class ExecutionEngine {
                       }))
                     : undefined,
               }
+              if (providerState) this.discardProviderContinuation(messages)
               messages.push(assistantMsg)
               this.lastAssistantTs = Date.now()
               if (
@@ -1214,6 +1228,13 @@ export class ExecutionEngine {
       throw new Error('keepRecent must be a finite non-negative integer')
     this.pendingSnipCount = keepRecent
   }
+  private discardProviderContinuation(messages: OpenAIMessage[]): void {
+    for (const [index, message] of messages.entries()) {
+      if (message.providerState === undefined) continue
+      messages[index] = { ...message }
+      delete messages[index].providerState
+    }
+  }
   private applySnipToMessages(
     messages: OpenAIMessage[],
     keepRecent: number,
@@ -1239,6 +1260,7 @@ export class ExecutionEngine {
     }
     messages.length = 0
     messages.push(boundary, ...kept)
+    this.discardProviderContinuation(messages)
     const tokensAfter = estimateTokens(messages)
     this.eventLog?.append('context_compact', 'snip', {
       type: 'manual_snip',

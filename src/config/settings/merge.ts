@@ -1,5 +1,6 @@
 import type { HooksConfig, OvogoSettings } from './types.js'
 import type { ExecutionPolicyInput } from '../../core/executionPolicy.js'
+import { mergeModelSettings } from '../modelSettings.js'
 
 function mergeExecutionPolicy(base?: ExecutionPolicyInput, override?: ExecutionPolicyInput): ExecutionPolicyInput | undefined {
   if (!override) return base
@@ -16,6 +17,7 @@ function mergeHooks(global?: HooksConfig, project?: HooksConfig): HooksConfig {
 
 export function mergeSettingsLayers(global: OvogoSettings, project: OvogoSettings): OvogoSettings {
   return {
+    modelSettings: mergeModelSettings(global.modelSettings, project.modelSettings),
     executionPolicy: mergeExecutionPolicy(global.executionPolicy, project.executionPolicy),
     executionProfile: project.executionProfile ?? global.executionProfile,
     hooks: mergeHooks(global.hooks, project.hooks),
@@ -41,6 +43,7 @@ export function applySettingsPatch(current: OvogoSettings, patch: OvogoSettings)
   return {
     ...current,
     ...patch,
+    modelSettings: mergeModelSettings(current.modelSettings, patch.modelSettings),
     executionPolicy: mergeExecutionPolicy(current.executionPolicy, patch.executionPolicy),
     executionProfile: patch.executionProfile ?? current.executionProfile,
     hooks: patch.hooks ?? current.hooks,

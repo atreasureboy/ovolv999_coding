@@ -1,4 +1,4 @@
-import { currentExecutionPolicy, spawnManaged, type ExecutionProfile } from './executionBackend.js'
+import { currentExecutionPolicy, isManagedChild, spawnManaged, type ExecutionProfile } from './executionBackend.js'
 import { executionPolicyFromProfile, mergeChildEnvironment, resolveManagedExecutionPolicy, type ExecutionPolicyInput } from './executionPolicy.js'
 /**
  * McpStdioClient — minimal MCP (Model Context Protocol) stdio client.
@@ -14,6 +14,7 @@ import { executionPolicyFromProfile, mergeChildEnvironment, resolveManagedExecut
  */
 
 import { spawn, type ChildProcess } from 'child_process'
+import { settleWithin } from './outcome.js'
 
 export interface McpServerConfig {
   executionProfile?: ExecutionProfile
@@ -282,6 +283,14 @@ export class McpStdioClient {
     this.failAll(new Error('MCP client closed'))
     const proc = this.proc
     this.proc = null
+    if (proc && isManagedChild(proc)) {
+      this.closing = (async () => {
+        proc.kill('SIGKILL')
+        if (proc.managedProcess) await proc.managedProcess.stop('MCP client closed')
+        await settleWithin(proc.physicallySettled, 2500)
+      })()
+      return this.closing
+    }
     this.closing = !proc || proc.pid === undefined || proc.exitCode !== null || proc.signalCode !== null
       ? Promise.resolve()
       : new Promise<void>((resolve, reject) => {

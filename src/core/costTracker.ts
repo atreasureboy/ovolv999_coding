@@ -1,78 +1,7 @@
-/**
- * Cost Tracker — accumulate API token usage and compute USD cost
- *
- * Inspired by Claude Code's cost-tracker.ts + services/tokenEstimation.ts.
- *
- * What this adds over the legacy estimateTokens() in compact.ts:
- *   1. Captures REAL usage (prompt_tokens / completion_tokens) from the
- *      OpenAI streaming API's final chunk — no more char-based guessing
- *      for billing.
- *   2. Computes USD cost per model using a pricing table.
- *   3. Tracks per-model usage breakdown (input/output/cost/apiCalls).
- *   4. Formats a human-readable cost summary for end-of-turn display.
- *   5. File-type-aware token estimation (JSON is denser — 2 bytes/token
- *      vs the default 4).
- */
-
-// ── Model pricing (USD per 1M tokens) ───────────────────────────────────────
-// Sources: OpenAI / Anthropic / DeepSeek public pricing pages.
-// Prices change — treat as approximate. Unknown models → cost 0; the
-// unknown-model signal is tracked PER CostTracker instance (see
-// `CostTracker.hasUnknownModel()`) so multiple concurrent sessions cannot
-// pollute each other.
-
-export interface ModelPricing {
-  inputPer1M: number
-  outputPer1M: number
-}
-
-const MODEL_PRICING: Record<string, ModelPricing> = {
-  // OpenAI
-  'gpt-4o': { inputPer1M: 2.5, outputPer1M: 10 },
-  'gpt-4o-mini': { inputPer1M: 0.15, outputPer1M: 0.6 },
-  'gpt-4-turbo': { inputPer1M: 10, outputPer1M: 30 },
-  'gpt-4': { inputPer1M: 30, outputPer1M: 60 },
-  'gpt-3.5-turbo': { inputPer1M: 0.5, outputPer1M: 1.5 },
-  o1: { inputPer1M: 15, outputPer1M: 60 },
-  'o1-mini': { inputPer1M: 3, outputPer1M: 12 },
-  'o1-pro': { inputPer1M: 150, outputPer1M: 600 },
-  o3: { inputPer1M: 10, outputPer1M: 40 },
-  'o3-mini': { inputPer1M: 1.1, outputPer1M: 4.4 },
-  'o4-mini': { inputPer1M: 1.1, outputPer1M: 4.4 },
-  // Anthropic (Claude)
-  'claude-sonnet-4-6': { inputPer1M: 3, outputPer1M: 15 },
-  'claude-sonnet-4': { inputPer1M: 3, outputPer1M: 15 },
-  'claude-opus-4': { inputPer1M: 15, outputPer1M: 75 },
-  'claude-haiku-3-5': { inputPer1M: 0.8, outputPer1M: 4 },
-  'claude-3-5-sonnet': { inputPer1M: 3, outputPer1M: 15 },
-  'claude-3-5-haiku': { inputPer1M: 0.8, outputPer1M: 4 },
-  'claude-3-opus': { inputPer1M: 15, outputPer1M: 75 },
-  // DeepSeek
-  'deepseek-chat': { inputPer1M: 0.27, outputPer1M: 1.1 },
-  'deepseek-reasoner': { inputPer1M: 0.55, outputPer1M: 2.19 },
-  'deepseek-coder': { inputPer1M: 0.14, outputPer1M: 0.28 },
-}
-
-/**
- * Look up pricing for a model. Tries exact match, then longest-prefix match
- * (so "gpt-4o-2024-08-06" matches "gpt-4o", "claude-sonnet-4-6-20250514"
- * matches "claude-sonnet-4-6").
- */
-export function getModelPricing(model: string): ModelPricing | null {
-  // Exact match
-  if (Object.hasOwn(MODEL_PRICING, model)) return MODEL_PRICING[model]
-
-  // Prefix match — longest prefix wins (most specific)
-  let best: ModelPricing | null = null
-  let bestLen = 0
-  for (const [key, pricing] of Object.entries(MODEL_PRICING)) {
-    if (model.startsWith(key) && key.length > bestLen) {
-      best = pricing
-      bestLen = key.length
-    }
-  }
-  return best
-}
+import { getModelPricing, type ModelPricing } from './modelPricing.js'
+import type { UsageLedger, UsageSummary } from './usageLedger.js'
+export { getModelPricing } from './modelPricing.js'
+export type { ModelPricing } from './modelPricing.js'
 
 // ── Usage & cost types ──────────────────────────────────────────────────────
 
@@ -118,6 +47,14 @@ export function formatCost(cost: number, maxDecimalPlaces = 4): string {
   return `$${cost > 0.5 ? round(cost, 100).toFixed(2) : cost.toFixed(maxDecimalPlaces)}`
 }
 
+export function formatTrackedCost(tracker: Pick<CostTracker, 'getTotalCost'> & Partial<Pick<CostTracker, 'getUsageSummary' | 'hasUnknownModel'>>): string {
+  const total = tracker.getTotalCost()
+  const unknown = tracker.getUsageSummary?.()?.unknownPriceRequestCount ?? (tracker.hasUnknownModel?.() ? 1 : 0)
+  if (!unknown) return formatCost(total)
+  const label = `${unknown} request${unknown === 1 ? '' : 's'} cost unknown`
+  return total > 0 ? `${formatCost(total)} known; ${label}` : label
+}
+
 /** Format an integer with thousands separators. */
 export function formatNumber(n: number): string {
   return n.toLocaleString('en-US')
@@ -148,6 +85,12 @@ function round(n: number, precision: number): number {
  *   console.log(tracker.formatSummary())
  */
 export class CostTracker {
+  private readonly excludedRequests = new Set<string>()
+  constructor(private readonly ledger?: UsageLedger, private readonly ownerId?: string) {}
+
+  getUsageSummary(): UsageSummary | null {
+    return this.ledger?.summarizeUsage(undefined, undefined, this.ownerId, this.excludedRequests) ?? null
+  }
   private totalCostUSD = 0
   private totalInputTokens = 0
   private totalOutputTokens = 0
@@ -186,30 +129,49 @@ export class CostTracker {
   }
 
   getTotalCost(): number {
+    if (this.ledger) return this.getUsageSummary()!.knownCostUSD
     return this.totalCostUSD
   }
   getTotalInputTokens(): number {
+    if (this.ledger) return this.getUsageSummary()!.inputTokens
     return this.totalInputTokens
   }
   getTotalOutputTokens(): number {
+    if (this.ledger) return this.getUsageSummary()!.outputTokens
     return this.totalOutputTokens
   }
   getTotalAPICalls(): number {
+    if (this.ledger) return this.getUsageSummary()!.requestCount
     return this.totalAPICalls
   }
   getTotalAPIDurationMs(): number {
+    if (this.ledger) return this.ledger.records(undefined, undefined, this.ownerId).filter(record => !this.excludedRequests.has(record.requestId)).reduce((sum, record) => sum + (record.durationMs ?? 0), 0)
     return this.totalAPIDurationMs
   }
   /** Whether any unknown model was encountered (costs may be inaccurate) */
   hasUnknownModel(): boolean {
+    if (this.ledger) return this.getUsageSummary()!.unknownPriceRequestCount > 0
     return this._hasUnknownModel
   }
   getModelUsage(): ModelUsage[] {
+    if (this.ledger) {
+      const models = new Map<string, ModelUsage>()
+      for (const record of this.ledger.records(undefined, undefined, this.ownerId)) {
+        if (this.excludedRequests.has(record.requestId)) continue
+        const usage = models.get(record.model) ?? { model: record.model, inputTokens: 0, outputTokens: 0, costUSD: 0, apiCalls: 0 }
+        if (record.kind !== 'unknown') { usage.inputTokens += record.inputTokens ?? 0; usage.outputTokens += record.outputTokens ?? 0 }
+        usage.costUSD += record.costUSD ?? 0
+        usage.apiCalls++
+        models.set(record.model, usage)
+      }
+      return [...models.values()]
+    }
     return [...this.modelUsage.values()]
   }
 
   /** Reset all accumulated state (for tests / new sessions). */
   reset(): void {
+    if (this.ledger) for (const record of this.ledger.records(undefined, undefined, this.ownerId)) this.excludedRequests.add(record.requestId)
     this.totalCostUSD = 0
     this.totalInputTokens = 0
     this.totalOutputTokens = 0
@@ -224,6 +186,16 @@ export class CostTracker {
    * Modeled on Claude Code's formatTotalCost().
    */
   formatSummary(): string {
+    if (this.ledger) {
+      const summary = this.getUsageSummary()!
+      return [
+        `Known cost:           ${formatCost(summary.knownCostUSD)}${summary.unknownPriceRequestCount ? `; ${summary.unknownPriceRequestCount} request${summary.unknownPriceRequestCount === 1 ? '' : 's'} with unknown cost` : ''}`,
+        `Total tokens:         ${formatNumber(summary.inputTokens)} input, ${formatNumber(summary.outputTokens)} output`,
+        `Cache tokens:         ${formatNumber(summary.cachedInputTokens)} read, ${formatNumber(summary.cacheWriteTokens)} written`,
+        `Reasoning tokens:     ${formatNumber(summary.reasoningTokens)} (included in output)`,
+        `Total API calls:      ${summary.requestCount} (${summary.actualRequestCount} actual, ${summary.estimatedRequestCount} estimated, ${summary.unknownRequestCount} unknown)`,
+      ].join('\n')
+    }
     const costDisplay =
       formatCost(this.totalCostUSD) +
       (this._hasUnknownModel ? ' (costs may be inaccurate — unknown model pricing)' : '')

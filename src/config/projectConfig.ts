@@ -20,8 +20,10 @@ import { readFileSync, existsSync } from 'fs'
 import { join, dirname, resolve } from 'path'
 import type { ExecutionProfile } from '../core/executionBackend.js'
 import { ExecutionPolicyError, normalizeExecutionPolicyInput, normalizeExecutionProfile, type ExecutionPolicyInput } from '../core/executionPolicy.js'
+import { normalizeModelSettings, type ModelSettings } from './modelSettings.js'
 
 export interface ProjectConfig {
+  modelSettings?: Record<string, ModelSettings>
   executionPolicy?: ExecutionPolicyInput
   executionProfile?: ExecutionProfile
   model?: string
@@ -40,6 +42,7 @@ function normalizeProjectConfig(value: unknown): ProjectConfig | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   const raw = value as Record<string, unknown>
   const config: ProjectConfig = {}
+  if (raw.modelSettings !== undefined) config.modelSettings = normalizeModelSettings(raw.modelSettings)
   if (raw.executionPolicy !== undefined) config.executionPolicy = normalizeExecutionPolicyInput(raw.executionPolicy)
   if (raw.executionProfile !== undefined) config.executionProfile = normalizeExecutionProfile(raw.executionProfile)
   for (const name of ['model', 'systemPrompt'] as const) if (typeof raw[name] === 'string') config[name] = raw[name]

@@ -17,6 +17,7 @@ export interface StatusBarProps {
   maxTokens?: number // context window size
   cost: number
   apiCalls: number
+  unknownPriceRequests?: number
   planMode: boolean
   verbose?: boolean
   gitBranch?: string | null
@@ -37,7 +38,7 @@ function formatTokens(n: number): string {
   return `${n}`
 }
 
-export function StatusBar({ model, messageCount, contextPct, tokenCount, maxTokens, cost, apiCalls, planMode, verbose, gitBranch }: StatusBarProps): React.ReactElement {
+export function StatusBar({ model, messageCount, contextPct, tokenCount, maxTokens, cost, apiCalls, unknownPriceRequests = 0, planMode, verbose, gitBranch }: StatusBarProps): React.ReactElement {
   const pct = Math.round(contextPct * 100)
   const { bar, color } = contextBar(contextPct)
   const costStr = cost < 0.01 ? cost.toFixed(4) : cost < 1 ? cost.toFixed(3) : cost.toFixed(2)
@@ -60,7 +61,7 @@ export function StatusBar({ model, messageCount, contextPct, tokenCount, maxToke
           <Text dimColor>{formatTokens(tokenCount)}/{formatTokens(maxTokens)}</Text>
         ) : null}
         {apiCalls > 0 ? (
-          <Text dimColor>${costStr} · {apiCalls} API</Text>
+          <Text dimColor>{unknownPriceRequests ? cost > 0 ? `$${costStr} + cost unknown` : 'cost unknown' : `$${costStr}`} · {apiCalls} API</Text>
         ) : null}
       </Box>
     </Box>

@@ -14,7 +14,7 @@ function directory(): string {
   const root = mkdtempSync(join(tmpdir(), 'ovo-runtime-process-')); dirs.push(root)
   mkdirSync(join(root, 'runtime'))
   writeFileSync(join(root, 'runtime/package.json'), '{"type":"module"}')
-  for (const name of ['runContext', 'runStore', 'workspaceLease', 'runtimeState', 'persistenceLock', 'processIdentity', 'processTree', 'fileState', 'executionBackend', 'executionPolicy']) {
+  for (const name of ['runContext', 'runStore', 'workspaceLease', 'runtimeState', 'persistenceLock', 'processIdentity', 'processTree', 'fileState', 'executionBackend', 'executionPolicy', 'managedProcess', 'managedChildProcess', 'outcome']) {
     writeFileSync(join(root, 'runtime', name + '.js'), transpileModule(readFileSync(new URL(`../src/core/${name}.ts`, import.meta.url), 'utf8'), { compilerOptions: { module: ModuleKind.ESNext, target: 9 } }).outputText)
   }
   return root

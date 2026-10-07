@@ -23,7 +23,7 @@ import { type ChildProcess } from 'child_process'
 import { randomUUID } from 'crypto'
 import { writeFileSync, mkdirSync, appendFileSync, renameSync } from 'fs'
 import { join } from 'path'
-import { registerPhysicalResource, spawnManaged, type ExecutionProfile } from './executionBackend.js'
+import { isManagedChild, registerPhysicalResource, spawnManaged, type ExecutionProfile } from './executionBackend.js'
 import type { ExecutionPolicy } from './executionPolicy.js'
 import { inspectProcessIdentity, type ProcessIdentity } from './processIdentity.js'
 import { captureOwnedProcessTreeFromPid, mergeOwnedProcessTrees, OwnedProcessTreeCaptureError, stopOwnedProcessTree, type OwnedProcessTree } from './processTree.js'
@@ -53,7 +53,7 @@ export interface TaskInfo {
   durationMs: number | null
   outputLength: number
   metadata: Record<string, unknown>
-  processAccounting?: 'observed-only'
+  processAccounting?: 'contained' | 'observed-only'
 }
 
 /** Task detail — includes accumulated output. */
@@ -130,6 +130,14 @@ function stopInternal(task: InternalTask, graceMs: number): boolean {
   task.info.status = 'stopping'
   task.stopPromise = (async () => {
     try {
+      if (isManagedChild(proc)) {
+        proc.kill('SIGKILL')
+        if (proc.managedProcess) await proc.managedProcess.stop('background task stop')
+        await proc.physicallySettled
+        recordTaskCompletion(task.info, 'stopped', proc.exitCode)
+        task.onSettled()
+        return
+      }
       await task.tracking
       const identity = await task.identity
       if (!identity) {
@@ -401,9 +409,18 @@ export class BackgroundTaskManager {
 
     task.process = proc
     info.pid = proc.pid ?? null
+    if (isManagedChild(proc)) {
+      proc.once('spawn', () => {
+        info.pid = proc.pid ?? null
+        info.processAccounting = proc.accounting
+        task.identity = Promise.resolve(proc.managedProcess?.identity ?? null)
+      })
+      void proc.physicallySettled.then(onSettled)
+    }
     let rootClosed = false
     let trackingTimer: NodeJS.Timeout | undefined
     const trackTree = (): void => {
+      if (isManagedChild(proc)) return
       task.tracking = (async () => {
         if (!proc.pid) return
         const current = await captureOwnedProcessTreeFromPid(proc.pid)
@@ -424,7 +441,7 @@ export class BackgroundTaskManager {
       })
     }
     trackTree()
-    task.identity = task.tracking!.then(() => task.tree?.root ?? null)
+    if (!isManagedChild(proc)) task.identity = task.tracking!.then(() => task.tree?.root ?? null)
 
     const stdoutDecoder = new StringDecoder('utf8')
     const stderrDecoder = new StringDecoder('utf8')
@@ -470,11 +487,24 @@ export class BackgroundTaskManager {
       task.process = null
       if (task.stopped) return
       if (info.status !== 'running') return
+      if (isManagedChild(proc)) {
+        if (proc.physicalFailure) {
+          info.status = 'stop_failed'
+          info.metadata.stopError = proc.physicalFailure.message
+        } else recordTaskCompletion(info, code === 0 ? 'completed' : 'failed', code)
+        return
+      }
       task.stopPromise = settleClosedTask(task, code)
     })
 
     proc.on('error', (err: Error & { code?: string }) => {
-      if (proc.pid === undefined) onSettled()
+      if (!isManagedChild(proc) && proc.pid === undefined) onSettled()
+      if (isManagedChild(proc)) {
+        appendOutput(`\n[Process error: ${err.message}]\n`)
+        info.status = proc.physicalState === 'settled' ? 'failed' : 'stop_failed'
+        info.metadata.stopError = err.message
+        return
+      }
       // Same reasoning as 'close': process is gone (or never came up).
       // Always clean up the timer + handle first.
       removeSignalListener()
@@ -516,6 +546,7 @@ export class BackgroundTaskManager {
   /** List all tasks (newest first). */
   listTasks(): TaskInfo[] {
     return Array.from(this.tasks.values())
+      .reverse()
       .map((t) => ({ ...t.info }))
       .sort((a, b) => b.startTime - a.startTime)
   }
@@ -644,6 +675,8 @@ export function formatTaskDetail(detail: TaskDetail): string {
   ]
   if (detail.processAccounting === 'observed-only') {
     lines.push('Process accounting: observed only. Completion covers observed processes; termination of unobserved detached descendants is not confirmed.')
+  } else if (detail.processAccounting === 'contained') {
+    lines.push('Process accounting: contained. Completion waits for owned descendants to stop.')
   }
   if (detail.endTime) {
     lines.push(`Ended: ${new Date(detail.endTime).toISOString()}`)

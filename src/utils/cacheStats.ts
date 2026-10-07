@@ -8,6 +8,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
+import type { UsageLedger } from '../core/usageLedger.js'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -23,6 +24,8 @@ export interface CacheEntry {
 }
 
 export interface CacheStats {
+  unknownCacheRequests?: number
+  costSavingsKnown?: boolean
   totalRequests: number
   cacheHits: number
   cacheMisses: number
@@ -32,6 +35,33 @@ export interface CacheStats {
   totalCostSaved: number
   byModel: Record<string, ModelCacheStats>
   recentEntries: CacheEntry[]
+}
+
+const ledgerResets = new WeakMap<UsageLedger, Set<string>>()
+
+export function resetLedgerCacheStats(ledger: UsageLedger): void {
+  ledgerResets.set(ledger, new Set(ledger.records().map(record => record.requestId)))
+}
+
+export function getLedgerCacheStats(ledger: UsageLedger): CacheStats {
+  const stats: CacheStats = { totalRequests: 0, cacheHits: 0, cacheMisses: 0, unknownCacheRequests: 0, hitRate: 0, totalCacheReadTokens: 0, totalCacheWriteTokens: 0, totalCostSaved: 0, costSavingsKnown: false, byModel: Object.create(null) as Record<string, ModelCacheStats>, recentEntries: [] }
+  for (const record of ledger.records()) {
+    if (ledgerResets.get(ledger)?.has(record.requestId)) continue
+    stats.totalRequests++
+    const model = stats.byModel[record.model] ?? { requests: 0, hits: 0, misses: 0, hitRate: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costSaved: 0 }
+    model.requests++
+    if (record.kind !== 'actual' || record.cachedInputTokens === undefined) stats.unknownCacheRequests!++
+    else {
+      if (record.cachedInputTokens > 0) { stats.cacheHits++; model.hits++ } else { stats.cacheMisses++; model.misses++ }
+      stats.totalCacheReadTokens += record.cachedInputTokens
+      model.cacheReadTokens += record.cachedInputTokens
+    }
+    if (record.kind === 'actual') { stats.totalCacheWriteTokens += record.cacheWriteTokens ?? 0; model.cacheWriteTokens += record.cacheWriteTokens ?? 0 }
+    model.hitRate = model.hits + model.misses ? model.hits / (model.hits + model.misses) : 0
+    stats.byModel[record.model] = model
+  }
+  stats.hitRate = stats.cacheHits + stats.cacheMisses ? stats.cacheHits / (stats.cacheHits + stats.cacheMisses) : 0
+  return stats
 }
 
 export interface ModelCacheStats {
@@ -234,11 +264,11 @@ export function estimateCostSavings(
 export function formatCacheStats(stats: CacheStats): string {
   const lines: string[] = [
     'Cache Stats:',
-    `  Requests: ${stats.totalRequests} (${stats.cacheHits} hits, ${stats.cacheMisses} misses)`,
+    `  Requests: ${stats.totalRequests} (${stats.cacheHits} hits, ${stats.cacheMisses} misses${stats.unknownCacheRequests ? `, ${stats.unknownCacheRequests} unknown` : ''})`,
     `  Hit rate: ${(stats.hitRate * 100).toFixed(1)}%`,
     `  Cache read: ${stats.totalCacheReadTokens.toLocaleString()} tokens`,
     `  Cache write: ${stats.totalCacheWriteTokens.toLocaleString()} tokens`,
-    `  Cost saved: $${stats.totalCostSaved.toFixed(4)}`,
+    `  Cost saved: ${stats.costSavingsKnown === false ? 'unknown' : `$${stats.totalCostSaved.toFixed(4)}`}`,
   ]
 
   const modelNames = Object.keys(stats.byModel)

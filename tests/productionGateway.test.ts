@@ -1,8 +1,9 @@
-import { afterEach, expect, it } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
 import { createServer, type Server, type ServerResponse } from 'node:http'
 import OpenAI from 'openai'
 import { createModelGateway } from '../src/core/modelGateway.js'
 import type { EngineConfig } from '../src/core/types.js'
+import { UsageLedger } from '../src/core/usageLedger.js'
 
 const servers: Server[] = []
 afterEach(async () => {
@@ -17,7 +18,7 @@ function response(res: ServerResponse, text = 'done'): void {
   res.end(JSON.stringify({ id: 'local-response', object: 'chat.completion', created: 1, model: 'local-test', choices: [{ index: 0, message: { role: 'assistant', content: text }, finish_reason: 'stop' }], usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 } }))
 }
 
-async function setup(handler: (res: ServerResponse, body: Record<string, unknown>, attempt: number) => void, policy: Record<string, number> = {}) {
+async function setup(handler: (res: ServerResponse, body: Record<string, unknown>, attempt: number) => void, policy: Record<string, number> = {}, usageLedger?: UsageLedger) {
   let requests = 0
   const server = createServer((req, res) => {
     let body = ''
@@ -31,6 +32,7 @@ async function setup(handler: (res: ServerResponse, body: Record<string, unknown
   const config: EngineConfig = {
     model: 'local-test', apiKey: 'local-fixture-only', baseURL: `http://127.0.0.1:${address.port}/v1`, cwd: process.cwd(), maxIterations: 1, permissionMode: 'deny',
     modelGateway: { baseDelayMs: 5, maxDelayMs: 10, deadlineMs: 1000, ...policy },
+    usageLedger,
   }
   const events: Record<string, unknown>[] = []
   config.eventLog = { append: (_kind: string, _tool: string, data: Record<string, unknown>) => { events.push(data) } } as unknown as EngineConfig['eventLog']
@@ -203,4 +205,43 @@ it('shares provider concurrency between independent gateway clients', async () =
 
 it('validates policy bounds before starting a provider request', async () => {
   await expect(setup(res => response(res), { maxAttempts: 0 })).rejects.toThrow(/positive/)
+})
+
+it('records unknown admission before transport and refuses a request when durable admission fails', async () => {
+  const ledger = new UsageLedger()
+  const admitted = vi.spyOn(ledger, 'beginUsage').mockImplementation(() => { throw new Error('Usage storage is unavailable') })
+  const test = await setup(res => response(res), {}, ledger)
+  await expect(test.client.chat.completions.create(params)).rejects.toThrow(/usage storage/i)
+  expect(admitted).toHaveBeenCalledOnce()
+  expect(test.requests()).toBe(0)
+})
+
+it('records an unfinished real request and finalizes it exactly once', async () => {
+  const ledger = new UsageLedger()
+  let pending: ServerResponse | undefined
+  const test = await setup(res => { pending = res }, {}, ledger)
+  const request = test.client.chat.completions.create(params)
+  await until(() => pending !== undefined)
+  expect(ledger.summarizeUsage()).toMatchObject({ requestCount: 1, unknownRequestCount: 1 })
+  response(pending!)
+  await request
+  expect(ledger.summarizeUsage()).toMatchObject({ requestCount: 1, actualRequestCount: 1, unknownRequestCount: 0 })
+})
+
+it('keeps failed usage persistence unknown without leaking admission or throwing from an abort listener', async () => {
+  const ledger = new UsageLedger()
+  const write = vi.spyOn(ledger, 'recordUsage').mockImplementation(() => { throw new Error('Synthetic storage failure') })
+  const test = await setup((res, body) => {
+    if (body.stream) {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+      res.write('data: {"id":"fixture","choices":[{"index":0,"delta":{"content":"pending"}}]}\n\n')
+    } else response(res)
+  }, { maxConcurrency: 1, deadlineMs: 60 }, ledger)
+  await test.client.chat.completions.create({ ...params, stream: true })
+  await new Promise(resolve => setTimeout(resolve, 100))
+  expect(ledger.summarizeUsage()).toMatchObject({ requestCount: 1, unknownRequestCount: 1 })
+  write.mockRestore()
+  await expect(test.client.chat.completions.create(params)).resolves.toBeDefined()
+  expect(test.requests()).toBe(2)
+  expect(ledger.summarizeUsage()).toMatchObject({ requestCount: 2, unknownRequestCount: 1, actualRequestCount: 1 })
 })

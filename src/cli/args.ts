@@ -3,6 +3,7 @@ import { normalizeCwd } from './paths.js'
 export interface Args {
   task?: string
   model: string
+  modelExplicit?: boolean
   maxIter: number
   cwd: string
   help: boolean
@@ -35,6 +36,7 @@ export function parseArgs(argv: string[]): Args {
   const args = argv.slice(2)
   let task: string | undefined
   let model = resolveApiEnvironment().model
+  let modelExplicit = false
   let maxIter = parseInt(process.env.OVOGO_MAX_ITER ?? '200', 10)
   if (isNaN(maxIter) || maxIter <= 0) maxIter = 200
   let cwd = normalizeCwd(process.env.OVOGO_CWD ?? process.cwd())
@@ -64,6 +66,7 @@ export function parseArgs(argv: string[]): Args {
       case '--model':
       case '-m':
         model = requireValue(arg, args[++i])
+        modelExplicit = true
         break
       case '--max-iter':
         maxIter = positiveInteger(arg, args[++i])
@@ -109,6 +112,7 @@ export function parseArgs(argv: string[]): Args {
   return {
     task,
     model,
+    modelExplicit,
     maxIter,
     cwd,
     help,

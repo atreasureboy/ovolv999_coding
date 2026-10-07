@@ -3,6 +3,9 @@ import type { EffortLevel } from './effort.js'
 import type { ExecutionProfile } from './executionBackend.js'
 import type { ExecutionPolicy } from './executionPolicy.js'
 import type { ApprovalBroker } from './approvalBroker.js'
+import type { ModelProtocol } from './model/types.js'
+import type { ModelSettings } from '../config/modelSettings.js'
+import type { UsageLedger } from './usageLedger.js'
 // Core types for ovolv999 execution engine
 
 import type { EventLog } from './eventLog.js'
@@ -68,6 +71,7 @@ export interface ContentPart {
 }
 
 export interface OpenAIMessage {
+  providerState?: unknown
   role: 'system' | 'user' | 'assistant' | 'tool'
   content: string | null | ContentPart[]
   tool_calls?: ToolCall[]
@@ -276,6 +280,10 @@ export interface IHookRunner {
 }
 
 export interface EngineConfig {
+  modelProtocol?: ModelProtocol
+  modelSettings?: Record<string, ModelSettings>
+  usageLedger?: UsageLedger
+  usageOwnerId?: string
   effort?: EffortLevel
   modelGateway?: Partial<ModelGatewayPolicy>
   executionProfile?: ExecutionProfile

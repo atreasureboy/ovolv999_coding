@@ -46,9 +46,20 @@ function tool(name: string, execute: Tool['execute'], safe = false): Tool {
 }
 
 describe('engine behavioral contract', () => {
-  it('settles duplicate provider call IDs with unique matching protocol results', async () => {
+  it('rejects duplicate provider call IDs before executing any tool', async () => {
     const execute = vi.fn(() => Promise.resolve({ content: 'read', isError: false }))
     const { engine } = setup([{ calls: [{ name: 'Inspect', id: 'duplicate' }, { name: 'Inspect', id: 'duplicate' }] }], { extraTools: [tool('Inspect', execute, true)] })
+    const { newHistory, result } = await engine.runTurn('inspect twice', [])
+    const calls = newHistory.flatMap(message => message.tool_calls ?? [])
+    const results = newHistory.filter(message => message.role === 'tool')
+    expect(execute).not.toHaveBeenCalled()
+    expect(result.status).toBe('failed')
+    expect(calls).toEqual([])
+    expect(results).toEqual([])
+  })
+  it('settles distinct provider call IDs with matching protocol results', async () => {
+    const execute = vi.fn(() => Promise.resolve({ content: 'read', isError: false }))
+    const { engine } = setup([{ calls: [{ name: 'Inspect', id: 'left' }, { name: 'Inspect', id: 'right' }] }], { extraTools: [tool('Inspect', execute, true)] })
     const { newHistory } = await engine.runTurn('inspect twice', [])
     const calls = newHistory.flatMap(message => message.tool_calls ?? [])
     const results = newHistory.filter(message => message.role === 'tool')

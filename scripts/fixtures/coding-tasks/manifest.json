@@ -1,0 +1,215 @@
+{
+  "schemaVersion": 1,
+  "tasks": [
+    {
+      "id": "sum-empty",
+      "category": "bug",
+      "baseCommit": "d1d2f16dcf03380c23bad5754da3fe94f7472f12",
+      "prompt": "Fix sum so an empty list returns zero and ordinary sums remain correct. Change only src/math.mjs. Read the source, make a targeted edit, and run the public test.",
+      "acceptance": "checks.mjs",
+      "allowedPaths": [
+        "src/math.mjs"
+      ],
+      "budget": {
+        "maxRequests": 32,
+        "maxIterations": 48,
+        "maxDurationMs": 30000,
+        "maxOutputBytes": 1048576
+      },
+      "expectedOutcome": "completed"
+    },
+    {
+      "id": "clamp-boundary",
+      "category": "bug",
+      "baseCommit": "9a08a7326e47ea2930a15320fa0b6610e3f3dbbc",
+      "prompt": "Correct clamp for values below, inside, and above the inclusive bounds, including zero and equal bounds. Change only src/clamp.mjs and run the public test.",
+      "acceptance": "checks.mjs",
+      "allowedPaths": [
+        "src/clamp.mjs"
+      ],
+      "budget": {
+        "maxRequests": 32,
+        "maxIterations": 48,
+        "maxDurationMs": 30000,
+        "maxOutputBytes": 1048576
+      },
+      "expectedOutcome": "completed"
+    },
+    {
+      "id": "path-boundary",
+      "category": "bug",
+      "baseCommit": "afb320cf31af44cca4c21c7f8a71d7778dcd03fd",
+      "prompt": "Fix belongs so api and api/item belong to api but api2/item does not. Preserve nested names and do not edit tests. Read, edit, and test src/path.mjs.",
+      "acceptance": "checks.mjs",
+      "allowedPaths": [
+        "src/path.mjs"
+      ],
+      "budget": {
+        "maxRequests": 32,
+        "maxIterations": 48,
+        "maxDurationMs": 30000,
+        "maxOutputBytes": 1048576
+      },
+      "expectedOutcome": "completed"
+    },
+    {
+      "id": "unicode-count",
+      "category": "bug",
+      "baseCommit": "e50913ef82e59476b67a5e29c55c6c49409b1b96",
+      "prompt": "Count Unicode code points rather than UTF-16 code units, including CJK and emoji. Do not claim grapheme-cluster handling. Change only src/label.mjs and run tests.",
+      "acceptance": "checks.mjs",
+      "allowedPaths": [
+        "src/label.mjs"
+      ],
+      "budget": {
+        "maxRequests": 32,
+        "maxIterations": 48,
+        "maxDurationMs": 30000,
+        "maxOutputBytes": 1048576
+      },
+      "expectedOutcome": "completed"
+    },
+    {
+      "id": "rename-money",
+      "category": "refactor",
+      "baseCommit": "ad164993b1e117541243906593b2d67dcdf4ded9",
+      "prompt": "Rename the price export to formatPrice and migrate its invoice caller. Keep invoice output identical; remove the old price export. Change only src/money.mjs and src/invoice.mjs; read both before editing and test.",
+      "acceptance": "checks.mjs",
+      "allowedPaths": [
+        "src/money.mjs",
+        "src/invoice.mjs"
+      ],
+      "budget": {
+        "maxRequests": 32,
+        "maxIterations": 48,
+        "maxDurationMs": 30000,
+        "maxOutputBytes": 1048576
+      },
+      "expectedOutcome": "completed"
+    },
+    {
+      "id": "shared-normalizer",
+      "category": "refactor",
+      "baseCommit": "de17d7caf83e29719013b90dd8961f40db8a57b7",
+      "prompt": "Extract the duplicated trim/lowercase rule to normalizeName in src/normalize.mjs and use it from customer and order. Preserve their public return values. Only modify those three source files and run tests.",
+      "acceptance": "checks.mjs",
+      "allowedPaths": [
+        "src/normalize.mjs",
+        "src/customer.mjs",
+        "src/order.mjs"
+      ],
+      "budget": {
+        "maxRequests": 32,
+        "maxIterations": 48,
+        "maxDurationMs": 30000,
+        "maxOutputBytes": 1048576
+      },
+      "expectedOutcome": "completed"
+    },
+    {
+      "id": "split-parser",
+      "category": "refactor",
+      "baseCommit": "04da931e82015a55e6c220ead364543d31113072",
+      "prompt": "Move parseRow into src/parser.mjs, keep parseRow re-exported from csv.mjs for compatibility, and migrate render.mjs to import the parser directly. Preserve empty fields. Read, refactor only these files, and test.",
+      "acceptance": "checks.mjs",
+      "allowedPaths": [
+        "src/csv.mjs",
+        "src/parser.mjs",
+        "src/render.mjs"
+      ],
+      "budget": {
+        "maxRequests": 32,
+        "maxIterations": 48,
+        "maxDurationMs": 30000,
+        "maxOutputBytes": 1048576
+      },
+      "expectedOutcome": "completed"
+    },
+    {
+      "id": "builtin-dependency",
+      "category": "build",
+      "baseCommit": "5d7038f7ea9cd3a1ed05b69b22c60fd3cb37e17e",
+      "prompt": "Repair the invalid builtin dependency import in src/check.mjs, preserve the check function, and demonstrate that importing and running it works. No package installation or network calls.",
+      "acceptance": "checks.mjs",
+      "allowedPaths": [
+        "src/check.mjs"
+      ],
+      "budget": {
+        "maxRequests": 32,
+        "maxIterations": 48,
+        "maxDurationMs": 30000,
+        "maxOutputBytes": 1048576
+      },
+      "expectedOutcome": "completed"
+    },
+    {
+      "id": "build-entry",
+      "category": "build",
+      "baseCommit": "1f4634981b73158ef186f1a6965acc824b4649aa",
+      "prompt": "Fix the build entry path in scripts/build.mjs so a real build copies src/entry.mjs into dist/entry.mjs. Do not change package.json or tests. Read and edit the build script, run the public test and build.",
+      "acceptance": "checks.mjs",
+      "allowedPaths": [
+        "scripts/build.mjs",
+        "dist/entry.mjs"
+      ],
+      "budget": {
+        "maxRequests": 32,
+        "maxIterations": 48,
+        "maxDurationMs": 30000,
+        "maxOutputBytes": 1048576
+      },
+      "expectedOutcome": "completed"
+    },
+    {
+      "id": "image-text",
+      "category": "multimodal",
+      "baseCommit": "e3e577268a8854cf4db026d4b231798e4d6d082a",
+      "prompt": "Use the attached two-pixel PNG as the red-left/blue-right layout reference. Correction: keep the accessible label Status and do not modify authentication. Update only src/theme.mjs, then test. This fixture checks image transport and text constraints, not learned visual understanding.",
+      "acceptance": "checks.mjs",
+      "allowedPaths": [
+        "src/theme.mjs"
+      ],
+      "budget": {
+        "maxRequests": 32,
+        "maxIterations": 48,
+        "maxDurationMs": 30000,
+        "maxOutputBytes": 1048576
+      },
+      "expectedOutcome": "completed"
+    },
+    {
+      "id": "cancel-resume",
+      "category": "cancellation",
+      "baseCommit": "2b6c454d49610b522ea84e9a9371eb3ed318e5c8",
+      "prompt": "Change value() from before to after in src/value.mjs, using Read/Edit/test. A controlled cancellation will occur after the first read; preserve and resume its saved history before finishing.",
+      "acceptance": "checks.mjs",
+      "allowedPaths": [
+        "src/value.mjs"
+      ],
+      "budget": {
+        "maxRequests": 32,
+        "maxIterations": 48,
+        "maxDurationMs": 30000,
+        "maxOutputBytes": 1048576
+      },
+      "expectedOutcome": "cancelled"
+    },
+    {
+      "id": "external-conflict",
+      "category": "conflict",
+      "baseCommit": "2b6c454d49610b522ea84e9a9371eb3ed318e5c8",
+      "prompt": "Attempt a Read/Edit/test update of value() in src/value.mjs. If another writer changes the file after your read, stop and preserve that external content; do not reread and overwrite it.",
+      "acceptance": "checks.mjs",
+      "allowedPaths": [
+        "src/value.mjs"
+      ],
+      "budget": {
+        "maxRequests": 32,
+        "maxIterations": 48,
+        "maxDurationMs": 30000,
+        "maxOutputBytes": 1048576
+      },
+      "expectedOutcome": "failed"
+    }
+  ]
+}

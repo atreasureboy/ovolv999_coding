@@ -4,14 +4,17 @@ import type { TokenUsage } from '../costTracker.js'
 import { ThinkingTagFilter } from '../thinkingTagFilter.js'
 import type { EngineObserver } from './observer.js'
 import type { StreamingToolCall } from './toolPolicy.js'
+import type { ProviderContinuationState } from '../model/types.js'
+import type { GatewayChunk } from '../modelRuntime.js'
 export interface ModelResponse {
   assistantText: string
   finishReason: string | null
   rawToolCalls: StreamingToolCall[]
   usage: TokenUsage | null
+  providerState?: ProviderContinuationState
 }
 export async function consumeModelStream(
-  stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
+  stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk> | (() => Promise<AsyncIterable<OpenAI.Chat.ChatCompletionChunk>>),
   turnAbortSignal: AbortSignal,
   renderer: EngineObserver,
   controller: AbortController | null,
@@ -19,6 +22,7 @@ export async function consumeModelStream(
   let assistantText = ''
   let finishReason: string | null = null
   let usage: TokenUsage | null = null
+  let providerState: ProviderContinuationState | undefined
   const toolCallsMap = new Map<number, StreamingToolCall>()
   const thinkingTagFilter = new ThinkingTagFilter()
   let firstToken = true
@@ -45,9 +49,11 @@ export async function consumeModelStream(
   const stopWatchdog = (): void => clearInterval(watchdog)
   turnAbortSignal.addEventListener('abort', stopWatchdog, { once: true })
   try {
-    for await (const chunk of stream) {
+    const opened = typeof stream === 'function' ? await stream() : stream
+    for await (const chunk of opened) {
       if (turnAbortSignal.aborted) break
       lastChunkTime = Date.now()
+      providerState = (chunk as GatewayChunk).providerState ?? providerState
       if (chunk.usage) {
         usage = {
           inputTokens: chunk.usage.prompt_tokens,
@@ -111,5 +117,5 @@ export async function consumeModelStream(
       }
       return tc
     })
-  return { assistantText, finishReason, rawToolCalls, usage }
+  return { assistantText, finishReason, rawToolCalls, usage, ...(providerState ? { providerState } : {}) }
 }

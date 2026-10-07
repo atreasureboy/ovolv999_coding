@@ -45,7 +45,7 @@
 
 不按行数机械拆文件。Engine 保留协调作用，模型请求、审批、扩展注册、会话交互分别有一个责任明确的服务。双 hooks/plugins/指令 loader 通过适配现有公开调用收敛，旧配置迁移保留备份。
 
-公共类型约定：`OpenAIMessage` 和 `ToolDefinition` 初期沿用当前类型作为兼容输入，provider 原生 reasoning/state 另存不丢失；`EffortLevel` 沿用现有五档；`OutcomeStatus` 沿用当前结果集合。`JsonSchema = Record<string, unknown>`，必须由边界验证，不能仅靠类型断言。下述新接口是设计契约，尚未实现。
+公共类型约定：`OpenAIMessage` 和 `ToolDefinition` 初期沿用当前类型作为兼容输入，provider 原生 reasoning/state 另存不丢失；`EffortLevel` 沿用现有五档；`OutcomeStatus` 沿用当前结果集合。`JsonSchema = Record<string, unknown>`，必须由边界验证，不能仅靠类型断言。下述接口是原始设计契约，实际交付及未验收范围见 [整改进度](../../agent-core-progress.md)。T03 的 Windows 实施采用本机 .NET Framework C# 编译器与 Win32 调用，文件位于 `native/execution-host/{build.mjs,src/ExecutionHost.cs}`；后续 Windows 原型沿用此宿主，避免要求尚不可用的 Rust/MSVC 工具链。
 
 ---
 

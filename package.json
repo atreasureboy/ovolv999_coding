@@ -17,6 +17,8 @@
     "README.md",
     "LICENSE",
     "dist/build-info.json",
+    "dist/native/execution-host/bin/execution-host.exe",
+    "dist/native/execution-host/bin/manifest.json",
     "CHANGELOG.md",
     "docs/release-support.md"
   ],
@@ -39,6 +41,7 @@
     "typecheck": "tsc --noEmit",
     "release:gate": "node scripts/release-gate.mjs",
     "test:package": "node scripts/package-smoke.mjs",
+    "eval:offline": "node scripts/agent-eval.mjs --offline",
     "soak:short": "node scripts/soak.mjs --profile short",
     "soak:long": "node scripts/soak.mjs --profile long"
   },

@@ -103,7 +103,6 @@ async function main(): Promise<void> {
     bg,
   } = args
   const cwd = resolve(rawCwd)
-  const apiEnvironment = resolveApiEnvironment()
   const skills = loadSkills(cwd)
   if (version) {
     process.stdout.write(`${buildVersion(import.meta.url)}\n`)
@@ -113,12 +112,22 @@ async function main(): Promise<void> {
     printHelp(skills)
     process.exit(0)
   }
+  if (pipe && help) {
+    const { getPipeHelp } = await import('../src/integrations/pipeMode.js')
+    process.stdout.write(getPipeHelp() + '\n')
+    process.exit(0)
+  }
+  const settings = loadSettings(cwd)
+  const projectConfig = loadProjectConfig(cwd)
+  const executionSettings = mergeSettingsLayers(settings, {
+    executionPolicy: projectConfig?.executionPolicy,
+    executionProfile: projectConfig?.executionProfile,
+    modelSettings: projectConfig?.modelSettings,
+  })
+  const effectiveModel = args.modelExplicit ? model : projectConfig?.model ?? model
+  const apiEnvironment = resolveApiEnvironment(executionSettings.modelSettings?.[effectiveModel]?.protocol)
+  if (!effectiveModel.trim()) throw new ArgError('Configure a model with --model, project settings, OVOGO_MODEL, or ANTHROPIC_MODEL before running a native model request')
   if (pipe) {
-    if (help) {
-      const { getPipeHelp } = await import('../src/integrations/pipeMode.js')
-      process.stdout.write(getPipeHelp() + '\n')
-      process.exit(0)
-    }
     const apiKey = apiEnvironment.apiKey
     if (!apiKey) {
       process.stderr.write('Error: no API key configured for pipe mode\n')
@@ -144,7 +153,9 @@ async function main(): Promise<void> {
     const client = createModelGateway(
       new OpenAI({ apiKey, baseURL: apiEnvironment.baseURL, maxRetries: 0 }),
       {
-        model,
+        model: effectiveModel,
+        modelProtocol: apiEnvironment.protocol,
+        modelSettings: executionSettings.modelSettings,
         apiKey,
         baseURL: apiEnvironment.baseURL,
         cwd,
@@ -156,7 +167,7 @@ async function main(): Promise<void> {
     const llmCall = async (prompt: string): Promise<string> => {
       try {
         const resp = await client.chat.completions.create({
-          model,
+          model: effectiveModel,
           messages: [
             { role: 'system', content: 'You are a helpful coding assistant. Respond concisely.' },
             { role: 'user', content: prompt },
@@ -181,16 +192,10 @@ async function main(): Promise<void> {
   if (!apiKey) {
     process.stderr.write(
       '\x1b[31mError:\x1b[0m no API key is configured.\n' +
-        'Set OPENAI_API_KEY, or configure MiniMax through ANTHROPIC_AUTH_TOKEN.\n',
+        'Set OPENAI_API_KEY, or ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN for the Anthropic protocol.\n',
     )
     process.exit(1)
   }
-  const settings = loadSettings(cwd)
-  const projectConfig = loadProjectConfig(cwd)
-  const executionSettings = mergeSettingsLayers(settings, {
-    executionPolicy: projectConfig?.executionPolicy,
-    executionProfile: projectConfig?.executionProfile,
-  })
   const executionProfile = executionSettings.executionProfile
   const executionPolicy = resolveManagedExecutionPolicy(executionProfile, executionSettings.executionPolicy, cwd)
   assertSupportedExecutionPolicy(executionPolicy)
@@ -201,8 +206,8 @@ async function main(): Promise<void> {
     }
     const { startBackgroundSession, formatSessionDetail, loadMetadata } =
       await import('../src/core/backgroundSession.js')
-    const result = await startBackgroundSession({ task, cwd, model, executionPolicy,
-      env: { OPENAI_API_KEY: apiKey, OPENAI_BASE_URL: apiEnvironment.baseURL, OVOGO_MODEL: model },
+    const result = await startBackgroundSession({ task, cwd, model: effectiveModel, executionPolicy,
+      env: { ...(apiEnvironment.protocol === 'anthropic' ? { ANTHROPIC_API_KEY: apiKey, ANTHROPIC_BASE_URL: apiEnvironment.baseURL } : { OPENAI_API_KEY: apiKey, OPENAI_BASE_URL: apiEnvironment.baseURL }), OVOGO_MODEL: effectiveModel, OVOGO_MODEL_PROTOCOL: apiEnvironment.protocol },
     })
     const meta = loadMetadata(result.sessionId)
     if (meta) {
@@ -214,7 +219,7 @@ async function main(): Promise<void> {
     process.exit(0)
   }
   const renderer = new Renderer()
-  renderer.banner(VERSION, model)
+  renderer.banner(VERSION, effectiveModel)
   renderer.info(`cwd: ${cwd}`)
   if (projectConfig) {
     renderer.info(`Project config: .ovolv999.json loaded`)
@@ -375,7 +380,9 @@ async function main(): Promise<void> {
     }))
   }
   const config: EngineConfig = {
-    model: projectConfig?.model ?? model,
+    model: effectiveModel,
+    modelProtocol: apiEnvironment.protocol,
+    modelSettings: executionSettings.modelSettings,
     apiKey,
     baseURL: apiEnvironment.baseURL,
     maxIterations: projectConfig?.maxIterations ?? maxIter,

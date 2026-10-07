@@ -1,4 +1,4 @@
-import { registerPhysicalResource, spawnManaged } from '../core/executionBackend.js'
+import { isManagedChild, registerPhysicalResource, spawnManaged } from '../core/executionBackend.js'
 import { captureProcessIdentity } from '../core/processIdentity.js'
 import { captureOwnedProcessTree, stopOwnedProcessTree } from '../core/processTree.js'
 /**
@@ -38,6 +38,7 @@ import { mkdirSync, accessSync, constants } from 'fs'
 import { join } from 'path'
 import { withGitResource } from '../core/gitResource.js'
 import { BoundedOutputBuffer } from './boundedOutput.js'
+import { settleWithin } from '../core/outcome.js'
 
 const MAX_OUTPUT_LENGTH = 30_000
 // Per-stream live buffer — head + tail, each up to this many BYTES
@@ -335,6 +336,7 @@ export class BashTool implements Tool {
           env: process.env,
           detached: true,
           stdio: 'ignore',
+          windowsVerbatimArguments: IS_WIN_CMD,
         })
         if (typeof child.unref === 'function') child.unref()
       } catch (e) {
@@ -343,13 +345,16 @@ export class BashTool implements Tool {
       // Prevent ENOENT crash — spawn emits async 'error' if shell binary is missing
       child.on('error', () => {})
       let releasePhysical!: () => void
-      const physical = new Promise<void>(resolvePhysical => { releasePhysical = resolvePhysical })
+      const physical = isManagedChild(child) ? child.physicallySettled : new Promise<void>(resolvePhysical => { releasePhysical = resolvePhysical })
       registerPhysicalResource(physical)
       track?.(physical)
       let stopping = false
-      const identity = child.pid !== undefined ? captureProcessIdentity(child.pid) : Promise.resolve(null)
-      child.once('close', () => { if (!stopping) releasePhysical() })
-      child.once('error', () => { if (child.pid === undefined) releasePhysical() })
+      const identity = new Promise<Awaited<ReturnType<typeof captureProcessIdentity>>>(resolveIdentity => {
+        if (child.pid !== undefined) void captureProcessIdentity(child.pid).then(resolveIdentity)
+        else { child.once('spawn', () => { void captureProcessIdentity(child.pid).then(resolveIdentity) }); child.once('error', () => resolveIdentity(null)) }
+      })
+      child.once('close', () => { if (!stopping && !isManagedChild(child)) releasePhysical() })
+      child.once('error', () => { if (child.pid === undefined && !isManagedChild(child)) releasePhysical() })
 
       // Wire the abort signal to the background child. Without this, an
       // outer cancel would leave the child + its subprocess tree running
@@ -362,6 +367,7 @@ export class BashTool implements Tool {
       const onBgAbort = () => {
         if (stopping) return
         stopping = true
+        if (isManagedChild(bgChild)) { bgChild.kill('SIGKILL'); return }
         void identity.then(async processIdentity => {
           if (!processIdentity) return
           const tree = await captureOwnedProcessTree(processIdentity, true)
@@ -384,7 +390,13 @@ export class BashTool implements Tool {
         bgChild.once('spawn', () => resolveStart(undefined))
         bgChild.once('error', resolveStart)
       })
-      if (startupError) return { content: `Failed to start background command: ${startupError.message}`, isError: true }
+      if (startupError) {
+        if (isManagedChild(bgChild)) {
+          try { await settleWithin(bgChild.physicallySettled, 2500) }
+          catch (error) { return { content: `Failed to start background command: ${startupError.message}\nPhysical resources remain pending: ${(error as Error).message}`, isError: true, status: 'blocked' } }
+        }
+        return { content: `Failed to start background command: ${startupError.message}`, isError: true }
+      }
       if (context.signal?.aborted) return { content: 'Command cancelled during background startup.', isError: true, status: 'cancelled' }
 
       const redirectInfo = alreadyRedirected ? '' : `\nOutput redirected to: ${logFile}`
@@ -448,6 +460,7 @@ export class BashTool implements Tool {
       // handler can route to the timeout contract rather than reporting
       // a fresh non-zero exit.
       let timedOut = false
+      let launchError: Error | undefined
 
       // follow-mode cleanup — fired on settle, NOT on child close
       let followCleanup: (() => void) | null = null
@@ -522,8 +535,9 @@ export class BashTool implements Tool {
         env: process.env,
         detached: true,
         stdio: ['ignore', 'pipe', 'pipe'],
+        windowsVerbatimArguments: IS_WIN_CMD,
       })
-      if (track) track(new Promise<void>(resolve => {
+      if (track) track(isManagedChild(child) ? child.physicallySettled : new Promise<void>(resolve => {
         child.once('close', () => resolve())
         child.once('error', () => { if (child.pid === undefined) resolve() })
       }))
@@ -599,6 +613,7 @@ export class BashTool implements Tool {
       // ── Kill the entire process tree (Linux/macOS = process group,
       //    Windows = taskkill /T). Best-effort — swallow ESRCH etc. ──
       const killProcessTree = (signal: NodeJS.Signals) => {
+        if (isManagedChild(child)) { child.kill(signal); return }
         const pid = child.pid
         if (pid === undefined) return
         if (process.platform === 'win32') {
@@ -658,13 +673,17 @@ export class BashTool implements Tool {
 
       // ── Child error (e.g. ENOENT on the shell) ─────────────────
       child.on('error', (err) => {
+        launchError = err
         clearTimeoutTimer()
         clearKillTimer()
         if (settled) return
-        settle({
-          content: `Failed to start command: ${err.message}`,
+        const failedLaunch = (pending?: string): void => settle({
+          content: `Failed to start command: ${err.message}${pending ? '\nPhysical resources remain pending: ' + pending : ''}`,
           isError: true,
+          ...(pending ? { status: 'blocked' as const } : {}),
         })
+        if (isManagedChild(child)) void settleWithin(child.physicallySettled, 2500).then(() => failedLaunch(), error => failedLaunch((error as Error).message))
+        else failedLaunch()
       })
 
       // ── Child close: normal exit OR termination signal ──────────
@@ -674,6 +693,7 @@ export class BashTool implements Tool {
         clearTimeoutTimer()
         clearKillTimer()
         if (settled) return
+        if (launchError) { settle({ content: `Failed to start command: ${launchError.message}`, isError: true }); return }
 
         // Render each stream — renderState inserts the head/tail
         // truncation marker (with dropped byte count) when the

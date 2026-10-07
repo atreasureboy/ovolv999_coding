@@ -378,6 +378,7 @@ export function App({
         maxTokens={maxContextTokens}
         cost={state.cost}
         apiCalls={state.apiCalls}
+        unknownPriceRequests={state.unknownPriceRequests}
         planMode={state.planMode}
         verbose={state.verbose}
         gitBranch={getGitBranch(cwd)}

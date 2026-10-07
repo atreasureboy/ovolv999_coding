@@ -113,19 +113,16 @@ describe('RUNTIME3-2: tool arguments must be a non-null object', () => {
     ['boolean',      'true',    'boolean'],
   ] as const
 
-  for (const [name, args, label] of SHAPES) {
-    it(`${name} (args=${args}) → tool skipped + error result + clean stop`, async () => {
+  for (const [name, args] of SHAPES) {
+    it(`${name} (args=${args}) fails before any tool executes`, async () => {
       let executed = 0
       const r = fakeRenderer()
       const { c, e } = makeEngine(r, [noop(() => { executed++ })])
-      // call 0 → bad-args tool_call (rejected by parse_response)
-      // call 1 → stopStream (clean termination; content avoids empty-retry loop)
       c.push(toolCallStream(args)); c.push(stopStream())
       const result = await e.runTurn('q', [])
       expect(executed).toBe(0)
-      expect(r.__calls.some(c => c.kind === 'warn' && String(c.args[0]).toLowerCase().includes(label))).toBe(true)
-      expect(r.__calls.filter(c => c.kind === 'error')).toHaveLength(0)
-      expect(result.result.reason).toBe('stop_sequence')
+      expect(r.__calls.some(c => c.kind === 'error' && String(c.args[0]).includes('complete JSON object'))).toBe(true)
+      expect(result.result.status).toBe('failed')
     })
   }
 

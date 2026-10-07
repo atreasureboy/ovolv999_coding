@@ -18,7 +18,7 @@ let compiled: string
 beforeAll(async () => {
   compiled = mkdtempSync(join(tmpdir(), 'ovogo-background-modules-'))
   writeFileSync(join(compiled, 'package.json'), '{"type":"module"}')
-  for (const name of ['backgroundSession', 'backgroundSupervisor', 'processTree', 'processIdentity', 'persistenceLock', 'executionBackend', 'executionPolicy']) {
+  for (const name of ['backgroundSession', 'backgroundSupervisor', 'processTree', 'processIdentity', 'persistenceLock', 'executionBackend', 'executionPolicy', 'managedProcess', 'managedChildProcess', 'outcome']) {
     const source = readFileSync(resolve(`src/core/${name}.ts`), 'utf8')
     const output = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText
     writeFileSync(join(compiled, `${name}.js`), output)

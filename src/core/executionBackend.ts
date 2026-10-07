@@ -4,6 +4,8 @@ import { StringDecoder } from 'string_decoder'
 import { captureProcessIdentity, inspectProcessIdentity } from './processIdentity.js'
 import { captureOwnedProcessTree, captureOwnedProcessTreeFromPid, mergeOwnedProcessTrees, OwnedProcessTreeCaptureError, stopOwnedProcessTree, type OwnedProcessTree } from './processTree.js'
 import { assertSupportedExecutionPolicy, buildChildEnvironment, resolveManagedExecutionPolicy, type ExecutionPolicy } from './executionPolicy.js'
+import { spawnManagedChildProcess, type ManagedChildProcess } from './managedChildProcess.js'
+import { settleWithin } from './outcome.js'
 
 export interface ExecutionProfile {
   mode: 'trusted-local' | 'isolated-worker'
@@ -60,6 +62,10 @@ export function getExecutionHealth(): { activeProcesses: number } {
   return { activeProcesses: active.size }
 }
 
+export function isManagedChild(child: ChildProcess): child is ManagedChildProcess {
+  return 'physicallySettled' in child && child.physicallySettled instanceof Promise
+}
+
 export function spawnManaged(executable: string, args: readonly string[] = [], options: SpawnOptions & { profile?: ExecutionProfile; policy?: ExecutionPolicy } = {}): ChildProcess {
   const { profile, policy: configured, ...spawnOptions } = options
   const cwd = typeof spawnOptions.cwd === 'string' ? spawnOptions.cwd : process.cwd()
@@ -73,12 +79,23 @@ export function spawnManaged(executable: string, args: readonly string[] = [], o
   if (active.size >= capacity) throw new Error('Host process capacity exceeded')
   const source = spawnOptions.env ?? process.env
   const env = buildChildEnvironment(policy, source)
-  const child = spawn(executable, [...args], { ...spawnOptions, env })
+  const ipc = Array.isArray(spawnOptions.stdio) && spawnOptions.stdio.includes('ipc')
+  let target = executable
+  let argv = [...args]
+  let nativeOptions = { ...spawnOptions, cwd, env, policy }
+  if (process.platform === 'win32' && !ipc && spawnOptions.shell) {
+    target = typeof spawnOptions.shell === 'string' ? spawnOptions.shell : env.COMSPEC ?? env.ComSpec ?? 'cmd.exe'
+    const command = [executable, ...args].join(' ')
+    const cmd = /(?:^|[\\/])cmd(?:\.exe)?$/i.test(target)
+    argv = cmd ? ['/d', '/s', '/c', `"${command}"`] : ['-c', command]
+    nativeOptions = { ...nativeOptions, shell: false, windowsVerbatimArguments: cmd }
+  }
+  const child = process.platform === 'win32' && !ipc ? spawnManagedChildProcess(target, argv, nativeOptions) : spawn(executable, [...args], { ...spawnOptions, env })
+  if (!isManagedChild(child)) Object.defineProperty(child, 'accounting', { value: 'observed-only' })
   active.add(child)
-  const closed = new Promise<void>(resolve => { child.once('close', () => resolve()); child.once('error', () => { if (!child.pid) resolve() }) })
+  const closed = isManagedChild(child) ? child.physicallySettled : new Promise<void>(resolve => { child.once('close', () => resolve()); child.once('error', () => { if (!child.pid) resolve() }) })
   registerPhysicalResource(closed)
-  child.once('close', () => active.delete(child))
-  child.once('error', () => { if (!child.pid) active.delete(child) })
+  void closed.then(() => active.delete(child))
   return child
 }
 
@@ -103,6 +120,7 @@ export function execManaged(executable: string, args: readonly string[], options
     let unverifiedDescendants = false
     let releasePhysical!: () => void
     registerPhysicalResource(new Promise<void>(resolvePhysical => { releasePhysical = resolvePhysical }))
+    if (isManagedChild(child)) void child.physicallySettled.then(releasePhysical)
     const finish = (code: number | null, confirmed = true): void => {
       if (finished) return
       finished = true
@@ -118,6 +136,14 @@ export function execManaged(executable: string, args: readonly string[], options
       error = reason
       clearTimeout(trackingTimer)
       stopPromise = (async () => {
+        if (isManagedChild(child)) {
+          child.kill('SIGKILL')
+          await settleWithin((async () => {
+            if (child.managedProcess) await child.managedProcess.stop(reason.message)
+            await child.physicallySettled
+          })(), 2500)
+          return true
+        }
         if (!child.pid) return true
         await tracking
         const identity = tree?.root ?? await captureProcessIdentity(child.pid)
@@ -139,6 +165,7 @@ export function execManaged(executable: string, args: readonly string[], options
     const abort = (): void => stop(signal?.reason instanceof Error ? signal.reason : new Error('Managed process execution cancelled'))
     const timer = setTimeout(() => stop(new Error('Process execution deadline exceeded')), timeoutMs)
     const trackTree = (): void => {
+      if (isManagedChild(child)) return
       tracking = (async () => {
         if (!child.pid) return
         const current = await captureOwnedProcessTreeFromPid(child.pid, spawnOptions.detached ?? process.platform !== 'win32')
@@ -162,7 +189,10 @@ export function execManaged(executable: string, args: readonly string[], options
     }
     child.stdout?.on('data', data => consume(data as Buffer, 'stdout'))
     child.stderr?.on('data', data => consume(data as Buffer, 'stderr'))
-    child.once('error', failure => { error = failure })
+    child.once('error', failure => {
+      error = failure
+      if (isManagedChild(child) && child.physicalState === 'unknown') finish(null, false)
+    })
     child.once('close', code => {
       closed = true
       clearTimeout(trackingTimer)
@@ -170,6 +200,7 @@ export function execManaged(executable: string, args: readonly string[], options
       stderr += stderrDecoder.end()
       if (!stopPromise) {
         stopPromise = (async () => {
+          if (isManagedChild(child)) { await child.physicallySettled; return true }
           await tracking
           if (tree) {
             const states = await Promise.all(tree.members.map(inspectProcessIdentity))

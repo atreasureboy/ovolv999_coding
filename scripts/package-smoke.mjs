@@ -40,7 +40,7 @@ try {
   const packageRoot = join(installed, 'node_modules/ovogogogo')
   const files = packedMetadata.files.map(entry => entry.path)
   for (const file of files) {
-    assert.ok(/^(package\.json|README\.md|LICENSE|CHANGELOG\.md|docs\/release-support\.md|dist\/build-info\.json|dist\/(bin|src)\/.+\.(js|d\.ts))$/.test(file), `Unexpected packed file: ${file}`)
+    assert.ok(/^(package\.json|README\.md|LICENSE|CHANGELOG\.md|docs\/release-support\.md|dist\/build-info\.json|dist\/native\/execution-host\/bin\/(execution-host\.exe|manifest\.json)|dist\/(bin|src)\/.+\.(js|d\.ts))$/.test(file), `Unexpected packed file: ${file}`)
     assert.ok(!/(^|\/)(tests?|__tests__|\.env|credentials|secrets)(\/|\.)|\.test\./i.test(file), `Forbidden packed file: ${file}`)
   }
   for (const file of ['LICENSE', 'README.md', 'dist/build-info.json', 'dist/bin/ovogogogo.js']) assert.ok(files.includes(file), `Missing ${file}`)
@@ -50,6 +50,14 @@ try {
   assert.match(identity.gitCommit, /^[a-f0-9]{40}$/)
   assert.match(identity.sourceSha256, /^[a-f0-9]{64}$/)
   assert.equal(identity.version, JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version)
+  if (process.platform === 'win32') {
+    for (const file of ['dist/native/execution-host/bin/execution-host.exe', 'dist/native/execution-host/bin/manifest.json']) assert.ok(files.includes(file), `Missing ${file}`)
+    const manifest = JSON.parse(readFileSync(join(packageRoot, 'dist/native/execution-host/bin/manifest.json'), 'utf8'))
+    const actualHash = createHash('sha256').update(readFileSync(join(packageRoot, 'dist/native/execution-host/bin/execution-host.exe'))).digest('hex')
+    assert.equal(manifest.sha256, actualHash)
+    assert.equal(identity.executionHost.sha256, actualHash)
+    assert.equal(manifest.protocolVersion, identity.executionHost.protocolVersion)
+  }
   const cli = join(packageRoot, 'dist/bin/ovogogogo.js')
   const noKey = isolatedEnv(home)
   const shim = record('installed-command-shim', await runPnpm(['run', 'cli-version'], { cwd: installed, env: { ...noKey, npm_execpath: process.env.npm_execpath } }))
@@ -141,6 +149,12 @@ try {
   const stoppedMetadata = JSON.parse(readFileSync(join(metadataDir, `${match[1]}.json`), 'utf8'))
   assert.equal(stoppedMetadata.status, 'cancelled')
   backgroundCleanup = undefined
+  const evaluation = join(base, 'coding-evaluation')
+  record('installed-coding-evaluation', await runNode([join(root, 'scripts/agent-eval.mjs'), '--offline', '--cli-path', cli, '--output', evaluation], { cwd: installed, env: noKey, timeout: 180_000 }))
+  const codingReport = JSON.parse(readFileSync(join(evaluation, 'report.json'), 'utf8'))
+  assert.equal(codingReport.fixturePassed, true)
+  assert.equal(codingReport.successfulTasks, 10)
+  assert.equal(codingReport.results.length, 12)
   process.stdout.write(`Packed CLI smoke passed: ${Object.keys(cases).length} cases; SHA256 ${tarballSha256}\n`)
 } catch (error) {
   failure = error.message

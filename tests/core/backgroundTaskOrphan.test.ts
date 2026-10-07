@@ -9,7 +9,7 @@ import { createProcessScope } from '../../src/core/executionBackend.js'
 const pause = (): Promise<void> => new Promise(resolve => setTimeout(resolve, 25))
 
 describe('background task descendant accounting', () => {
-  it('reports observed-only accounting when a detached descendant escapes discovery after normal root exit', async () => {
+  it('reports its actual accounting and keeps detached descendants within that guarantee', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'task-orphan-'))
     const manager = new BackgroundTaskManager({ sigkillGraceMs: 0 })
     const scope = createProcessScope()
@@ -28,14 +28,20 @@ describe('background task descendant accounting', () => {
       const descendantState = await inspectProcessIdentity(leaf!)
       manager.updateTask(id, { metadata: { processAccounting: 'full-tree-proven' } })
       const detail = manager.getTaskDetail(id)!
-      expect(detail).toHaveProperty('processAccounting', 'observed-only')
       const formatted = formatTaskDetail(detail)
-      expect(formatted).toContain('Completion covers observed processes')
-      expect(formatted).toContain('termination of unobserved detached descendants is not confirmed')
-      if (result?.status === 'completed' && scope.pending.size === 0 && descendantState === 'matching') {
-        expect(result).toHaveProperty('processAccounting', 'observed-only')
+      if (process.platform === 'win32') {
+        expect(detail).toHaveProperty('processAccounting', 'contained')
+        expect(formatted).toContain('Completion waits for owned descendants to stop')
+        expect(result?.status).toBe('completed')
+        expect(descendantState).toBe('dead')
+        expect(scope.pending.size).toBe(0)
       } else {
-        expect(descendantState === 'dead' || scope.pending.size > 0).toBe(true)
+        expect(detail).toHaveProperty('processAccounting', 'observed-only')
+        expect(formatted).toContain('Completion covers observed processes')
+        expect(formatted).toContain('termination of unobserved detached descendants is not confirmed')
+        if (result?.status === 'completed' && scope.pending.size === 0 && descendantState === 'matching') {
+          expect(result).toHaveProperty('processAccounting', 'observed-only')
+        } else expect(descendantState === 'dead' || scope.pending.size > 0).toBe(true)
       }
     } finally {
       writeFileSync(join(directory, 'exit-root'), '')
@@ -61,12 +67,14 @@ describe('background task descendant accounting', () => {
       while (!existsSync(join(directory, 'leaf.pid')) && Date.now() < readyDeadline) await pause()
       leaf = await captureProcessIdentity(Number(readFileSync(join(directory, 'leaf.pid'), 'utf8')))
       expect(leaf).not.toBeNull()
-      const discoveryDeadline = Date.now() + 8000
-      while (Number(manager.getTask(id)?.metadata.trackedDescendants ?? 0) < 1 && Date.now() < discoveryDeadline) await pause()
-      expect(Number(manager.getTask(id)?.metadata.trackedDescendants)).toBeGreaterThan(0)
+      if (process.platform !== 'win32') {
+        const discoveryDeadline = Date.now() + 8000
+        while (Number(manager.getTask(id)?.metadata.trackedDescendants ?? 0) < 1 && Date.now() < discoveryDeadline) await pause()
+        expect(Number(manager.getTask(id)?.metadata.trackedDescendants)).toBeGreaterThan(0)
+      } else expect(manager.getTask(id)?.processAccounting).toBe('contained')
       writeFileSync(join(directory, 'exit-root'), '')
       const result = await manager.waitForTask(id, 8000)
-      expect(result?.status).toBe('failed')
+      expect(result?.status).toBe(process.platform === 'win32' ? 'completed' : 'failed')
       expect(await inspectProcessIdentity(leaf!)).toBe('dead')
       expect(scope.pending.size).toBe(0)
     } finally {
