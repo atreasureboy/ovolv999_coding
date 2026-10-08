@@ -7,7 +7,7 @@ function containsPath(root: string, target: string): boolean {
   return fromRoot !== '..' && !fromRoot.startsWith(`..${sep}`) && !isAbsolute(fromRoot)
 }
 
-function resolveExistingAncestor(target: string): string {
+export function resolveCanonicalPath(target: string): string {
   let ancestor = target
   const missing: string[] = []
   for (;;) {
@@ -32,7 +32,7 @@ export function resolveWorkspacePath(context: ToolContext, suppliedPath: string)
   if (!bound) return target
   const canonicalRoot = realpathSync(root)
   if (!containsPath(root, target)) throw new Error(`Path is outside the bound workspace: ${suppliedPath}`)
-  const canonicalTarget = resolveExistingAncestor(target)
+  const canonicalTarget = resolveCanonicalPath(target)
   if (!containsPath(canonicalRoot, canonicalTarget)) throw new Error(`Path is outside the bound workspace: ${suppliedPath}`)
   return canonicalTarget
 }

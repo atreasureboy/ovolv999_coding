@@ -16,13 +16,14 @@
 
 import { execFileSync } from 'child_process'
 import { approvalInputDigest } from '../core/approvalBroker.js'
-import { createHash } from 'crypto'
-import { existsSync, mkdirSync, writeFileSync, readFileSync, realpathSync } from 'fs'
+import { createHash, randomUUID } from 'crypto'
+import { existsSync, mkdirSync, readFileSync, realpathSync } from 'fs'
 import { isAbsolute, join, relative, resolve, sep } from 'path'
 import type { Tool, ToolDefinition, ToolResult, ToolContext } from '../core/types.js'
 import type { VerificationEvidence } from '../core/outcome.js'
 import { captureArtifactVersion, createVerificationPlan } from '../core/verification.js'
 import { withGitResource } from '../core/gitResource.js'
+import { WorktreeStore, type StoredWorktree, type StoredWorktreeAcceptance } from '../core/worktreeStore.js'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -64,16 +65,33 @@ export type WorktreeAcceptance = VerificationEvidence
 // ── Worktree Manager ────────────────────────────────────────────────────────
 
 const WORKTREE_DIR = '.ovolv999/worktrees'
-const WORKTREE_META = '.ovolv999/worktrees.json'
+
+export interface ActualWorktree {
+  path: string
+  commit?: string
+  branch?: string
+  locked: boolean
+  prunable: boolean
+}
+
+export interface WorktreeReconciliation {
+  entries: Array<{ status: 'managed' | 'metadata_only' | 'mismatched' | 'unknown'; info?: WorktreeInfo; actual?: ActualWorktree; operation?: StoredWorktree['operation'] }>
+}
+
+export interface RemoveWorktreeOptions {
+  merge?: boolean
+  deleteBranch?: boolean
+  discardApproved?: boolean
+}
 
 export class WorktreeManager {
-  private active: Map<string, WorktreeInfo> = new Map()
-  private accepted = new Map<string, { generation: symbol; evidence?: WorktreeAcceptance; artifact?: WorktreeArtifact }>()
+  private store: WorktreeStore
+  private validated = new Map<string, StoredWorktreeAcceptance>()
   private cwd: string
 
   constructor(cwd: string) {
     this.cwd = resolve(cwd)
-    this.loadMeta()
+    this.store = new WorktreeStore(this.cwd)
   }
 
   private git(args: string[], cwd = this.cwd): string {
@@ -81,6 +99,8 @@ export class WorktreeManager {
   }
 
   private validateWorktree(info: WorktreeInfo): void {
+    const reconciled = this.reconcileWorktrees().entries.find(entry => entry.info?.name === info.name)
+    if (reconciled?.status !== 'managed' || !existsSync(info.path)) throw new Error('Worktree is missing or its repository/branch changed; reconciliation is required and files were retained')
     const path = realpathSync(info.path)
     const root = realpathSync(this.worktreeBase())
     const child = relative(root, path)
@@ -94,34 +114,30 @@ export class WorktreeManager {
     }
   }
 
-  private metaPath(): string {
-    return join(this.cwd, WORKTREE_META)
-  }
-
   private worktreeBase(): string {
     return join(this.cwd, WORKTREE_DIR)
   }
 
-  private loadMeta(): void {
-    try {
-      const raw = readFileSync(this.metaPath(), 'utf8')
-      const list = JSON.parse(raw) as WorktreeInfo[]
-      for (const wt of list) {
-        this.active.set(wt.name, wt)
-      }
-    } catch {
-      // No metadata file — start fresh
-    }
+  private entry(name: string): StoredWorktree | undefined {
+    return this.store.snapshot().worktrees.find(entry => entry.info.name === name)
   }
 
-  private saveMeta(): void {
-    try {
-      mkdirSync(join(this.cwd, '.ovolv999'), { recursive: true })
-      const list = [...this.active.values()]
-      writeFileSync(this.metaPath(), JSON.stringify(list, null, 2), 'utf8')
-    } catch {
-      // Best-effort
+  reconcileWorktrees(): WorktreeReconciliation {
+    const actual = this.git(['worktree', 'list', '--porcelain', '-z']).split('\0\0').filter(Boolean).map(block => {
+      const fields = block.split('\0')
+      const value = (prefix: string) => fields.find(field => field.startsWith(prefix))?.slice(prefix.length)
+      return { path: resolve(value('worktree ') ?? ''), commit: value('HEAD '), branch: value('branch ')?.replace(/^refs\/heads\//, ''), locked: fields.some(field => field === 'locked' || field.startsWith('locked ')), prunable: fields.some(field => field === 'prunable' || field.startsWith('prunable ')) }
+    })
+    const entries: WorktreeReconciliation['entries'] = []
+    const matched = new Set<string>([this.cwd])
+    for (const entry of this.store.snapshot().worktrees) {
+      const found = actual.find(tree => tree.path === resolve(entry.info.path))
+      if (found) matched.add(found.path)
+      const status = !found || !existsSync(entry.info.path) ? 'metadata_only' : found.branch !== entry.info.branch || (entry.info.repositoryPath && resolve(entry.info.repositoryPath) !== this.cwd) ? 'mismatched' : 'managed'
+      entries.push({ status, info: entry.info, actual: found, operation: entry.operation })
     }
+    for (const tree of actual) if (!matched.has(tree.path)) entries.push({ status: 'unknown', actual: tree })
+    return { entries }
   }
 
   /** Check if we're inside a git repository */
@@ -149,67 +165,76 @@ export class WorktreeManager {
       throw new Error('Not a git repository — worktrees require git')
     }
 
-    if (this.active.has(name)) {
-      throw new Error(`Worktree "${name}" already exists`)
-    }
+    return this.store.transaction((record, commit, assertOwned) => {
+      if (record.worktrees.some(entry => entry.info.name === name)) {
+        throw new Error(`Worktree "${name}" already exists`)
+      }
 
-    // Sanitize name for branch/directory naming
-    const safeName = name.replace(/[^a-zA-Z0-9_-]/g, '-')
-    const branch = `wt/${safeName}`
-    const base = baseBranch ?? this.getCurrentBranch()
-    const baseCommit = this.git(['rev-parse', '--verify', `refs/heads/${base}^{commit}`])
-    const wtPath = join(this.worktreeBase(), safeName)
+      // Sanitize name for branch/directory naming
+      const safeName = name.replace(/[^a-zA-Z0-9_-]/g, '-')
+      const branch = `wt/${safeName}`
+      const base = baseBranch ?? this.getCurrentBranch()
+      const baseCommit = this.git(['rev-parse', '--verify', `refs/heads/${base}^{commit}`])
+      const wtPath = join(this.worktreeBase(), safeName)
 
-    // Ensure base directory exists
-    mkdirSync(this.worktreeBase(), { recursive: true })
+      // Ensure base directory exists
+      mkdirSync(this.worktreeBase(), { recursive: true })
 
-    if (existsSync(wtPath)) {
-      throw new Error(`Worktree path already exists: ${wtPath}. Use a different name or remove it first.`)
-    }
+      if (existsSync(wtPath)) {
+        throw new Error(`Worktree path already exists: ${wtPath}. Use a different name or remove it first.`)
+      }
 
-    // Create the worktree with a new branch off the base
-    try {
-      execFileSync('git', [
-        'worktree', 'add',
-        '-b', branch,
-        wtPath,
-        base,
-      ], { cwd: this.cwd, stdio: 'pipe' })
-    } catch (err) {
-      const msg = (err as Error).message
-      throw new Error(`Failed to create worktree; any partial directory was retained: ${msg}`, { cause: err })
-    }
+      const info: WorktreeInfo = {
+        name,
+        path: wtPath,
+        branch,
+        baseBranch: base,
+        createdAt: new Date().toISOString(),
+        baseCommit,
+        targetBranch: base,
+        targetCommit: baseCommit,
+        repositoryPath: this.cwd,
+      }
+      const entry: StoredWorktree = { info, generation: randomUUID(), operation: { kind: 'create', phase: 'intent' } }
+      record.worktrees.push(entry)
+      commit()
 
-    const info: WorktreeInfo = {
-      name,
-      path: wtPath,
-      branch,
-      baseBranch: base,
-      createdAt: new Date().toISOString(),
-      baseCommit,
-      targetBranch: base,
-      targetCommit: baseCommit,
-      repositoryPath: this.cwd,
-    }
+      try {
+        assertOwned()
+        execFileSync('git', [
+          'worktree', 'add',
+          '-b', branch,
+          wtPath,
+          base,
+        ], { cwd: this.cwd, stdio: 'pipe' })
+      } catch (err) {
+        const msg = (err as Error).message
+        throw new Error(`Failed to create worktree; any partial directory was retained: ${msg}`, { cause: err })
+      }
 
-    this.active.set(name, info)
-    this.saveMeta()
-    return info
+      delete entry.operation
+      try {
+        commit()
+      } catch (error) {
+        throw new Error(`Created worktree at ${wtPath} on branch ${branch}, but metadata completion failed; tree and branch were retained for recovery: ${(error as Error).message}`, { cause: error })
+      }
+      return { ...info }
+    })
   }
 
   /** Get info about an existing worktree */
   getWorktree(name: string): WorktreeInfo | undefined {
-    const info = this.active.get(name)
+    const info = this.entry(name)?.info
     return info ? { ...info } : undefined
   }
 
   /** List all active worktrees */
   listWorktrees(): WorktreeInfo[] {
-    return [...this.active.values()].map(info => ({ ...info }))
+    return this.store.snapshot().worktrees.map(entry => entry.info)
   }
 
   getBinding(name: string): WorktreeBinding {
-    const info = this.active.get(name)
+    const info = this.entry(name)?.info
     if (!info) throw new Error(`Worktree "${name}" does not exist`)
     if (!info.baseCommit || !info.targetBranch || !info.targetCommit || !info.repositoryPath) {
       throw new Error('Legacy worktree has no recorded base commit or merge target; files were retained')
@@ -245,7 +270,7 @@ export class WorktreeManager {
 
   async acceptArtifact(name: string, inputEvidence: WorktreeAcceptance, artifact: WorktreeArtifact): Promise<void> {
     this.invalidateAcceptance(name)
-    const generation = this.accepted.get(name)!.generation
+    const generation = this.entry(name)!.generation
     const evidence = structuredClone(inputEvidence)
     if (evidence.status !== 'passed' || !evidence.runId || !evidence.artifactVersion) {
       throw new Error('Artifact acceptance requires passed verification bound to a run and artifact version')
@@ -270,19 +295,30 @@ export class WorktreeManager {
     if (JSON.stringify(this.getArtifact(name)) !== JSON.stringify(current)) {
       throw new Error('Artifact changed during acceptance; worktree was retained')
     }
-    if (this.accepted.get(name)?.generation !== generation) {
-      throw new Error('Acceptance was invalidated by a newer task or verification attempt')
-    }
-    this.accepted.set(name, { generation, evidence, artifact: current })
+    this.store.transaction((record, commit) => {
+      const entry = record.worktrees.find(item => item.info.name === name)
+      if (entry?.generation !== generation) throw new Error('Acceptance was invalidated by a newer task or verification attempt')
+      const acceptance: StoredWorktreeAcceptance = { generation, definitionHash: evidence.definitionHash!, definitionContext: createVerificationPlan(current.workspace.cwd, []).definitionHash, artifactVersion: evidence.artifactVersion!, targetCommit: current.workspace.targetCommit, artifact: current }
+      entry.acceptance = acceptance
+      commit()
+      this.validated.set(name, structuredClone(acceptance))
+    })
   }
 
   invalidateAcceptance(name: string): void {
-    this.accepted.set(name, { generation: Symbol(name) })
+    this.validated.delete(name)
+    this.store.transaction((record, commit) => {
+      const entry = record.worktrees.find(item => item.info.name === name)
+      if (!entry) throw new Error(`Worktree "${name}" does not exist`)
+      entry.generation = randomUUID()
+      delete entry.acceptance
+      commit()
+    })
   }
 
   /** Get diff stats between worktree branch and its base */
   getDiffStats(name: string): string {
-    const info = this.active.get(name)
+    const info = this.entry(name)?.info
     if (!info) return ''
     try {
       const binding = this.getBinding(name)
@@ -296,80 +332,115 @@ export class WorktreeManager {
     }
   }
 
-  /** Remove a worktree and optionally merge its branch */
-  removeWorktree(name: string, opts: { merge?: boolean; deleteBranch?: boolean; discardApproved?: boolean } = {}): void {
-    const info = this.active.get(name)
-    if (!info) {
-      throw new Error(`Worktree "${name}" does not exist`)
-    }
-
-    this.validateWorktree(info)
-    const merge = opts.merge !== false
-    if (merge) {
-      const dirty = this.git(['status', '--porcelain=v1', '--untracked-files=all', '--ignored=matching'], info.path)
-      if (dirty) {
-        throw new Error(`Worktree "${name}" has uncommitted or ignored files; worktree and changes were retained:\n${dirty}`)
-      }
-      const binding = this.getBinding(name)
-      if (this.getCurrentBranch() !== binding.targetBranch) {
-        throw new Error(`Merge target branch changed; expected ${binding.targetBranch}. Worktree was retained`)
-      }
-      if (this.git(['rev-parse', 'HEAD']) !== binding.targetCommit) {
-        throw new Error('Merge target moved since worktree creation; worktree and changes were retained')
-      }
-      if (this.git(['diff', '--name-only', 'HEAD', '--'])) {
-        throw new Error('Merge target has uncommitted changes; worktree and changes were retained')
-      }
-      const accepted = this.accepted.get(name)
-      if (!accepted?.artifact) throw new Error('Merge requires accepted verification; worktree and changes were retained')
+  async removeWorktreeAsync(name: string, opts: RemoveWorktreeOptions = {}): Promise<void> {
+    const entry = this.entry(name)
+    if (!entry) throw new Error(`Worktree "${name}" does not exist`)
+    const inventory = this.reconcileWorktrees().entries.find(item => item.info?.name === name)
+    const removed = entry.operation?.phase === 'removed' || entry.operation?.phase === 'removing' && !existsSync(entry.info.path) && !inventory?.actual
+    if (opts.merge !== false && !removed) {
+      const accepted = entry.acceptance
       const current = this.getArtifact(name)
-      if (JSON.stringify(current) !== JSON.stringify(accepted.artifact)) {
-        this.invalidateAcceptance(name)
-        throw new Error('Artifact changed after acceptance; verification evidence is stale and worktree was retained')
+      if (accepted) {
+        if (JSON.stringify(current) !== JSON.stringify(accepted.artifact) || createVerificationPlan(current.workspace.cwd, []).definitionHash !== accepted.definitionContext || await captureArtifactVersion(current.workspace.cwd) !== accepted.artifactVersion) {
+          this.invalidateAcceptance(name)
+          throw new Error('Artifact or verification definition changed after acceptance; stale evidence rejected and worktree retained')
+        }
+        if (this.entry(name)?.generation !== accepted.generation || JSON.stringify(this.getArtifact(name)) !== JSON.stringify(current)) throw new Error('Acceptance was invalidated or artifact changed during recovery; files retained')
+        this.validated.set(name, accepted)
       }
-      try {
-        this.git(['merge', '--ff-only', '--no-edit', current.commit])
-      } catch (err) {
-        throw new Error(`Merge failed for branch ${info.branch}: ${(err as Error).message}`, { cause: err })
-      }
-      if (JSON.stringify(this.getArtifact(name)) !== JSON.stringify(current)) {
-        this.invalidateAcceptance(name)
-        throw new Error('Worktree changed during merge; merged commits remain integrated, but the worktree and new files were retained')
-      }
-    } else if (!opts.discardApproved) {
-      throw new Error('Discard requires explicit permission; worktree and changes were retained')
     }
-
-    // Remove the worktree directory
-    try {
-      this.git(['worktree', 'remove', ...(merge ? [] : ['--force']), info.path])
-    } catch (err) {
-      throw new Error(`Failed to remove worktree; directory, branch and metadata were retained: ${(err as Error).message}`, { cause: err })
-    }
-
-    // Optionally delete the branch
-    if (opts.deleteBranch) {
-      try {
-        this.git(['branch', merge ? '-d' : '-D', info.branch])
-      } catch { /* best-effort */ }
-    }
-
-    this.active.delete(name)
-    this.accepted.delete(name)
-    this.saveMeta()
+    this.removeWorktree(name, opts)
   }
 
-  /** Prune stale worktrees (git worktree prune) */
+  removeWorktree(name: string, opts: RemoveWorktreeOptions = {}): void {
+    this.store.transaction((record, commit, assertOwned) => {
+      const entry = record.worktrees.find(item => item.info.name === name)
+      if (!entry) throw new Error(`Worktree "${name}" does not exist`)
+      const info = entry.info
+      const merge = opts.merge !== false
+      const operation = entry.operation
+      if (operation && operation.kind !== 'create' && (operation.kind === 'merge') !== merge) throw new Error('Pending worktree operation has a different action; reconcile it before continuing')
+      const inventory = this.reconcileWorktrees().entries.find(item => item.info?.name === name)
+      const removed = operation?.phase === 'removed' || operation?.phase === 'removing' && inventory?.status === 'metadata_only' && !existsSync(info.path) && !inventory.actual
+      if (!removed) {
+        this.validateWorktree(info)
+        if (merge) {
+          const dirty = this.git(['status', '--porcelain=v1', '--untracked-files=all', '--ignored=matching'], info.path)
+          if (dirty) throw new Error(`Worktree "${name}" has uncommitted or ignored files; worktree and changes were retained:\n${dirty}`)
+          const binding = this.getBinding(name)
+          if (this.getCurrentBranch() !== binding.targetBranch) throw new Error(`Merge target branch changed; expected ${binding.targetBranch}. Worktree was retained`)
+          const target = this.git(['rev-parse', 'HEAD'])
+          const current = this.getArtifact(name)
+          let alreadyMerged = false
+          if (operation?.kind === 'merge') {
+            if (JSON.stringify(current) !== JSON.stringify(operation.artifact)) throw new Error('Artifact changed during pending merge cleanup; files were retained')
+            try { this.git(['merge-base', '--is-ancestor', operation.commit!, `refs/heads/${binding.targetBranch}`]); alreadyMerged = true } catch { alreadyMerged = false }
+            if (operation.phase !== 'intent' && !alreadyMerged) throw new Error('Previously merged commit is no longer in its target; reconciliation is required and files retained')
+          }
+          if (!alreadyMerged && target !== binding.targetCommit) {
+            delete entry.acceptance
+            entry.generation = randomUUID()
+            this.validated.delete(name)
+            commit()
+            throw new Error('Merge target moved since worktree creation; old acceptance invalidated and worktree retained')
+          }
+          if (!alreadyMerged && this.git(['diff', '--name-only', 'HEAD', '--'])) throw new Error('Merge target has uncommitted changes; worktree and changes were retained')
+          const accepted = entry.acceptance
+          const validated = this.validated.get(name)
+          if (!accepted || !validated || validated.generation !== entry.generation || JSON.stringify(validated) !== JSON.stringify(accepted)) throw new Error('Merge requires accepted verification revalidated in this process; use removeWorktreeAsync after restart. Worktree retained')
+          if (JSON.stringify(current) !== JSON.stringify(accepted.artifact) || accepted.targetCommit !== binding.targetCommit || createVerificationPlan(binding.cwd, []).definitionHash !== accepted.definitionContext) {
+            delete entry.acceptance
+            entry.generation = randomUUID()
+            this.validated.delete(name)
+            commit()
+            throw new Error('Artifact changed after acceptance; verification evidence is stale and worktree was retained')
+          }
+          if (!alreadyMerged) {
+            entry.operation = { kind: 'merge', phase: 'intent', commit: current.commit, artifact: current, deleteBranch: opts.deleteBranch }
+            commit()
+            try { assertOwned(); this.git(['merge', '--ff-only', '--no-edit', current.commit]) } catch (error) { throw new Error(`Merge failed for branch ${info.branch}: ${(error as Error).message}`, { cause: error }) }
+          }
+          entry.operation = { kind: 'merge', phase: 'merged', commit: current.commit, artifact: current, deleteBranch: opts.deleteBranch ?? operation?.deleteBranch }
+          commit()
+          if (JSON.stringify(this.getArtifact(name)) !== JSON.stringify(current)) throw new Error('Worktree changed during merge; merged commits remain integrated, but the worktree and new files were retained')
+        } else {
+          if (!opts.discardApproved) throw new Error('Discard requires explicit permission; worktree and changes were retained')
+          const branchCommit = this.git(['rev-parse', '--verify', `refs/heads/${info.branch}`])
+          if (operation?.kind === 'discard' && branchCommit !== operation.commit) throw new Error('Worktree branch moved during pending discard; files and branch retained for reconciliation')
+          entry.operation = { kind: 'discard', phase: 'intent', commit: operation?.kind === 'discard' ? operation.commit : branchCommit, deleteBranch: opts.deleteBranch ?? operation?.deleteBranch }
+          commit()
+        }
+        entry.operation.phase = 'removing'
+        commit()
+        try { assertOwned(); this.git(['worktree', 'remove', ...(merge ? [] : ['--force']), info.path]) } catch (error) { throw new Error(`Failed to remove worktree; directory, branch and metadata were retained: ${(error as Error).message}`, { cause: error }) }
+        entry.operation.phase = 'removed'
+        commit()
+      } else if (existsSync(info.path) || inventory?.actual) {
+        throw new Error('A worktree reappeared after removal; files retained for reconciliation')
+      }
+      if (opts.deleteBranch ?? entry.operation?.deleteBranch) {
+        const present = this.git(['branch', '--list', info.branch])
+        if (present) {
+          const branch = this.git(['rev-parse', '--verify', `refs/heads/${info.branch}`])
+          if (branch !== entry.operation?.commit) throw new Error('Worktree branch moved after removal; branch retained for reconciliation')
+          assertOwned()
+          this.git(['branch', merge ? '-d' : '-D', info.branch])
+        }
+      }
+      record.worktrees = record.worktrees.filter(item => item.info.name !== name)
+      commit()
+      this.validated.delete(name)
+    })
+  }
+
   prune(): void {
-    try {
-      execFileSync('git', ['worktree', 'prune'], { cwd: this.cwd, stdio: 'pipe' })
-    } catch { /* best-effort */ }
+    this.reconcileWorktrees()
   }
 
   /** Check if a path is inside a worktree */
   isWorktreePath(path: string): boolean {
     const abs = resolve(path)
-    for (const wt of this.active.values()) {
+    for (const wt of this.listWorktrees()) {
       const child = relative(resolve(wt.path), abs)
       if (child === '' || (child !== '..' && !child.startsWith(`..${sep}`) && !isAbsolute(child))) return true
     }
@@ -538,10 +609,7 @@ If only one worktree is active, you can omit \`name\`.`,
           }
         }
         if (ctx.signal?.aborted) return { content: 'Worktree exit cancelled; changes were retained', isError: true, status: 'cancelled' }
-        await withGitResource(ctx.workspace?.repositoryPath ?? ctx.cwd, ctx.signal, () => {
-          mgr.removeWorktree(selected, { merge, deleteBranch, discardApproved: !merge })
-          return Promise.resolve()
-        })
+        await withGitResource(ctx.workspace?.repositoryPath ?? ctx.cwd, ctx.signal, () => mgr.removeWorktreeAsync(selected, { merge, deleteBranch, discardApproved: !merge }))
         const verb = merge ? 'merged into base' : 'discarded'
         return {
           content: `Worktree "${selected}" ${verb}.\n${diffStats ? `Changes:\n${diffStats}` : '(no changes)'}`,
@@ -574,14 +642,18 @@ export class ListWorktreesTool implements Tool {
   execute(_input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const mgr = getWorktreeManager(ctx.workspace?.repositoryPath ?? ctx.cwd)
     const list = mgr.listWorktrees()
-    if (list.length === 0) {
+    const report = mgr.isGitRepo() ? mgr.reconcileWorktrees() : { entries: [] }
+    const diagnostics = report.entries.filter(entry => entry.status !== 'managed' || entry.operation).map(entry =>
+      `  ${entry.status}: ${entry.info?.name ?? entry.actual?.branch ?? 'detached'} ${entry.info?.path ?? entry.actual?.path}${entry.operation ? ` (pending ${entry.operation.kind}: ${entry.operation.phase})` : ''}`,
+    )
+    if (list.length === 0 && !diagnostics.length) {
       return Promise.resolve({ content: 'No active worktrees.', isError: false })
     }
     const lines = list.map(w =>
       `  ${w.name.padEnd(20)} ${w.branch.padEnd(30)} ${w.path}`,
     )
     return Promise.resolve({
-      content: `Active worktrees (${list.length}):\n${lines.join('\n')}`,
+      content: [`Active worktrees (${list.length}):\n${lines.join('\n')}`, diagnostics.length ? `Reconciliation (files retained):\n${diagnostics.join('\n')}` : ''].filter(Boolean).join('\n'),
       isError: false,
     })
   }

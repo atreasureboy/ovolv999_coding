@@ -1,140 +1,33 @@
-/**
- * OVOGO.md loader — project instruction files injected into the system prompt
- *
- * Resolution order:
- *   1. ~/.ovogo/OVOGO.md              — user-level global instructions
- *   2. Walk from git-root → cwd:
- *      - {dir}/OVOGO.md              — project instructions (checked in)
- *      - {dir}/.ovogo/OVOGO.md       — project-private instructions (gitignored)
- *
- * Limits:
- *   - Max 200 lines per file (rest truncated)
- *   - Max 25 000 bytes per file (rest truncated)
- *
- * The loaded content is formatted and prepended to the system prompt so the
- * agent is aware of project-specific conventions, constraints, and commands.
- */
-
-import { readFileSync, existsSync } from 'fs'
-import { join, dirname, parse, resolve } from 'path'
-import { homedir } from 'os'
-import { execSync } from 'child_process'
+import { join } from 'node:path'
+import { formatInstructionsForPrompt, resolveInstructionsSync } from '../core/instructionResolver.js'
 
 export interface OvogoMdFile {
   path: string
   content: string
   type: 'user' | 'project' | 'project-private'
-}
-
-const MAX_LINES = 200
-const MAX_BYTES = 25_000
-
-function readAndTruncate(filePath: string): string | null {
-  try {
-    const raw = readFileSync(filePath, 'utf8')
-    let truncated = raw
-
-    const lines = truncated.split('\n')
-    if (lines.length > MAX_LINES) {
-      truncated = lines.slice(0, MAX_LINES).join('\n')
-      truncated += `\n\n[... truncated at ${MAX_LINES} lines ...]`
-    }
-
-    if (Buffer.byteLength(truncated, 'utf8') > MAX_BYTES) {
-      // Byte-truncate at last newline boundary
-      const buf = Buffer.from(truncated, 'utf8').slice(0, MAX_BYTES)
-      const str = buf.toString('utf8')
-      const lastNl = str.lastIndexOf('\n')
-      truncated = (lastNl > 0 ? str.slice(0, lastNl) : str) + '\n\n[... truncated at 25 000 bytes ...]'
-    }
-
-    return truncated.trim() || null
-  } catch {
-    return null
-  }
-}
-
-function getGitRoot(cwd: string): string {
-  try {
-    return execSync('git rev-parse --show-toplevel', {
-      cwd,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim()
-  } catch {
-    return cwd
-  }
-}
-
-/** Collect directories from cwd up to (and including) gitRoot */
-function dirsUpToRoot(cwd: string, gitRoot: string): string[] {
-  const dirs: string[] = []
-  let current = resolve(cwd)
-  const boundary = resolve(gitRoot)
-  const samePath = (left: string, right: string): boolean => process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right
-  const { root } = parse(current)
-
-  while (true) {
-    dirs.push(current)
-    if (samePath(current, boundary)) break
-    const parent = dirname(current)
-    if (parent === current || parent === root) break // filesystem root
-    current = parent
-  }
-
-  // We want outermost (gitRoot) first so later entries override
-  return dirs.reverse()
+  scope?: string
+  digest?: string
 }
 
 export function loadOvogoMd(cwd: string): OvogoMdFile[] {
-  const files: OvogoMdFile[] = []
-
-  // 1. User-level: ~/.ovogo/OVOGO.md
-  const userPath = join(homedir(), '.ovogo', 'OVOGO.md')
-  const userContent = readAndTruncate(userPath)
-  if (userContent) {
-    files.push({ path: userPath, content: userContent, type: 'user' })
-  }
-
-  // 2. Walk from git root → cwd
-  const gitRoot = getGitRoot(cwd)
-  const dirs = dirsUpToRoot(cwd, gitRoot)
-
-  for (const dir of dirs) {
-    // Project instructions (checked into codebase)
-    // Support both OVOGO.md and AGENTS.md (cross-tool convention)
-    for (const filename of ['OVOGO.md', 'AGENTS.md']) {
-      const projectPath = join(dir, filename)
-      if (existsSync(projectPath) && projectPath !== userPath) {
-        const content = readAndTruncate(projectPath)
-        if (content) files.push({ path: projectPath, content, type: 'project' })
-      }
-    }
-
-    // Project-private instructions (.ovogo/OVOGO.md — add to .gitignore)
-    const privatePath = join(dir, '.ovogo', 'OVOGO.md')
-    if (existsSync(privatePath)) {
-      const content = readAndTruncate(privatePath)
-      if (content) files.push({ path: privatePath, content, type: 'project-private' })
-    }
-  }
-
-  return files
+  return resolveInstructionsSync(cwd, []).map(entry => ({
+    ...entry,
+    type: entry.scope === '*' ? 'user' : entry.path === join(entry.scope, '.ovogo', 'OVOGO.md') ? 'project-private' : 'project',
+  }))
 }
 
 export function formatOvogoMdForPrompt(files: OvogoMdFile[]): string {
-  if (files.length === 0) return ''
-
-  const sections = files.map((f) => {
-    const typeLabel =
-      f.type === 'user'
-        ? "(your personal global instructions — not checked into the project)"
-        : f.type === 'project'
-          ? "(project instructions, checked into the codebase)"
-          : "(project-private instructions — not checked in)"
-
-    return `Contents of ${f.path} ${typeLabel}:\n\n${f.content}`
+  if (!files.length) return ''
+  if (files.every(file => file.scope !== undefined && file.digest !== undefined)) {
+    return formatInstructionsForPrompt(files.map(file => ({ path: file.path, scope: file.scope!, digest: file.digest!, content: file.content })))
+  }
+  const sections = files.map(file => {
+    const label = file.type === 'user'
+      ? '(your personal global instructions — not checked into the project)'
+      : file.type === 'project'
+        ? '(project instructions, checked into the codebase)'
+        : '(project-private instructions — not checked in)'
+    return `Contents of ${file.path} ${label}:\n\n${file.content}`
   })
-
   return `## Project & User Instructions\n\n${sections.join('\n\n---\n\n')}`
 }

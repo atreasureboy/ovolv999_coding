@@ -111,7 +111,7 @@ export class FileWriteTool implements Tool {
       // Atomic write: write to a uniquely-suffixed tmp file in the same
       // directory, then rename over the target. The rename is atomic on POSIX,
       // so a crash mid-write never leaves the target half-written.
-      await persistFileMutation(operation, content)
+      await persistFileMutation(operation, content, context)
 
       // Line count: strip one trailing newline so "hello\n" = 1 line, not 2
       const lines = content === '' ? 0 : content.endsWith('\n') ? content.slice(0, -1).split('\n').length : content.split('\n').length

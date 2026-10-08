@@ -1,7 +1,9 @@
 import { atomicWrite } from '../core/atomicWrite.js'
+import { createHash } from 'node:crypto'
+import { digestFile } from '../core/fileDigest.js'
 import { getFileState, type FileReadState } from '../core/fileState.js'
 import type { ToolContext, ToolResult } from '../core/types.js'
-import { resolveWorkspacePath } from '../core/workspacePath.js'
+import { resolveCanonicalPath, resolveWorkspacePath } from '../core/workspacePath.js'
 
 interface FileOperation {
   filePath: string
@@ -32,7 +34,20 @@ export function prepareFileMutation(filePath: string, context: ToolContext): Too
   return undefined
 }
 
-export async function persistFileMutation(operation: FileOperation, content: string): Promise<void> {
-  await atomicWrite(operation.filePath, content)
+export async function persistFileMutation(operation: FileOperation, content: string, context?: ToolContext, completion: 'write-only' | 'format-pending' = 'write-only'): Promise<void> {
+  const canonicalPath = context?.recordFileEvidence ? resolveCanonicalPath(operation.filePath) : operation.filePath
+  if (context?.recordFileEvidence) {
+    context.recordFileEvidence({ kind: 'builtin-file', path: operation.filePath, canonicalPath, beforeHash: await digestFile(canonicalPath), expectedHash: createHash('sha256').update(content).digest('hex'), completion })
+  }
+  await atomicWrite(canonicalPath, content)
   operation.fileState.markFileRead(operation.filePath, content)
+  await observeFileMutation(operation.filePath, context, completion === 'write-only')
+}
+
+export async function observeFileMutation(path: string, context: ToolContext | undefined, final: boolean): Promise<void> {
+  if (!context?.recordFileObservation) return
+  const canonicalPath = resolveCanonicalPath(path)
+  const hash = await digestFile(canonicalPath)
+  if (hash === null) throw new Error('Mutated file disappeared before its observation could be recorded')
+  context.recordFileObservation({ canonicalPath, hash, final })
 }

@@ -322,7 +322,7 @@ async function main(): Promise<void> {
   const modePrompt = [mode.systemPrompt, verbosityPrompt].filter(Boolean).join('\n\n')
   const systemPrompt = buildFullSystemPrompt(
     cwd,
-    ovogoMdFiles,
+    [],
     modePrompt,
     taskContext,
     sessionDir,

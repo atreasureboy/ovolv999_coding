@@ -1,5 +1,6 @@
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
+import { execFileSync } from 'node:child_process'
 import { join, resolve } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
 import type * as ChildProcessApi from 'child_process'
@@ -63,6 +64,7 @@ it('canonicalizes the Git root before walking instruction parents on Windows', (
   const project = join(root, 'project')
   const child = join(project, 'nested')
   mkdirSync(child, { recursive: true })
+  execFileSync('git', ['init', '--quiet'], { cwd: project })
   writeFileSync(join(root, 'AGENTS.md'), 'outside repository')
   writeFileSync(join(project, 'AGENTS.md'), 'inside repository')
   execution.gitRoot = project.replaceAll('\\', '/')

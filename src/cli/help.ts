@@ -20,8 +20,11 @@ OPTIONS
   --pipe                    Pipe mode: read stdin as context, output to stdout (no UI)
   --format <text|json>      Output format for pipe mode (default: text)
   --runtime-status [path]  Inspect retained runs and workspace recovery state
+  --run-id <id>            Select one runtime-status record; optionally --operation-id <id>
   --recover-workspace <path> --epoch <id> --decision <keep|cancel|continue>
                            Record a recovery decision; stopping confirmation is required
+  --recover-operation <runId> --operation-id <id> --epoch <id> --revision <n>
+                           Reconcile one retained operation with --decision keep|cancel|continue
   --confirm-physical-stop  Confirm owned processes have stopped before recovery
   -v, --version             Print version and exit
   -h, --help                Show this help

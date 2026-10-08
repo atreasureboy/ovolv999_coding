@@ -1,14 +1,80 @@
 import { randomUUID } from 'crypto'
 import { closeSync, fstatSync, openSync, readSync } from 'fs'
-import { basename, join } from 'path'
-import { captureProcessIdentitySync, type ProcessIdentity } from './processIdentity.js'
+import { basename, join, resolve } from 'path'
+import { captureProcessIdentitySync, inspectProcessIdentity, type ProcessIdentity } from './processIdentity.js'
 import { durableWrite } from './runtimeState.js'
-import { withPersistenceLock } from './persistenceLock.js'
+import { withPersistenceLock, withPersistenceLockAsync } from './persistenceLock.js'
 
 export const MAX_RUN_RECORD_BYTES = 4 * 1024 * 1024
 export const MAX_RUN_OPERATIONS = 10_000
 const RUN_STATUSES = new Set(['running', 'completed', 'cancelled', 'failed', 'blocked', 'needs_input', 'interrupted', 'limit_reached', 'unknown', 'needs_recovery'])
 const RECEIPT_STATUSES = new Set(['completed', 'failed', 'cancelled', 'unknown'])
+const EFFECT_STATUSES = new Set(['not_started', 'observed_applied', 'unknown', 'read_only'])
+const MAX_OPERATION_REFERENCES = 128
+const MAX_FILE_OBSERVATIONS = 32
+const MAX_RECONCILIATIONS = 256
+
+export type OperationEffects = 'not_started' | 'observed_applied' | 'unknown' | 'read_only'
+
+export interface OperationMetadata {
+  inputDigest: string
+  workspace: string
+  affectedPaths: string[]
+  resourceIds: string[]
+  summary?: string
+}
+
+export interface OperationFileEvidence {
+  kind: 'builtin-file'
+  path: string
+  canonicalPath: string
+  beforeHash: string | null
+  expectedHash: string
+  completion: 'write-only' | 'format-pending'
+}
+
+export interface OperationFileObservation {
+  canonicalPath: string
+  hash: string
+  final: boolean
+}
+
+export interface OperationReconciliation {
+  receiptId: string
+  decision: 'keep' | 'cancel' | 'continue'
+  status: 'completed' | 'cancelled' | 'needs_recovery'
+  effects: OperationEffects
+  reason: string
+  recordedAt: string
+  owner: ProcessIdentity
+  epoch: string
+  revision: number
+  observedHash?: string
+}
+
+export interface RunOperation {
+  name: string
+  readOnly: boolean
+  intentAt: string
+  inputDigest?: string
+  workspace?: string
+  affectedPaths?: string[]
+  resourceIds?: string[]
+  summary?: string
+  fileEvidence?: OperationFileEvidence
+  fileObservations?: Array<OperationFileObservation & { recordedAt: string }>
+  receipt?: { status: string; recordedAt: string; effects?: OperationEffects }
+  reconciliations?: OperationReconciliation[]
+}
+
+export interface OperationRecoveryOptions {
+  expectedEpoch: string
+  expectedRevision: number
+  physicalStopConfirmed: boolean
+  decision: 'keep' | 'cancel' | 'continue'
+}
+
+export type OperationSettlement = Pick<OperationReconciliation, 'status' | 'effects' | 'reason' | 'observedHash'>
 
 function object(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
@@ -48,14 +114,56 @@ function validAcceptance(value: unknown): value is NonNullable<RunRecord['accept
   return object(value) && text(value.definitionHash, 256) && text(value.artifactVersion, 256)
 }
 
-type OperationIntent = Pick<RunRecord['operations'][string], 'name' | 'readOnly' | 'intentAt'> & { receipt?: unknown }
+function digest(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
+}
 
-function validOperationIntent(value: unknown): value is OperationIntent {
+function references(value: unknown, maxLength: number): value is string[] {
+  return Array.isArray(value) && value.length <= MAX_OPERATION_REFERENCES && value.every(entry => text(entry, maxLength))
+}
+
+function validOperationMetadata(value: Record<string, unknown>): boolean {
+  const fields = ['inputDigest', 'workspace', 'affectedPaths', 'resourceIds', 'summary']
+  if (!fields.some(field => Object.hasOwn(value, field))) return true
+  return digest(value.inputDigest) && text(value.workspace, 32768)
+    && references(value.affectedPaths, 32768) && references(value.resourceIds, 256)
+    && (value.summary === undefined || text(value.summary, 1024))
+}
+
+function validFileEvidence(value: unknown): value is OperationFileEvidence {
+  return object(value) && value.kind === 'builtin-file' && text(value.path, 32768)
+    && text(value.canonicalPath, 32768) && (value.beforeHash === null || digest(value.beforeHash))
+    && digest(value.expectedHash) && typeof value.completion === 'string' && ['write-only', 'format-pending'].includes(value.completion)
+}
+
+function validFileObservation(value: unknown): boolean {
+  return object(value) && text(value.canonicalPath, 32768) && digest(value.hash)
+    && typeof value.final === 'boolean' && timestamp(value.recordedAt)
+}
+
+function validReconciliation(value: unknown): boolean {
+  return object(value) && identity(value.receiptId) && typeof value.decision === 'string' && ['keep', 'cancel', 'continue'].includes(value.decision)
+    && typeof value.status === 'string' && ['completed', 'cancelled', 'needs_recovery'].includes(value.status)
+    && typeof value.effects === 'string' && EFFECT_STATUSES.has(value.effects) && text(value.reason, 2048) && timestamp(value.recordedAt)
+    && validRunOwner(value.owner) && text(value.epoch, 128)
+    && Number.isSafeInteger(value.revision) && Number(value.revision) > 0
+    && (value.observedHash === undefined || digest(value.observedHash))
+    && (value.decision !== 'keep' || value.status === 'needs_recovery')
+    && (value.decision !== 'cancel' || value.status === 'cancelled')
+    && (value.decision !== 'continue' || value.status !== 'cancelled')
+}
+
+function validOperationIntent(value: unknown): value is RunOperation {
   return object(value) && text(value.name, 256) && typeof value.readOnly === 'boolean' && timestamp(value.intentAt)
+    && validOperationMetadata(value)
+    && (value.fileEvidence === undefined || (validFileEvidence(value.fileEvidence) && value.readOnly === false && digest(value.inputDigest)))
+    && (value.fileObservations === undefined || (value.fileEvidence !== undefined && Array.isArray(value.fileObservations) && value.fileObservations.length <= MAX_FILE_OBSERVATIONS && value.fileObservations.every(validFileObservation)))
+    && (value.reconciliations === undefined || (Array.isArray(value.reconciliations) && value.reconciliations.length <= MAX_RECONCILIATIONS && value.reconciliations.every(validReconciliation)))
 }
 
 function validOperationReceipt(value: unknown): value is NonNullable<RunRecord['operations'][string]['receipt']> {
   return object(value) && typeof value.status === 'string' && RECEIPT_STATUSES.has(value.status) && timestamp(value.recordedAt)
+    && (value.effects === undefined || (typeof value.effects === 'string' && EFFECT_STATUSES.has(value.effects)))
 }
 
 function validate(value: unknown, path: string): asserts value is RunRecord {
@@ -91,8 +199,14 @@ function readRecord(path: string): RunRecord {
   } finally { closeSync(fd) }
 }
 
+export function operationNeedsRecovery(operation: RunOperation): boolean {
+  const last = operation.reconciliations?.at(-1)
+  if (last) return last.status === 'needs_recovery'
+  return !operation.receipt || operation.receipt.status === 'unknown' || operation.receipt.effects === 'unknown'
+}
+
 function needsRecovery(record: RunRecord): boolean {
-  return Object.values(record.operations).some(operation => !operation.receipt || operation.receipt.status === 'unknown')
+  return Object.values(record.operations).some(operationNeedsRecovery)
 }
 
 function writeRecord(path: string, record: RunRecord, exclusive = false): void {
@@ -111,7 +225,7 @@ export interface RunRecord {
   revision: number
   status: string
   acceptance?: { definitionHash: string; artifactVersion: string }
-  operations: Record<string, { name: string; readOnly: boolean; intentAt: string; receipt?: { status: string; recordedAt: string } }>
+  operations: Record<string, RunOperation>
 }
 
 export class RunStore {
@@ -127,9 +241,9 @@ export class RunStore {
     writeRecord(this.path, this.record, true)
   }
 
-  static inspect(path: string): RunRecord {
+  static inspect(path: string, options: { deriveStatus?: boolean } = {}): RunRecord {
     const record = readRecord(path)
-    if (needsRecovery(record)) record.status = 'needs_recovery'
+    if (options.deriveStatus !== false && needsRecovery(record)) record.status = 'needs_recovery'
     return record
   }
 
@@ -145,19 +259,81 @@ export class RunStore {
     })
   }
 
-  intent(name: string, readOnly: boolean): string {
+  intent(name: string, readOnly: boolean, metadata?: OperationMetadata): string {
     if (!text(name, 256) || typeof readOnly !== 'boolean') throw new Error('Invalid operation intent')
+    if (metadata && (!validOperationMetadata(metadata as unknown as Record<string, unknown>) || resolve(metadata.workspace) !== resolve(this.record.workspace))) throw new Error('Invalid operation metadata')
     const id = randomUUID()
-    this.update(record => { record.operations[id] = { name, readOnly, intentAt: new Date().toISOString() } })
+    const details = metadata ? structuredClone({ inputDigest: metadata.inputDigest, workspace: metadata.workspace, affectedPaths: metadata.affectedPaths, resourceIds: metadata.resourceIds, summary: metadata.summary ?? `${name}; ${metadata.affectedPaths.length} affected paths; ${metadata.resourceIds.length} resources` }) : undefined
+    this.update(record => { record.operations[id] = { name, readOnly, intentAt: new Date().toISOString(), ...details } })
     return id
   }
 
-  receipt(id: string, status: string): void {
-    if (!identity(id) || !RECEIPT_STATUSES.has(status)) throw new Error('Invalid operation receipt')
+  receipt(id: string, status: string, effects?: OperationEffects): void {
+    if (!identity(id) || !RECEIPT_STATUSES.has(status) || (effects !== undefined && !EFFECT_STATUSES.has(effects))) throw new Error('Invalid operation receipt')
     this.update(record => {
       const operation = record.operations[id]
       if (!Object.hasOwn(record.operations, id) || !operation || operation.receipt) throw new Error('Unknown or already settled operation')
-      operation.receipt = { status, recordedAt: new Date().toISOString() }
+      operation.receipt = { status, recordedAt: new Date().toISOString(), ...(effects === undefined ? {} : { effects }) }
+    })
+  }
+
+  bindResources(id: string, resourceIds: string[]): void {
+    if (!references(resourceIds, 256)) throw new Error('Invalid operation resources')
+    this.update(record => {
+      const operation = this.mutableOperation(record, id)
+      if (!operation.inputDigest) throw new Error('Operation metadata is required before binding resources')
+      operation.resourceIds = [...new Set([...(operation.resourceIds ?? []), ...resourceIds])]
+    })
+  }
+
+  recordFileEvidence(id: string, evidence: OperationFileEvidence): void {
+    if (!validFileEvidence(evidence)) throw new Error('Invalid file evidence')
+    this.update(record => {
+      const operation = this.mutableOperation(record, id)
+      if (operation.readOnly || !operation.inputDigest || operation.fileEvidence) throw new Error('File evidence is unavailable or already recorded')
+      operation.fileEvidence = { kind: evidence.kind, path: evidence.path, canonicalPath: evidence.canonicalPath, beforeHash: evidence.beforeHash, expectedHash: evidence.expectedHash, completion: evidence.completion }
+    })
+  }
+
+  recordFileObservation(id: string, observation: OperationFileObservation): void {
+    const value = { canonicalPath: observation.canonicalPath, hash: observation.hash, final: observation.final, recordedAt: new Date().toISOString() }
+    if (!validFileObservation(value)) throw new Error('Invalid file observation')
+    this.update(record => {
+      const operation = this.mutableOperation(record, id)
+      if (!operation.fileEvidence || observation.canonicalPath !== operation.fileEvidence.canonicalPath) throw new Error('File observation target does not match trusted evidence')
+      operation.fileObservations ??= []
+      operation.fileObservations.push(structuredClone(value))
+    })
+  }
+
+  private mutableOperation(record: RunRecord, id: string): RunOperation {
+    const operation = record.operations[id]
+    if (!identity(id) || !Object.hasOwn(record.operations, id) || !operation || operation.receipt || operation.reconciliations?.length) throw new Error('Unknown or already settled operation')
+    return operation
+  }
+
+  static async appendReconciliation(path: string, id: string, options: OperationRecoveryOptions, settle: (operation: RunOperation) => OperationSettlement | Promise<OperationSettlement>): Promise<OperationReconciliation> {
+    if (!identity(id) || !text(options.expectedEpoch, 128) || !Number.isSafeInteger(options.expectedRevision) || options.expectedRevision < 0 || !['keep', 'cancel', 'continue'].includes(options.decision)) throw new Error('Invalid operation recovery request')
+    if (!options.physicalStopConfirmed) throw new Error('Physical resource stop must be confirmed before operation reconciliation')
+    return withPersistenceLockAsync(path, async () => {
+      const record = readRecord(path)
+      if (record.epoch !== options.expectedEpoch || record.revision !== options.expectedRevision) throw new Error('RunStore recovery epoch or revision changed; result rejected')
+      const status = await inspectProcessIdentity(record.owner)
+      if (status === 'matching' || status === 'unknown') throw new Error('Run owner is alive or unverified; cannot reconcile operation')
+      const operation = record.operations[id]
+      if (!Object.hasOwn(record.operations, id) || !operation || !operationNeedsRecovery(operation)) throw new Error('Unknown or already settled operation')
+      const settlement = await settle(structuredClone(operation))
+      const current = readRecord(path)
+      if (JSON.stringify(current) !== JSON.stringify(record)) throw new Error('RunStore recovery ownership or revision changed; result rejected')
+      const owner = captureProcessIdentitySync()
+      if (!owner) throw new Error('Recovery owner identity cannot be verified')
+      const receipt: OperationReconciliation = { ...settlement, receiptId: randomUUID(), decision: options.decision, recordedAt: new Date().toISOString(), owner, epoch: record.epoch, revision: record.revision + 1 }
+      operation.reconciliations ??= []
+      operation.reconciliations.push(receipt)
+      record.revision++
+      record.status = needsRecovery(record) ? 'needs_recovery' : options.decision === 'cancel' ? 'cancelled' : 'interrupted'
+      writeRecord(path, record)
+      return structuredClone(receipt)
     })
   }
 

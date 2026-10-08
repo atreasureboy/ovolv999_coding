@@ -281,6 +281,7 @@ export class BashTool implements Tool {
           // cancellation and leak until something else killed it.
           signal: context.signal,
             onSettled,
+            onCreated: id => context.bindOperationResources?.(['background-task:' + id]),
           })
         } catch (error) {
           onSettled?.()

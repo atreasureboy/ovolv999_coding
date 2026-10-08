@@ -60,7 +60,7 @@ it('preserves opaque Chat reasoning through persisted engine history', async () 
     { choices: [], usage: { prompt_tokens: 100, completion_tokens: 10 } },
   ])
   const first = await engine.runTurn('first', [])
-  expect(first.result.status).toBe('completed')
+  expect(first.result.status, JSON.stringify(first.result)).toBe('completed')
   expect(first.newHistory.find(message => message.role === 'assistant')?.providerState).toBeDefined()
   const second = await engine.runTurn('second', JSON.parse(JSON.stringify(first.newHistory)))
   expect(second.result.status).toBe('completed')

@@ -259,10 +259,12 @@ export class BackgroundTaskManager {
       metadata?: Record<string, unknown>
       signal?: AbortSignal
       onSettled?: () => void
+      onCreated?: (id: string) => void
       profile?: ExecutionProfile
       policy?: ExecutionPolicy
     },
   ): string {
+    if (this.tasks.size >= 256) throw new Error('Background task capacity exceeded; clear completed tasks before starting more')
     let releasePhysical!: () => void
     const physical = new Promise<void>(resolve => { releasePhysical = resolve })
     let settled = false
@@ -273,6 +275,7 @@ export class BackgroundTaskManager {
       options?.onSettled?.()
     }
     const id = `task_${randomUUID().slice(0, 8)}`
+    options?.onCreated?.(id)
     const now = Date.now()
 
     const info: TaskInfo = {
@@ -303,7 +306,6 @@ export class BackgroundTaskManager {
       }
     }
 
-    if (this.tasks.size >= 256) throw new Error('Background task capacity exceeded; clear completed tasks before starting more')
     const task: InternalTask = { info, process: null, output: '', outputFile, stopped: false, totalOutputBytes: 0, currentFileBytes: 0, killTimer: null, identity: Promise.resolve(null), onSettled }
 
     /** Rotate the on-disk log: rename current → .log.1, recreate empty log.

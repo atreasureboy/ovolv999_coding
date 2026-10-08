@@ -5,9 +5,10 @@
  * memory files (CLAUDE.md), and mode-specific prompts.
  */
 
-import { readFileSync, readdirSync } from 'fs'
-import { join, resolve, basename } from 'path'
+import { readdirSync } from 'fs'
+import { join, resolve, basename, relative, sep } from 'path'
 import { execFileSync } from 'child_process'
+import { resolveInstructionsSync } from './instructionResolver.js'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -126,34 +127,16 @@ export interface MemoryFile {
 }
 
 export function findMemoryFiles(cwd: string): MemoryFile[] {
-  const files: MemoryFile[] = []
-  const candidates = [
-    'CLAUDE.md',
-    'AGENTS.md',
-    '.ovolv999/instructions.md',
-    '.ovolv999/CLAUDE.md',
-    '.claude/CLAUDE.md',
-  ].map(relative => ({ path: resolve(cwd, relative), relative }))
-
-  // Also check parent directories for CLAUDE.md
-  let parent = resolve(cwd, '..')
-  for (let i = 0; i < 3 && parent !== resolve(parent, '..'); i++) {
-    candidates.push({ path: join(parent, 'CLAUDE.md'), relative: 'parent:' + basename(parent) + '/CLAUDE.md' })
-    parent = resolve(parent, '..')
-  }
-
-  const seen = new Set<string>()
-  for (const { path, relative } of candidates) {
-    if (seen.has(path)) continue
-    try {
-      files.push({ path, content: readFileSync(path, 'utf8'), relative })
-      seen.add(path)
-    } catch {
-      continue
+  return resolveInstructionsSync(cwd, []).map(entry => {
+    const filename = relative(resolve(cwd), entry.path).split(sep).join('/')
+    return {
+      path: entry.path,
+      content: entry.content,
+      relative: filename.startsWith('../') && entry.path === join(entry.scope, 'CLAUDE.md')
+        ? `parent:${basename(entry.scope)}/CLAUDE.md`
+        : filename,
     }
-  }
-
-  return files
+  })
 }
 
 // ── Project Tree ────────────────────────────────────────────────────────────

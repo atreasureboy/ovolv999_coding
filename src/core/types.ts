@@ -6,6 +6,7 @@ import type { ApprovalBroker } from './approvalBroker.js'
 import type { ModelProtocol } from './model/types.js'
 import type { ModelSettings } from '../config/modelSettings.js'
 import type { UsageLedger } from './usageLedger.js'
+import type { OperationFileEvidence, OperationFileObservation } from './runStore.js'
 // Core types for ovolv999 execution engine
 
 import type { EventLog } from './eventLog.js'
@@ -139,6 +140,9 @@ export interface Tool {
 }
 
 export interface ToolContext {
+  recordFileEvidence?: (evidence: OperationFileEvidence) => void
+  recordFileObservation?: (observation: OperationFileObservation) => void
+  bindOperationResources?: (ids: readonly string[]) => void
   mcpRegistry?: ReadonlyMap<string, McpRegistryEntry>
   executionProfile?: ExecutionProfile
   executionPolicy?: ExecutionPolicy

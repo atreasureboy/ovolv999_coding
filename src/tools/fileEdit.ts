@@ -11,7 +11,7 @@ import { existsSync } from 'fs'
 import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/types.js'
 import { EDIT_FILE_DESCRIPTION } from '../prompts/tools.js'
 import { statSafely } from '../core/atomicWrite.js'
-import { persistFileMutation, prepareFileMutation, resolveFileOperation } from './fileOperations.js'
+import { observeFileMutation, persistFileMutation, prepareFileMutation, resolveFileOperation } from './fileOperations.js'
 import { formatEditedFile, formatReplacementDiff } from './fileEditFormatting.js'
 
 export interface EditFileInput {
@@ -222,9 +222,10 @@ export class FileEditTool implements Tool {
       if (preparationError) return preparationError
 
       // Atomic write — see src/core/atomicWrite.ts.
-      await persistFileMutation(operation, newContent)
+      await persistFileMutation(operation, newContent, context, 'format-pending')
 
       const formatNote = await formatEditedFile(file_path, fileState, context.signal)
+      await observeFileMutation(file_path, context, true)
       const diff = formatReplacementDiff(old_string, new_string)
 
       const count = replace_all ? occurrences : 1

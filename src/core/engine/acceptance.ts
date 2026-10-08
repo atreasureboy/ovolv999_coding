@@ -38,7 +38,8 @@ export async function acceptRunResult({
   }
   let status = normalizeOutcome(result)
   const failures = [...run.toolFailures.values()]
-  if (failures.some((failure) => failure.status === 'needs_input')) status = 'needs_input'
+  if (failures.some((failure) => failure.status === 'failed')) status = 'failed'
+  else if (failures.some((failure) => failure.status === 'needs_input')) status = 'needs_input'
   else if (failures.some((failure) => failure.status === 'blocked')) status = 'blocked'
   else if (failures.length && status === 'completed') status = 'failed'
   if (turnAbortController.signal.aborted)

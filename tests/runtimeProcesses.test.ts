@@ -7,6 +7,7 @@ import { fileURLToPath } from 'url'
 import { ModuleKind, transpileModule } from 'typescript'
 import { RunStore } from '../src/core/runStore.js'
 import { readWorkspaceLease, reconcileWorkspace } from '../src/core/workspaceLease.js'
+import { reconcileOperation } from '../src/core/operationRecovery.js'
 
 const dirs: string[] = []
 const children: ChildProcess[] = []
@@ -75,6 +76,10 @@ it('blocks restart after kill between effect and receipt and never repeats the a
   expect(readFileSync(join(root, 'effects'), 'utf8')).toBe('effect\n')
   const stateRoot = join(root, 'state')
   const record = readWorkspaceLease(root, stateRoot)!
+  await expect(reconcileWorkspace(root, { stateRoot, expectedEpoch: record.epoch, decision: 'cancel', physicalStopConfirmed: true, artifactVersion: 'confirmed-test-artifact' })).rejects.toThrow(/operation reconciliation/)
+  const run = RunStore.inspect(held.store)
+  const operationId = Object.keys(run.operations)[0]
+  await reconcileOperation(held.store, operationId, { expectedEpoch: run.epoch, expectedRevision: run.revision, decision: 'cancel', physicalStopConfirmed: true })
   await reconcileWorkspace(root, { stateRoot, expectedEpoch: record.epoch, decision: 'cancel', physicalStopConfirmed: true, artifactVersion: 'confirmed-test-artifact' })
   expect(readWorkspaceLease(root, stateRoot)?.state).toBe('released')
   expect(readFileSync(join(root, 'effects'), 'utf8')).toBe('effect\n')

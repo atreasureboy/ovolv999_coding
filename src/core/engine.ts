@@ -2,6 +2,8 @@ import { assertExecutionProfile, createProcessScope } from './executionBackend.j
 import { assertSupportedExecutionPolicy, resolveManagedExecutionPolicy } from './executionPolicy.js'
 import { approvalInputDigest } from './approvalBroker.js'
 import { requestOperationApproval } from './engine/approval.js'
+import { PathInstructionContext } from './engine/instructions.js'
+import { recordToolOperation } from './engine/operationRecording.js'
 import { settleHistory, trimHistory } from './messageGroups.js'
 import { createModelGateway } from './modelGateway.js'
 import { getEffortPrompt, isEffortLevel, type EffortLevel } from './effort.js'
@@ -107,6 +109,7 @@ export class ExecutionEngine {
   private _suppressCompactWarning = false
   private _turnInFlight = false
   private activeRun: RunContext | null = null
+  private instructionContext: PathInstructionContext | null = null
   private disposal: Promise<void> | null = null
   private disposed = false
   private lastAssistantTs: number | undefined = undefined
@@ -262,10 +265,10 @@ export class ExecutionEngine {
     this.softAbortOwner = null
     return true
   }
-  private buildSystemPrompt(planMode: boolean, moduleSections: string[] = []): string {
+  private buildSystemPrompt(planMode: boolean, moduleSections: string[] = [], instructionSection = ''): string {
     const baseSystemPrompt = this.config.systemPrompt ?? ''
     const effortPrompt = getEffortPrompt(this.getEffort())
-    moduleSections = [...moduleSections, '[Effort guidance]\n' + effortPrompt]
+    moduleSections = [...moduleSections, ...(instructionSection ? [instructionSection] : []), '[Effort guidance]\n' + effortPrompt]
     const sections =
       moduleSections.length > 0
         ? baseSystemPrompt + '\n\n---\n\n' + moduleSections.join('\n\n---\n\n')
@@ -454,6 +457,8 @@ export class ExecutionEngine {
     if (!tool) {
       return { content: `Unknown tool: ${toolName}`, isError: true }
     }
+    const instructionResult = await this.instructionContext?.beforeTool(toolName, input)
+    if (instructionResult) return instructionResult
     if (this.isPlanMode() && !isPlanModeTool(tool, toolName)) {
       return {
         content: `Tool "${toolName}" is not available in plan mode. Only read-only tools are allowed. Output your plan as text.`,
@@ -518,25 +523,28 @@ export class ExecutionEngine {
       }
     }
     context.signal?.throwIfAborted()
+    const approvedInstructionResult = await this.instructionContext?.beforeTool(toolName, input)
+    if (approvedInstructionResult) return approvedInstructionResult
     const run = this.activeRun
-    const operationId = run?.store?.intent(toolName, tool.metadata?.readOnly === true)
+    const recording = recordToolOperation(run?.store, tool, input, context)
+    const operationId = recording.id
     const processScope = createProcessScope(this.config.executionProfile, this.config.executionPolicy)
     const result = await processScope.run(() =>
-      tool.execute(input, { ...context, permissionApproved,
+      tool.execute(input, { ...recording.context, permissionApproved,
         ...(permissionApproved ? { permissionApproval: { tool: toolName, inputDigest: approvalInputDigest(input), cwd: context.cwd } } : {}),
       }),
-    )
+    ).catch(error => ({ content: (error as Error).message ?? String(error), isError: true, status: context.signal?.aborted ? 'cancelled' as const : 'failed' as const }))
     if (operationId && run?.store) {
       if (processScope.pending.size) {
         const receipt = Promise.all([...processScope.pending]).then(() =>
-          run.store!.receipt(operationId, result.isError ? 'failed' : 'completed'),
+          recording.settle(result),
         )
         run.pending.set('physical:' + operationId, receipt)
         void receipt.then(
           () => run.pending.delete('physical:' + operationId),
           () => run.controller.abort('RunStore receipt persistence failed'),
         )
-      } else run.store.receipt(operationId, result.isError ? 'failed' : 'completed')
+      } else recording.settle(result)
     }
     if (!result.isError && ['Write', 'Edit', 'NotebookEdit'].includes(toolName) && this.activeRun)
       this.activeRun.mutationAttempted = true
@@ -764,6 +772,7 @@ export class ExecutionEngine {
     this._turnInFlight = true
     const run = createRunContext(this.config)
     this.activeRun = run
+    this.instructionContext = new PathInstructionContext(this.config.cwd, Boolean(run.parentRunId || run.workspace.worktreeName || (this.config.initialAgentDepth ?? 0) > 0))
     const turnAbortController = run.controller
     this.currentTurnAbortController = turnAbortController
     let result: TurnResult
@@ -823,7 +832,7 @@ export class ExecutionEngine {
         module_tools: moduleTools.length,
         user_message_length: userMessage.length,
       })
-      let systemPrompt = this.buildSystemPrompt(planMode, moduleSections)
+      let systemPrompt = this.buildSystemPrompt(planMode, moduleSections, await this.instructionContext.refresh())
       this.systemPromptTokens = Math.ceil(systemPrompt.length / 3.5) + 20
       let toolDefs = this.getToolDefinitions(planMode, moduleTools)
       let userContent: string | ContentPart[]
@@ -918,7 +927,7 @@ export class ExecutionEngine {
             }
             case 'llm_call': {
               turnAbortController.signal.throwIfAborted()
-              systemPrompt = this.buildSystemPrompt(this.isPlanMode(), moduleSections)
+              systemPrompt = this.buildSystemPrompt(this.isPlanMode(), moduleSections, await this.instructionContext.refresh())
               this.systemPromptTokens = estimateTokens([{ role: 'system', content: systemPrompt }])
               toolDefs = this.getToolDefinitions(this.isPlanMode(), moduleTools)
               toolContext.availableToolNames = toolDefs.map((def) => def.function.name)
@@ -1177,6 +1186,7 @@ export class ExecutionEngine {
       run.detachParent()
       this.currentTurnAbortController = null
       this.activeRun = null
+      this.instructionContext = null
       this._turnInFlight = false
     }
   }
