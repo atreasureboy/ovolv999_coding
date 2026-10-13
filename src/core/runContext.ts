@@ -30,8 +30,9 @@ export function workspaceIdentity(cwd: string): string {
   return process.platform === 'win32' ? path.toLowerCase() : path
 }
 
-export function createRunContext(config: EngineConfig): RunContext {
-  const runId = randomUUID()
+export function createRunContext(config: EngineConfig, options: { runId?: string } = {}): RunContext {
+  const runId = options.runId ?? randomUUID()
+  if (!/^[a-zA-Z0-9][\w-]{0,127}$/.test(runId) || ['constructor', 'prototype'].includes(runId)) throw new Error('Invalid run identity')
   const controller = new AbortController()
   const onAbort = (): void => controller.abort(config.parentSignal?.reason)
   if (config.parentSignal?.aborted) onAbort()

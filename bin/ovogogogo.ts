@@ -5,6 +5,9 @@ import { homedir } from 'os'
 import { join, resolve } from 'path'
 import { fileURLToPath, pathToFileURL } from 'url'
 import { ArgError, parseArgs, type Args } from '../src/cli/args.js'
+import { parseExecArgs } from '../src/cli/execArgs.js'
+import { runExec } from '../src/cli/exec.js'
+import { readOutputSchema } from '../src/core/outputSchema.js'
 import { VERSION, buildVersion, resolveApiEnvironment } from '../src/cli/environment.js'
 import { printHelp } from '../src/cli/help.js'
 import { loadEnvironment } from '../src/cli/loadEnvironment.js'
@@ -68,6 +71,8 @@ export { createCliPermissionManager } from '../src/cli/permissions.js'
 export { runSingleTask } from '../src/cli/tasks.js'
 loadEnvironment(import.meta.url)
 async function main(): Promise<void> {
+  const execArgs = process.argv[2] === 'exec' ? parseExecArgs(process.argv.slice(2)) : undefined
+  const responseSchema = execArgs?.outputSchemaPath ? readOutputSchema(resolve(execArgs.cwd ?? process.cwd(), execArgs.outputSchemaPath)) : undefined
   const sessionState: CliSessionState = { prompt: null, saveOnExit: null }
   const { handleRuntimeCommand } = await import('../src/core/runtimeRecovery.js')
   if (await handleRuntimeCommand(process.argv.slice(2))) return
@@ -80,7 +85,14 @@ async function main(): Promise<void> {
   initChildLogCapture()
   let args: Args
   try {
-    args = parseArgs(process.argv)
+    args = execArgs ? parseArgs([
+      ...process.argv.slice(0, 2),
+      ...(execArgs.cwd ? ['--cwd', execArgs.cwd] : []),
+      ...(execArgs.model ? ['--model', execArgs.model] : []),
+      ...(execArgs.resume ? ['--resume', execArgs.resume] : []),
+      ...(execArgs.continueSession ? ['--continue'] : []),
+    ]) : parseArgs(process.argv)
+    if (execArgs) args.task = execArgs.task || undefined
   } catch (error) {
     if (!(error instanceof ArgError)) throw error
     process.stderr.write(error.message + '\n')
@@ -218,7 +230,7 @@ async function main(): Promise<void> {
     }
     process.exit(0)
   }
-  const renderer = new Renderer()
+  const renderer = new Renderer(execArgs ? { stream: process.stderr } : undefined)
   renderer.banner(VERSION, effectiveModel)
   renderer.info(`cwd: ${cwd}`)
   if (projectConfig) {
@@ -381,6 +393,7 @@ async function main(): Promise<void> {
   }
   const config: EngineConfig = {
     model: effectiveModel,
+    ...(execArgs?.effort ? { effort: execArgs.effort } : {}),
     modelProtocol: apiEnvironment.protocol,
     modelSettings: executionSettings.modelSettings,
     apiKey,
@@ -455,6 +468,16 @@ async function main(): Promise<void> {
             return answer.trim().toLowerCase().startsWith('y')
           }
         : undefined,
+  }
+  if (execArgs) {
+    try {
+      await runExec({ config, sessionDir, task: execArgs.task, responseSchema, onUserPromptSubmit: text => hookRunner.runUserPromptSubmit(text) })
+    } finally {
+      releaseSessionOwnership(sessionDir)
+      tmuxLayout.destroy()
+      renderer.destroy()
+    }
+    return
   }
   const planPermissionManager = new PermissionManager()
   planPermissionManager.setMode('plan')

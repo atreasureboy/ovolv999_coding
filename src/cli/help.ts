@@ -7,6 +7,7 @@ export function printHelp(skills: Map<string, Skill>): void {
   r.banner(VERSION, defaultModel)
   process.stdout.write(`USAGE
   ovolv999 [options] [task]
+  ovolv999 exec --jsonl [--output-schema file] [--resume ref|--continue] [task]
 
 OPTIONS
   -m, --model <model>       LLM model  (env: OVOGO_MODEL, default: ${defaultModel})
@@ -19,6 +20,8 @@ OPTIONS
   --ink                     Launch with Ink/React UI (full component tree, live autocomplete)
   --pipe                    Pipe mode: read stdin as context, output to stdout (no UI)
   --format <text|json>      Output format for pipe mode (default: text)
+  exec --jsonl              Run an agent task and emit durable ordered JSONL events
+  --output-schema <file>    exec only: validate a bounded JSON Schema subset and final output
   --runtime-status [path]  Inspect retained runs and workspace recovery state
   --run-id <id>            Select one runtime-status record; optionally --operation-id <id>
   --recover-workspace <path> --epoch <id> --decision <keep|cancel|continue>

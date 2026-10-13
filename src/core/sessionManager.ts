@@ -570,6 +570,26 @@ export function saveSession(sessionDir: string, history: OpenAIMessage[], expect
   }
 }
 
+export function readSessionSnapshot(sessionDir: string): SessionEnvelope {
+  assertNonEmpty(sessionDir, 'sessionDir')
+  const envelope = readEnvelope(sessionDir)
+  observedRevisions.set(resolve(sessionDir), envelope?.revision ?? 0)
+  return structuredClone(envelope ?? {
+    version: CURRENT_SESSION_VERSION,
+    schema: CURRENT_SESSION_SCHEMA,
+    updatedAt: new Date(0).toISOString(),
+    sessionId: sessionIdFor(sessionDir),
+    revision: 0,
+    owner: null,
+    messages: [],
+  })
+}
+
+export function validateSessionMessages(messages: unknown): asserts messages is OpenAIMessage[] {
+  if (!Array.isArray(messages)) throw new TypeError('history must be an array of OpenAIMessage')
+  validateMessageArray(messages, index => new TypeError(`history[${index}] does not match OpenAIMessage shape`))
+}
+
 /**
  * Load the conversation history for a session directory.
  *

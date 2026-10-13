@@ -4,6 +4,9 @@ import { approvalInputDigest } from './approvalBroker.js'
 import { requestOperationApproval } from './engine/approval.js'
 import { PathInstructionContext } from './engine/instructions.js'
 import { recordToolOperation } from './engine/operationRecording.js'
+import { TurnEvents, eventText } from './engine/events.js'
+import { validateOutputSchema, validateStructuredOutput } from './outputSchema.js'
+import { redactDiagnostic } from './diagnosticPolicy.js'
 import { settleHistory, trimHistory } from './messageGroups.js'
 import { createModelGateway } from './modelGateway.js'
 import { getEffortPrompt, isEffortLevel, type EffortLevel } from './effort.js'
@@ -77,6 +80,7 @@ import type {
   ToolDefinition,
   ToolResult,
   TurnResult,
+  RunTurnOptions,
 } from './types.js'
 import { captureArtifactVersion, createVerificationPlan } from './verification.js'
 function isContextOverflowError(message: string): boolean {
@@ -110,6 +114,10 @@ export class ExecutionEngine {
   private _turnInFlight = false
   private activeRun: RunContext | null = null
   private instructionContext: PathInstructionContext | null = null
+  private turnEvents: TurnEvents | null = null
+  private turnOptions: RunTurnOptions = {}
+  private modelRequestNumber = 0
+  private turnTranscript: OpenAIMessage[] | null = null
   private disposal: Promise<void> | null = null
   private disposed = false
   private lastAssistantTs: number | undefined = undefined
@@ -398,6 +406,7 @@ export class ExecutionEngine {
           max_tokens: this.getEffectiveMaxOutputTokens(),
           stream: true,
           ...(this._streamUsageSupported ? { stream_options: { include_usage: true } } : {}),
+          ...(this.turnOptions.responseSchema ? { response_format: { type: 'json_schema' as const, json_schema: { name: 'agent_output', strict: true, schema: this.turnOptions.responseSchema } } } : {}),
         },
         { signal: turnAbortSignal },
       )
@@ -427,14 +436,42 @@ export class ExecutionEngine {
         return createStream()
       }
     }
-    const result = await consumeModelStream(
-      openStream,
-      turnAbortSignal,
-      this.renderer,
-      this.currentTurnAbortController,
-    )
-    this.recordUsage(result.usage, callStartMs)
-    return result
+    const itemId = 'assistant:' + ++this.modelRequestNumber
+    let visible = '', started = false, completed = false
+    const observer: EngineObserver = {
+      ...this.renderer,
+      startSpinner: () => this.renderer.startSpinner(),
+      stopSpinner: () => this.renderer.stopSpinner(),
+      beginAssistantText: () => {
+        this.turnEvents?.emit({ type: 'item.started', turnId: this.activeRun!.runId, itemId, kind: 'message', role: 'assistant' })
+        started = true
+        this.renderer.beginAssistantText()
+      },
+      streamToken: text => { this.turnEvents?.text(itemId, text); visible += text; this.renderer.streamToken(text) },
+      endAssistantText: () => this.renderer.endAssistantText(),
+      streamReasoning: text => this.renderer.streamReasoning?.(text),
+      toolStart: (name, input) => this.renderer.toolStart(name, input),
+      toolResult: (name, content, isError) => this.renderer.toolResult(name, content, isError),
+      contextWarning: (tokens, max, ratio) => this.renderer.contextWarning(tokens, max, ratio),
+      compactStart: tokens => this.renderer.compactStart(tokens),
+      compactDone: (original, summary) => this.renderer.compactDone(original, summary),
+      warn: text => this.renderer.warn(text),
+      error: text => this.renderer.error(text),
+    }
+    try {
+      const result = await consumeModelStream(
+        openStream,
+        turnAbortSignal,
+        observer,
+        this.currentTurnAbortController,
+      )
+      if (started) this.turnEvents?.complete(itemId, 'message', visible, result.finishReason === 'stop' || result.finishReason === 'tool_calls' ? 'completed' : 'partial')
+      completed = true
+      this.recordUsage(result.usage, callStartMs)
+      return result
+    } finally {
+      if (started && !completed) this.turnEvents?.complete(itemId, 'message', visible, turnAbortSignal.aborted ? 'cancelled' : 'failed')
+    }
   }
   private recordUsage(usage: TokenUsage | null, callStartMs: number): void {
     if (usage) {
@@ -583,11 +620,14 @@ export class ExecutionEngine {
     const batches = mutableHooks ? parsedCalls.map(call => ({ safe: false, calls: [call] })) : partitionToolCalls(parsedCalls, this.allTools)
     const limit = Math.max(1, Math.min(16, Math.floor(this.config.maxToolConcurrency ?? 4)))
     const settled = new Set<string>()
+    const itemIds = new Map<string, string>()
     let interrupted = false
     const publish = async (call: ParsedToolCall, result: ToolResult): Promise<void> => {
       if (settled.has(call.tc.id)) return
       settled.add(call.tc.id)
       const { tc } = call
+      const itemId = itemIds.get(tc.id)
+      if (itemId) this.turnEvents?.complete(itemId, 'tool', result, result.status ?? (result.isError ? 'failed' : 'completed'))
       const failureKey = tc.name === 'Agent' ? tc.id : tc.name + ':' + JSON.stringify(call.input)
       if (result.isError) run.toolFailures.set(failureKey, result)
       else run.toolFailures.delete(failureKey)
@@ -601,7 +641,7 @@ export class ExecutionEngine {
         status: result.status,
         run_id: run.runId,
       })
-      messages.push({
+      this.appendMessages(messages, {
         role: 'tool',
         tool_call_id: tc.id,
         name: tc.name,
@@ -616,6 +656,9 @@ export class ExecutionEngine {
       if (signal.aborted)
         return { content: 'Cancelled before execution', isError: true, status: 'cancelled' }
       try {
+        const itemId = `tool:${turnNumber}:${tc.id}`
+        this.turnEvents?.emit({ type: 'item.started', turnId: run.runId, itemId, kind: 'tool', name: tc.name, toolCallId: tc.id, inputDigest: approvalInputDigest(input), preview: eventText(JSON.stringify(input), 4096).text })
+        itemIds.set(tc.id, itemId)
         this.renderer.toolStart(tc.name, input)
         return await runOperation(
           run,
@@ -733,6 +776,10 @@ export class ExecutionEngine {
       ...modulePatches,
     }
   }
+  private appendMessages(messages: OpenAIMessage[], ...added: OpenAIMessage[]): void {
+    messages.push(...added)
+    this.turnTranscript?.push(...structuredClone(added))
+  }
   async runTurn(
     userMessage: string,
     history: OpenAIMessage[],
@@ -740,9 +787,11 @@ export class ExecutionEngine {
       path: string
       dataUrl: string
     }>,
+    options: RunTurnOptions = {},
   ): Promise<{
     result: TurnResult
     newHistory: OpenAIMessage[]
+    turnMessages?: OpenAIMessage[]
   }> {
     if (this._turnInFlight) {
       throw new Error(
@@ -769,8 +818,16 @@ export class ExecutionEngine {
         newHistory: history,
       }
     }
+    if (options.responseSchema) {
+      validateOutputSchema(options.responseSchema)
+      if (!resolveModelRuntime(this.config).options.capabilities.structuredOutput) throw new Error('Configured model does not support structured output')
+      options = { ...options, responseSchema: structuredClone(options.responseSchema) }
+    }
+    const run = createRunContext(this.config, options)
     this._turnInFlight = true
-    const run = createRunContext(this.config)
+    this.turnOptions = options
+    this.turnEvents = new TurnEvents(run.runId, options.events)
+    this.modelRequestNumber = 0
     this.activeRun = run
     this.instructionContext = new PathInstructionContext(this.config.cwd, Boolean(run.parentRunId || run.workspace.worktreeName || (this.config.initialAgentDepth ?? 0) > 0))
     const turnAbortController = run.controller
@@ -780,8 +837,10 @@ export class ExecutionEngine {
       ...settleHistory(history),
       { role: 'user', content: userMessage },
     ]
+    this.turnTranscript = [{ role: 'user', content: userMessage }]
     try {
       initializeRunStore(run)
+      this.turnEvents.message('user:' + run.runId, userMessage, 'user')
       const planMode = this.isPlanMode()
       const verificationPlan = createVerificationPlan(this.config.cwd, undefined, [
         ...(this.config.verificationExcludedPaths ?? []),
@@ -845,6 +904,7 @@ export class ExecutionEngine {
         userContent = normalizeCJKInput(userMessage)
       }
       messages = [...settleHistory(history), { role: 'user', content: userContent }]
+      this.turnTranscript = [{ role: 'user', content: structuredClone(userContent) }]
       if (this.pendingSnipCount !== null) {
         const queuedKeep = this.pendingSnipCount
         this.pendingSnipCount = null
@@ -874,6 +934,12 @@ export class ExecutionEngine {
         while (!isTerminal(state)) {
           switch (state.kind) {
             case 'check_abort': {
+              this.turnEvents?.check()
+              if (!turnAbortController.signal.aborted) for (const steering of options.takeSteering?.() ?? []) {
+                if (steering.recorded) this.turnEvents?.complete(steering.id, 'message', steering.text, 'completed')
+                else this.turnEvents?.message(steering.id, steering.text, 'user', run.runId)
+                this.appendMessages(messages, { role: 'user', content: normalizeCJKInput(steering.text) })
+              }
               if (turnAbortController.signal.aborted) {
                 state = transitionQueryState(state, { type: 'hard_abort', output: finalOutput })
               } else if (this.claimSoftAbort(turnAbortController)) {
@@ -919,13 +985,14 @@ export class ExecutionEngine {
                     message: msg.slice(0, 500),
                     iteration: state.iteration,
                   })
-                  messages.push({ role: 'system', source: 'module', content: msg })
+                  this.appendMessages(messages, { role: 'system', source: 'module', content: msg })
                 }
               }
               state = transitionQueryState(state, { type: 'continue' })
               break
             }
             case 'llm_call': {
+              this.turnEvents?.check()
               turnAbortController.signal.throwIfAborted()
               systemPrompt = this.buildSystemPrompt(this.isPlanMode(), moduleSections, await this.instructionContext.refresh())
               this.systemPromptTokens = estimateTokens([{ role: 'system', content: systemPrompt }])
@@ -965,7 +1032,7 @@ export class ExecutionEngine {
                     : undefined,
               }
               if (providerState) this.discardProviderContinuation(messages)
-              messages.push(assistantMsg)
+              this.appendMessages(messages, assistantMsg)
               this.lastAssistantTs = Date.now()
               if (
                 !assistantText &&
@@ -973,7 +1040,7 @@ export class ExecutionEngine {
                 emptyResponseCount < MAX_EMPTY_RETRIES
               ) {
                 emptyResponseCount++
-                messages.push({
+                this.appendMessages(messages, {
                   role: 'system',
                   source: 'runtime',
                   content:
@@ -993,7 +1060,7 @@ export class ExecutionEngine {
                   max: MAX_LENGTH_RETRIES,
                   partial_length: assistantText.length,
                 })
-                messages.push({
+                this.appendMessages(messages, {
                   role: 'system',
                   source: 'runtime',
                   content:
@@ -1038,7 +1105,7 @@ export class ExecutionEngine {
                     turn_tokens: decision.turnTokens,
                     budget: decision.budget,
                   })
-                  messages.push({
+                  this.appendMessages(messages, {
                     role: 'system',
                     source: 'runtime',
                     content: decision.nudgeMessage,
@@ -1067,7 +1134,7 @@ export class ExecutionEngine {
                       shape,
                       raw_args: tc.arguments.slice(0, 200),
                     })
-                    messages.push({
+                    this.appendMessages(messages, {
                       role: 'tool',
                       tool_call_id: tc.id,
                       name: tc.name,
@@ -1084,7 +1151,7 @@ export class ExecutionEngine {
                     parse_error: true,
                     raw_args: tc.arguments.slice(0, 200),
                   })
-                  messages.push({
+                  this.appendMessages(messages, {
                     role: 'tool',
                     tool_call_id: tc.id,
                     name: tc.name,
@@ -1128,8 +1195,10 @@ export class ExecutionEngine {
         } else {
           result = { stopped: true, reason: 'error', output: finalOutput }
         }
+        if (options.responseSchema && result.reason === 'stop_sequence') validateStructuredOutput(result.output, options.responseSchema)
       } catch (err) {
         const errMsg = (err as Error).message || String(err)
+        this.turnEvents?.emit({ type: 'error', turnId: run.runId, code: 'engine_error', message: eventText(String(redactDiagnostic(errMsg)), 4096).text })
         const errorIteration = 'iteration' in state ? state.iteration : 0
         if (!turnAbortController.signal.aborted) await runHookOperation(run, this.config, 'OnError', signal =>
           this.config.hookRunner?.runOnError?.(err as Error, { turnNumber: errorIteration, lastToolName }, signal),
@@ -1142,6 +1211,8 @@ export class ExecutionEngine {
           this.softAbortOwner = null
         }
       }
+      this.turnEvents?.check()
+      this.turnEvents?.emit({ type: 'item.started', turnId: run.runId, itemId: 'verification:' + run.runId, kind: 'verification', workspace: this.config.cwd })
       result = await acceptRunResult({
         config: this.config,
         eventLog: this.eventLog,
@@ -1152,7 +1223,9 @@ export class ExecutionEngine {
         verificationPlan,
         startingArtifact,
       })
-      return { result, newHistory: settleHistory(messages) }
+      this.turnEvents?.check()
+      this.turnEvents?.complete('verification:' + run.runId, 'verification', result.verification?.output ?? '', result.status ?? 'failed', result.verification)
+      return { result, newHistory: settleHistory(messages), turnMessages: settleHistory(this.turnTranscript ?? []) }
     } catch (error) {
       try {
         run.store?.finish('needs_recovery')
@@ -1180,6 +1253,7 @@ export class ExecutionEngine {
           unfinishedResources: [...run.pending.keys()],
         },
         newHistory: settleHistory(messages),
+        turnMessages: settleHistory(this.turnTranscript ?? []),
       }
     } finally {
       quarantineRun(run)
@@ -1187,6 +1261,9 @@ export class ExecutionEngine {
       this.currentTurnAbortController = null
       this.activeRun = null
       this.instructionContext = null
+      this.turnEvents = null
+      this.turnOptions = {}
+      this.turnTranscript = null
       this._turnInFlight = false
     }
   }

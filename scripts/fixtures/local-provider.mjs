@@ -10,13 +10,13 @@ export async function startProvider() {
         if (Buffer.byteLength(body) > 2 * 1024 * 1024) throw new Error('Fixture request limit exceeded')
       }
       const data = JSON.parse(body)
-      state.records.push({ toolCount: data.tools?.length ?? 0 })
+      state.records.push({ toolCount: data.tools?.length ?? 0, responseFormat: data.response_format })
       const toolResults = data.messages.filter(message => message.role === 'tool').length
       const delta = state.scenario === 'edit' && toolResults < 2
         ? { tool_calls: [{ index: 0, id: `smoke-edit-${toolResults}`, type: 'function', function: { name: toolResults ? 'Edit' : 'Read', arguments: JSON.stringify(toolResults ? { file_path: 'source.txt', old_string: 'before', new_string: 'after' } : { file_path: 'source.txt' }) } }] }
         : state.scenario === 'write' && !toolResults
           ? { tool_calls: [{ index: 0, id: 'smoke-write', type: 'function', function: { name: 'Write', arguments: JSON.stringify({ file_path: 'product.txt', content: 'changed' }) } }] }
-          : { content: 'OFFLINE_SMOKE_OK' }
+          : { content: state.scenario === 'structured-valid' ? '{"answer":"fixture"}' : state.scenario === 'structured-invalid' ? '{"answer":42}' : 'OFFLINE_SMOKE_OK' }
       if (data.stream) {
         response.writeHead(200, { 'content-type': 'text/event-stream' })
         response.end(`data: ${JSON.stringify({ id: 'smoke', object: 'chat.completion.chunk', choices: [{ index: 0, delta, finish_reason: delta.tool_calls ? 'tool_calls' : 'stop' }] })}\n\ndata: [DONE]\n\n`)

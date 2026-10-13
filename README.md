@@ -354,6 +354,7 @@ export const plugin: Plugin = {
 | 入口 | 实际能力与兼容边界 |
 | --- | --- |
 | CLI / `--pipe` | CLI 执行受有效权限和验收控制；原始 `--pipe` 只产生文本，不装配写入工具 |
+| `exec --jsonl` | 通过会话服务运行实际编码任务，输出有序 JSONL 事件；最终状态在验收和历史保存后发布。TTY、Ink、ACP 尚未迁移到该服务 |
 | MCP | 默认 stdio，初始化版本 `2024-11-05`；初始化响应必须确认同一版本及有效 capabilities，否则拒绝连接。其他版本尚未验证。tools/resources/prompts 按已连接服务提供；HTTP/SSE/OAuth 不由默认客户端装配 |
 | ACP | 仓库 stdio JSON-RPC adapter，版本 `2025-07-20`；先 initialize，拒绝不支持的版本。没有 handler 的文件读写禁用；能力字段仅描述实际装配，不承诺所有编辑器兼容 |
 | 执行隔离 | 支持 trusted-local；要求 isolated-worker 而缺少实际隔离后端时拒绝执行。沙箱策略文件存在不构成操作系统隔离证明 |
@@ -411,6 +412,20 @@ pnpm run build
 pnpm link --global
 ovolv999 "任务描述"
 ```
+
+### 自动化执行与结构化结果
+
+```bash
+ovolv999 exec --jsonl --cwd /my/project "修复类型错误并运行测试"
+ovolv999 exec --jsonl --continue "继续处理下一处问题"
+ovolv999 exec --jsonl --output-schema result.schema.json "按指定结构返回结果"
+```
+
+标准输出每行一个事件，诊断写入标准错误。任务文字可来自参数或标准输入；同时提供时会合并。`sequence`、`threadId`、`turnId` 标识顺序、会话和回合，工具事件带实际调用 ID。消费者应读取 `turn.finished.status` 并检查进程退出码；输出中断会取消当前运行。大结果会明确标记 `truncated`，`artifact` 是相对于该会话目录的完整结果文件路径。
+
+`--output-schema` 需要模型配置声明结构化输出能力。schema 文件最多 64 KiB，结果 JSON 最多 1 MiB；支持基本 `type`、对象属性/必需字段、数组元素、枚举/常量、数值与长度限制。不支持 `$ref`、组合 schema、正则等关键字，启动前会明确拒绝。最终结果还会本地校验，结构不符不会记为成功。
+
+事件损坏、未决审批和未完成的中断运行保留原文件并要求显式恢复；本入口没有自动重放或交互恢复界面。完整行为和验证范围见 [整改进度](docs/agent-core-progress.md)。
 
 ### 配置文件
 

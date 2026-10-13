@@ -36,6 +36,8 @@ export type ApprovalPending = Omit<ApprovalRequest, 'signal'> & {
   status: 'queued' | 'active' | 'needs_input'
 }
 
+export type ApprovalEvent = { type: 'requested'; request: ApprovalPending } | { type: 'resolved'; request: ApprovalPending; decision: ApprovalDecision }
+
 export interface ApprovalBrokerOptions {
   onRule?: (rule: string, request: ApprovalRequest) => void | Promise<void>
 }
@@ -85,8 +87,24 @@ export class ApprovalBroker {
   private queue: PendingApproval[] = []
   private active: PendingApproval | null = null
   private sessionGrants = new Set<string>()
+  private listeners = new Set<(event: ApprovalEvent) => void>()
 
   constructor(private readonly options: ApprovalBrokerOptions = {}) {}
+
+  subscribe(listener: (event: ApprovalEvent) => void): () => void {
+    this.listeners.add(listener)
+    return () => { this.listeners.delete(listener) }
+  }
+
+  private notify(event: ApprovalEvent): void {
+    for (const listener of this.listeners) listener(structuredClone(event))
+  }
+
+  private snapshot(pending: PendingApproval): ApprovalPending {
+    const { signal: _signal, ...request } = pending.request
+    void _signal
+    return { ...request, status: pending.status }
+  }
 
   attachHost(host: ApprovalHost): () => void {
     if (this.host) this.disconnectHost('Approval host replaced')
@@ -138,6 +156,7 @@ export class ApprovalBroker {
     }
     this.pending.set(request.requestId, pending)
     original.signal.addEventListener('abort', pending.onAbort, { once: true })
+    try { this.notify({ type: 'requested', request: this.snapshot(pending) }) } catch (error) { this.remove(pending); throw error }
     if (!this.host) return Promise.resolve(this.denied(request, 'needs_input', 'No approval host is available'))
     const result = new Promise<ApprovalDecision>((resolve) => { pending.resolve = resolve })
     this.queue.push(pending)
@@ -166,6 +185,10 @@ export class ApprovalBroker {
   }
 
   private settle(pending: PendingApproval, decision: ApprovalDecision, drain = true): void {
+    try { this.notify({ type: 'resolved', request: this.snapshot(pending), decision }) } catch (error) {
+      this.sessionGrants.delete(this.sessionKey(pending.request))
+      decision = this.denied(pending.request, 'needs_input', 'Approval event could not be persisted: ' + String(error))
+    }
     const resolve = pending.resolve
     pending.resolve = undefined
     this.queue = this.queue.filter((item) => item !== pending)

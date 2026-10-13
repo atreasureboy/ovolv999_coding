@@ -7,6 +7,7 @@ import type { ModelProtocol } from './model/types.js'
 import type { ModelSettings } from '../config/modelSettings.js'
 import type { UsageLedger } from './usageLedger.js'
 import type { OperationFileEvidence, OperationFileObservation } from './runStore.js'
+import type { EngineEventSink } from './agentEvents.js'
 // Core types for ovolv999 execution engine
 
 import type { EventLog } from './eventLog.js'
@@ -409,6 +410,19 @@ export interface EngineConfig {
    * leave this unset.
    */
   initialAgentDepth?: number
+}
+
+export interface SteeringInput {
+  id: string
+  text: string
+  recorded?: boolean
+}
+
+export interface RunTurnOptions {
+  runId?: string
+  events?: EngineEventSink
+  takeSteering?: () => readonly SteeringInput[]
+  responseSchema?: Record<string, unknown>
 }
 
 export interface TurnResult {
