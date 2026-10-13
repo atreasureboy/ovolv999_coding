@@ -41,6 +41,7 @@ describe('built-in command registration', () => {
       'security-review',
       'branch',
       'resume',
+      'recover',
       'sessions',
       'status',
       'files',
@@ -98,7 +99,7 @@ describe('built-in command registration', () => {
       'ide',
     ]
     for (const name of canonicalNames) expect(getCommand(name)).toBeDefined()
-    expect(listCommands()).toHaveLength(136)
+    expect(listCommands()).toHaveLength(137)
   })
 
   it.each([
@@ -140,7 +141,7 @@ describe('built-in command registration', () => {
   it('restores built-ins after a registry clear without re-importing modules', () => {
     clearRegistry()
     registerBuiltinCommands()
-    expect(listCommands()).toHaveLength(136)
+    expect(listCommands()).toHaveLength(137)
     expect(getCommand('kb')?.handler).toBe(getCommand('knowledge')?.handler)
     expect(getCommand('snip')?.handler).toBe(getCommand('snippet')?.handler)
   })
@@ -153,7 +154,7 @@ describe('built-in command registration', () => {
     await import('../../src/commands/configurationCommands.js')
     expect(registry.listCommands()).toEqual([])
     await import('../../src/commands/builtin.js')
-    expect(registry.listCommands()).toHaveLength(136)
+    expect(registry.listCommands()).toHaveLength(137)
     expect(registry.getCommand('kb')?.handler).toBe(registry.getCommand('knowledge')?.handler)
   })
 })

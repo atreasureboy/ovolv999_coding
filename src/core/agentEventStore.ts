@@ -351,6 +351,22 @@ export class AgentEventStore {
     return snapshot
   }
 
+  retainedArtifacts(): readonly string[] {
+    if (this.readOnly) { this.assertOpen(); this.refresh(false) }
+    else this.assertWritable()
+    const artifacts = new Set<string>()
+    for (const event of this.events) {
+      if ((event.type === 'item.completed' || event.type === 'turn.finished') && event.artifact) artifacts.add(event.artifact)
+    }
+    const snapshots = [this.state]
+    if (this.manifest.checkpoint && this.manifest.checkpoint.sequence !== this.state.lastSequence) snapshots.push(this.loadCheckpoint(this.manifest.checkpoint))
+    for (const snapshot of snapshots) {
+      for (const item of snapshot.items) if (item.artifact) artifacts.add(item.artifact)
+      if (snapshot.lastTurn?.artifact) artifacts.add(snapshot.lastTurn.artifact)
+    }
+    return [...artifacts]
+  }
+
   checkpoint(input: { historyRevision: number; turnId: string }): AgentThreadSnapshot {
     this.assertWritable()
     if (this.state.activeTurn) throw new Error('Cannot checkpoint an active turn; a completed turn is required')

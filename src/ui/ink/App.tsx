@@ -74,12 +74,15 @@ export interface AppProps {
     prompt: string,
     history: OpenAIMessage[],
     images?: Array<{ path: string; dataUrl: string }>,
+    displayPrompt?: string,
   ) => Promise<{ newHistory: OpenAIMessage[]; reason: string; status?: string }>
   /** Slash command dispatcher. Returns null if not a slash command. */
   dispatchSlash: (input: string) => Promise<boolean>
   /** Initial history (for resume). */
   initialHistory: OpenAIMessage[]
   getHistory?: () => OpenAIMessage[]
+  getModelHistory?: () => OpenAIMessage[]
+  displayUserViaEvents?: boolean
   onInterrupt?: () => void
   /** Max context tokens (for StatusBar). */
   maxContextTokens: number
@@ -98,6 +101,8 @@ export function App({
   dispatchSlash,
   initialHistory,
   getHistory,
+  getModelHistory,
+  displayUserViaEvents = false,
   onInterrupt,
   maxContextTokens,
   cwd,
@@ -135,7 +140,7 @@ export function App({
       }
 
       // Normal turn — expand @file mentions before sending to engine
-      store.addUserMessage(text)
+      if (!displayUserViaEvents) store.addUserMessage(text)
       const { text: expandedText, mentions, images } = expandAtMentions(text, cwd)
       if (mentions.some((m) => m.found)) {
         const found = mentions.filter((m) => m.found)
@@ -156,6 +161,7 @@ export function App({
           expandedText,
           getHistory?.() ?? history,
           images.length > 0 ? images : undefined,
+          text,
         )
         if (!getHistory) setFallbackHistory(result.newHistory)
         store.addInfo(`Task ${result.status ?? result.reason}`)
@@ -175,7 +181,7 @@ export function App({
         }
       }
     },
-    [history, getHistory, runTurn, dispatchSlash, store, model, cwd],
+    [history, getHistory, runTurn, dispatchSlash, store, model, cwd, displayUserViaEvents],
   )
 
   // ── Interrupt ─────────────────────────────────────────────────────────────
@@ -260,7 +266,7 @@ export function App({
 
   // ── Context state for StatusBar ───────────────────────────────────────────
 
-  const tokens = estimateTokens(history)
+  const tokens = estimateTokens(getModelHistory?.() ?? history)
   const contextPct = maxContextTokens > 0 ? tokens / maxContextTokens : 0
 
   // ── Render ────────────────────────────────────────────────────────────────

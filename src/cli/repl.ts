@@ -1,31 +1,28 @@
 import { dispatchSlashCommand, listCommands, type SlashCommandContext } from '../commands/index.js'
 import { getProjectSettingsPath, saveProjectSettings } from '../config/settings.js'
 import { ExecutionEngine } from '../core/engine.js'
+import { AgentSessionClient } from '../core/agentSessionClient.js'
+import { bindEngineSession } from '../core/engineSession.js'
 import type { EpisodicMemory } from '../core/episodicMemory.js'
-import { normalizeOutcome, settleWithin } from '../core/outcome.js'
+import { normalizeOutcome } from '../core/outcome.js'
 import type { SemanticMemory } from '../core/semanticMemory.js'
 import {
   AmbiguousSessionError,
   SessionNotFoundError,
-  claimSessionOwnership,
+  createSessionDir,
   listSessions,
-  loadSession,
-  releaseSessionOwnership,
   resolveSessionPath,
-  saveSession,
 } from '../core/sessionManager.js'
 import type { EngineConfig, OpenAIMessage } from '../core/types.js'
 import { consolidateSession } from '../modules/reflection.js'
 import type { Skill } from '../skills/loader.js'
 import { createSkillRuntime, formatSkillInvocation } from '../skills/runtime.js'
-import { trimHistoryForNextTurn } from '../ui/historyTrimmer.js'
+import { createAgentEventRenderer } from '../ui/agentEventRenderer.js'
 import { InputHandler } from '../ui/input.js'
 import type { Renderer } from '../ui/renderer.js'
 import { SlashSuggester } from '../ui/slashSuggest.js'
-import { runWithDeadline } from '../ui/turnDeadline.js'
 import { updateProgressLog } from './progress.js'
 import type { CliSessionState } from './sessionState.js'
-import { HARD_TURN_DEADLINE_MS } from './tasks.js'
 export async function runPlanMode(
   task: string,
   engine: ExecutionEngine,
@@ -34,13 +31,19 @@ export async function runPlanMode(
   input: InputHandler,
   history: OpenAIMessage[],
   cwd: string,
+  executionClient?: AgentSessionClient,
+  onActiveClient?: (client: AgentSessionClient | null) => void,
+  onPromptSubmit?: (signal: AbortSignal) => Promise<unknown>,
 ): Promise<void> {
   renderer.planModeStart()
   renderer.humanPrompt(`[PLAN] ${task}`)
   updateProgressLog(cwd, 'planning', task.slice(0, 100))
-  const planEngine = new ExecutionEngine(planConfig, renderer)
+  const planSessionDir = createSessionDir(cwd)
+  const planEngine = new ExecutionEngine(bindEngineSession(planConfig, planSessionDir), renderer)
+  const planClient = new AgentSessionClient({ engine: planEngine, observer: renderer, cwd, sessionDir: planSessionDir, history, onEvent: createAgentEventRenderer(renderer) })
   try {
-    const { result } = await planEngine.runTurn(task, [...history])
+    onActiveClient?.(planClient)
+    const { result } = await planClient.runTurn(task, undefined, onPromptSubmit)
     const status = normalizeOutcome(result)
     if (status !== 'completed') {
       renderer.warn(`Planning ${status}: ${result.reason}`)
@@ -52,7 +55,8 @@ export async function runPlanMode(
     updateProgressLog(cwd, 'idle', 'waiting for next task')
     return
   } finally {
-    await planEngine.dispose()
+    await planClient.dispose()
+    onActiveClient?.(executionClient ?? null)
   }
   renderer.planConfirmPrompt()
   const { text: answer, eof } = await input.readLine('')
@@ -66,14 +70,19 @@ export async function runPlanMode(
     renderer.humanPrompt(task)
     updateProgressLog(cwd, 'running', task.slice(0, 100))
     const startMs = Date.now()
+    const client = executionClient ?? new AgentSessionClient({ engine, observer: renderer, cwd, sessionDir: engine.getConfig().sessionDir, history, onEvent: createAgentEventRenderer(renderer) })
     try {
-      const { result, newHistory } = await engine.runTurn(task, history)
+      onActiveClient?.(client)
+      const { result, newHistory } = await client.runTurn(task)
       history.length = 0
-      history.push(...trimHistoryForNextTurn(newHistory))
+      history.push(...newHistory)
       const elapsed = ((Date.now() - startMs) / 1000).toFixed(1)
       renderer.info(`${normalizeOutcome(result)} in ${elapsed}s · ${result.reason}`)
     } catch (err: unknown) {
       renderer.error(`Execution error: ${(err as Error).message}`)
+    } finally {
+      if (!executionClient) await client.dispose()
+      onActiveClient?.(executionClient ?? null)
     }
     updateProgressLog(cwd, 'idle', 'waiting for next task')
   } else {
@@ -89,7 +98,7 @@ export async function runRepl(
   cwd: string,
   skills: Map<string, Skill>,
   hookRunner: {
-    runUserPromptSubmit: (p: string) => unknown
+    runUserPromptSubmit: (p: string, signal?: AbortSignal) => unknown
   },
   consolidate?: {
     config: EngineConfig
@@ -102,6 +111,10 @@ export async function runRepl(
 ): Promise<void> {
   const skillRuntime = createSkillRuntime(skills)
   const history: OpenAIMessage[] = resumedHistory ? [...resumedHistory] : []
+  const client = new AgentSessionClient({ engine, observer: renderer, cwd, sessionDir, history, onEvent: createAgentEventRenderer(renderer) })
+  try { await client.initialize() } catch (error) { renderer.warn(`Session requires recovery: ${(error as Error).message}. Inspect its records, then use /recover --fork.`) }
+  history.splice(0, history.length, ...client.getHistory())
+  let activeClient: AgentSessionClient | null = client
   let getLineFn: () => string = () => ''
   const slashSuggester = new SlashSuggester({
     source: {
@@ -116,26 +129,19 @@ export async function runRepl(
   const input = new InputHandler({ completer: slashSuggester.complete })
   sessionState.prompt = input.sharedPrompt()
   getLineFn = () => input.getLine()
-  let currentSessionDir = sessionDir
-  const saveCurrentSession = (
-    failureMessage: string | null = 'Failed to persist session',
-  ): void => {
-    if (!currentSessionDir) return
-    try {
-      saveSession(currentSessionDir, history)
-    } catch (err: unknown) {
-      if (failureMessage) renderer.warn(`${failureMessage}: ${(err as Error).message}`)
-    }
+  sessionState.saveOnExit = null
+  sessionState.interrupt = () => activeClient?.interrupt() ?? Promise.resolve()
+  sessionState.dispose = async () => {
+    if (activeClient && activeClient !== client) await activeClient.dispose()
+    await client.dispose()
   }
-  sessionState.saveOnExit = () => saveCurrentSession()
-  const loadSessionByRef = (ref: string): OpenAIMessage[] | null => {
+  sessionState.getEngine = () => client.engine
+  const onAbort = () => { void Promise.resolve(sessionState.interrupt?.()).catch(() => {}); input.close() }
+  signal?.addEventListener('abort', onAbort, { once: true })
+  const loadSessionByRef = async (ref: string): Promise<OpenAIMessage[] | null> => {
     try {
       const dir = resolveSessionPath(cwd, ref)
-      claimSessionOwnership(dir)
-      const msgs = loadSession(dir)
-      if (currentSessionDir && currentSessionDir !== dir) releaseSessionOwnership(currentSessionDir)
-      currentSessionDir = dir
-      return msgs
+      return await client.switchSession(dir)
     } catch (err: unknown) {
       if (err instanceof SessionNotFoundError || err instanceof AmbiguousSessionError) {
         return null
@@ -189,7 +195,7 @@ export async function runRepl(
       const now = Date.now()
       if (now - lastEscMs < 800) return
       lastEscMs = now
-      engine.abort()
+      void activeClient?.interrupt().catch(error => renderer.warn(`Interruption failed: ${(error as Error).message}`))
       renderer.stopSpinner()
       process.stdout.write('\n')
       renderer.warn('Interrupted. Type feedback or press Enter to resume.')
@@ -204,18 +210,13 @@ export async function runRepl(
     const rapid = now - lastSigintMs < 1500
     lastSigintMs = now
     if (running && !rapid) {
-      engine.abort()
+      void activeClient?.interrupt().catch(error => renderer.warn(`Interruption failed: ${(error as Error).message}`))
       renderer.stopSpinner()
       renderer.warn('Cancelled. Press Ctrl+C again within 1.5s to force exit.')
       return
     }
     renderer.newline()
-    renderer.info('Force exit (Ctrl+C x' + sigintCount + '). Saving session...')
-    try {
-      sessionState.saveOnExit?.()
-    } catch (error) {
-      void error
-    }
+    renderer.info('Force exit (Ctrl+C x' + sigintCount + '). Durable records are retained.')
     try {
       input.close()
     } catch (error) {
@@ -225,85 +226,31 @@ export async function runRepl(
   }
   process.on('SIGINT', onSigint)
   input.readline?.on('SIGINT', onSigint)
-  async function submitPrompt(prompt: string): Promise<boolean> {
-    try {
-      await hookRunner.runUserPromptSubmit(prompt)
-      return true
-    } catch (error) {
-      renderer.error(`Prompt submission failed: ${error instanceof Error ? error.message : String(error)}`)
-      return false
-    }
-  }
   async function runTask(
     prompt: string,
-    taskHistory: OpenAIMessage[],
     startMs: number,
+    onPromptSubmit: (signal: AbortSignal) => Promise<unknown>,
   ): Promise<void> {
     running = true
     let currentPrompt = prompt
-    let currentHistory = taskHistory
+    let pendingSubmission: typeof onPromptSubmit | undefined = onPromptSubmit
     try {
       while (true) {
-        let result: Awaited<ReturnType<ExecutionEngine['runTurn']>>
-        let deadlineExceeded = false
-        const dl = runWithDeadline(() => engine.runTurn(currentPrompt, currentHistory), {
-          deadlineMs: HARD_TURN_DEADLINE_MS,
-          onDeadline: () => {
-            deadlineExceeded = true
-            engine.abort()
-          },
-        })
-        try {
-          result = await dl.promise
-        } catch (err: unknown) {
-          const error = err as Error
-          if (error.name === 'AbortError' || deadlineExceeded) {
-            renderer.warn(
-              deadlineExceeded
-                ? `Turn hit the ${HARD_TURN_DEADLINE_MS / 1000}s hard deadline — aborting.`
-                : 'Turn aborted.',
-            )
-            const settled = await settleWithin(dl.taskSettled, 3000).catch((error: unknown) => {
-              renderer.error((error as Error).message)
-              return undefined
-            })
-            if (!settled) {
-              await settleWithin(Promise.resolve(engine.dispose()), 3000).catch(() => {})
-              process.exitCode = 2
-              break
-            }
-            if (settled.status === 'fulfilled' && settled.value) {
-              history.length = 0
-              history.push(...trimHistoryForNextTurn(settled.value.newHistory))
-            }
-            currentHistory = [...history]
-            saveCurrentSession(null)
-            renderer.writeInterruptPrompt()
-            awaitingInput = true
-            const { text: feedback, eof } = await input.readLine('')
-            awaitingInput = false
-            if (eof) break
-            const trimmedFeedback = feedback.trim()
-            currentPrompt = trimmedFeedback
-              ? `[User Interrupt]\n${trimmedFeedback}\n\n${deadlineExceeded ? 'The previous turn exceeded a safety deadline. ' : ''}Adjust your actions and continue.`
-              : deadlineExceeded ? '[Resume] The previous turn hit a safety deadline. Try a simpler approach.' : '[Resume] Continue the interrupted task.'
-            continue
-          }
-          throw err
-        } finally {
-          dl.clear()
-        }
+        const result = await client.runTurn(currentPrompt, undefined, pendingSubmission)
+        pendingSubmission = undefined
         history.length = 0
-        history.push(...trimHistoryForNextTurn(result.newHistory))
-        currentHistory = [...history]
-        saveCurrentSession()
-        if (result.result.reason === 'interrupted' || result.result.reason === 'error') {
+        history.push(...result.newHistory)
+        const status = normalizeOutcome(result.result)
+        if (status === 'blocked') {
+          renderer.warn('The turn is blocked. Review retained records before continuing.')
+          break
+        }
+        if (result.result.reason === 'interrupted' || result.result.reason === 'error' || status === 'limit_reached') {
           renderer.writeInterruptPrompt()
           awaitingInput = true
           const { text: feedback, eof } = await input.readLine('')
           awaitingInput = false
           if (eof) {
-            saveCurrentSession(null)
             break
           }
           const trimmedFeedback = feedback.trim()
@@ -336,7 +283,6 @@ export async function runRepl(
       const { text, eof } = await input.readLine('')
       slashSuggester.detach()
       if (eof) {
-        saveCurrentSession(null)
         renderer.newline()
         renderer.info('Goodbye.')
         input.close()
@@ -351,8 +297,13 @@ export async function runRepl(
           renderer.warn('Usage: /plan <task description>')
           continue
         }
-        if (!await submitPrompt(trimmed)) continue
-        await runPlanMode(planTask, engine, planConfig, renderer, input, history, cwd)
+        running = true
+        try {
+          await runPlanMode(planTask, client.engine, planConfig, renderer, input, history, cwd, client, value => { activeClient = value }, submitSignal => Promise.resolve(hookRunner.runUserPromptSubmit(trimmed, submitSignal)))
+        } finally {
+          running = false
+          activeClient = client
+        }
         continue
       }
       if (trimmed.startsWith('/')) {
@@ -414,14 +365,22 @@ export async function runRepl(
         }
         let blockedSkill = false
         const slashCtx: SlashCommandContext = {
-          engine,
+          engine: client.engine,
           renderer,
           history,
           cwd,
-          sessionDir: currentSessionDir,
-          setHistory: (msgs: OpenAIMessage[]) => {
+          sessionDir: client.sessionDir,
+          setHistory: async (msgs: OpenAIMessage[]) => {
+            await client.replaceHistory(msgs)
             history.length = 0
-            history.push(...msgs)
+            history.push(...client.getHistory())
+          },
+          getModelHistory: () => client.getModelWindow(),
+          setModelWindow: msgs => client.replaceModelWindow(msgs),
+          recoverSession: async () => {
+            const recovered = await client.recover()
+            history.splice(0, history.length, ...recovered)
+            return recovered
           },
           runPrompt: (p: string) => {
             pendingPrompt = p
@@ -441,10 +400,13 @@ export async function runRepl(
           },
           loadSession: (name: string) => loadSessionByRef(name),
         }
-        const slashResult = await dispatchSlashCommand(trimmed, slashCtx)
+        let slashResult: Awaited<ReturnType<typeof dispatchSlashCommand>>
+        try { slashResult = await dispatchSlashCommand(trimmed, slashCtx) } catch (error) {
+          renderer.error(`Command failed: ${error instanceof Error ? error.message : String(error)}`)
+          continue
+        }
         if (slashResult !== null) {
           if (slashResult.type === 'exit') {
-            saveCurrentSession('Failed to persist session on exit')
             input.close()
             break
           }
@@ -455,17 +417,15 @@ export async function runRepl(
             pendingPrompt = slashResult.value
           }
           if (slashResult.type === 'clear-history') {
-            history.length = 0
-            saveCurrentSession('Failed to persist cleared history')
             renderer.info('Conversation history cleared.')
           }
           if (pendingPrompt) {
             renderer.humanPrompt(
               pendingPrompt.slice(0, 80) + (pendingPrompt.length > 80 ? ' ...' : ''),
             )
-            if (!await submitPrompt(pendingPrompt)) continue
             updateProgressLog(cwd, 'running', pendingPrompt.slice(0, 100))
-            await runTask(pendingPrompt, [...history], Date.now())
+            const submittedPrompt = pendingPrompt
+            await runTask(submittedPrompt, Date.now(), submitSignal => Promise.resolve(hookRunner.runUserPromptSubmit(submittedPrompt, submitSignal)))
             updateProgressLog(cwd, 'idle', 'waiting for next task')
           }
           continue
@@ -475,17 +435,16 @@ export async function runRepl(
         continue
       }
       renderer.humanPrompt(trimmed)
-      if (!await submitPrompt(trimmed)) continue
       updateProgressLog(cwd, 'running', trimmed.slice(0, 100))
-      await runTask(trimmed, [...history], Date.now())
+      await runTask(trimmed, Date.now(), submitSignal => Promise.resolve(hookRunner.runUserPromptSubmit(trimmed, submitSignal)))
       updateProgressLog(cwd, 'idle', 'waiting for next task')
     }
     if (consolidate) {
       try {
         renderer.info('Consolidating memory...')
         const result = await consolidateSession(
-          engine.getModelClient(),
-          engine.getModel(),
+          client.engine.getModelClient(),
+          client.engine.getModel(),
           consolidate.episodicMemory,
           consolidate.semanticMemory,
           consolidate.config.poor,
@@ -502,27 +461,19 @@ export async function runRepl(
     }
   } finally {
     process.stdin.off('keypress', onKeypress)
+    signal?.removeEventListener('abort', onAbort)
     process.off('SIGINT', onSigint)
     input.readline?.off('SIGINT', onSigint)
     slashSuggester.detach()
-    try {
-      sessionState.saveOnExit?.()
-    } catch (error) {
-      void error
-    }
     sessionState.prompt = null
     sessionState.saveOnExit = null
-    if (currentSessionDir) {
-      try {
-        releaseSessionOwnership(currentSessionDir)
-      } catch (error) {
-        renderer.warn(`Failed to release session: ${(error as Error).message}`)
-      }
-    }
+    delete sessionState.interrupt
+    delete sessionState.dispose
     try {
       input.close()
     } catch (error) {
       void error
     }
+    await client.dispose()
   }
 }

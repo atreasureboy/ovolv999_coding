@@ -4,7 +4,7 @@ import { ACP_VERSION, PROTOCOL_VERSION, RPC_ERRORS, errorResponse, notification,
 import type { ACPCapabilities, ACPHandlers, JsonRpcMessage } from './acp/protocol.js'
 
 export { ACP_VERSION, PROTOCOL_VERSION, RPC_ERRORS, errorResponse, notification, okResponse, parseMessage, serializeMessage } from './acp/protocol.js'
-export type { ACPCapabilities, ACPHandlers, JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse } from './acp/protocol.js'
+export type { ACPCapabilities, ACPHandlers, ACPMessageResult, JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse } from './acp/protocol.js'
 
 const METHOD_TRAITS = new Map<string, { exclusive: boolean }>([
   ['message', { exclusive: true }],
@@ -23,11 +23,16 @@ export class ACPServer extends EventEmitter {
   private active = 0
   private maxMessageBytes: number
   private advertised: Partial<ACPCapabilities>
-  private writeFn: (data: string) => void
+  private writeFn: (data: string) => unknown
+  private pendingWrites = new Set<Promise<void>>()
+  private pendingBytes = 0
+  private outputFailure?: Error
+  private notifyOutputFailure!: () => void
+  private readonly outputFailed = new Promise<void>(resolve => { this.notifyOutputFailure = resolve })
 
   constructor(
     handlers: ACPHandlers,
-    options: { cwd: string; write?: (data: string) => void; maxMessageBytes?: number; capabilities?: Partial<ACPCapabilities> },
+    options: { cwd: string; write?: (data: string) => unknown; maxMessageBytes?: number; capabilities?: Partial<ACPCapabilities> },
   ) {
     super()
     this.handlers = handlers
@@ -39,9 +44,9 @@ export class ACPServer extends EventEmitter {
 
   getCapabilities(): ACPCapabilities {
     return {
-      streaming: false,
+      streaming: Boolean(this.handlers.onMessage && this.advertised.streaming),
       tools: Boolean(this.handlers.onMessage && this.advertised.tools),
-      multiModal: Boolean(this.handlers.onMessage),
+      multiModal: Boolean(this.handlers.onMessage && this.advertised.multiModal),
       worktrees: Boolean(this.handlers.onMessage && this.advertised.worktrees),
       interrupts: Boolean(this.handlers.onInterrupt),
     }
@@ -69,12 +74,53 @@ export class ACPServer extends EventEmitter {
   }
 
   send(msg: JsonRpcMessage): void {
-    const text = serializeMessage(msg)
+    if (this.outputFailure) throw this.outputFailure
+    let text = serializeMessage(msg)
     if (Buffer.byteLength(text) > this.maxMessageBytes) {
-      this.writeFn(serializeMessage(errorResponse('id' in msg ? msg.id : undefined, RPC_ERRORS.INTERNAL_ERROR.code, 'ACP response byte limit exceeded')) + '\n')
-      return
+      text = serializeMessage(errorResponse('id' in msg ? msg.id : undefined, RPC_ERRORS.INTERNAL_ERROR.code, 'ACP response byte limit exceeded'))
     }
-    this.writeFn(text + '\n')
+    if (Buffer.byteLength(text) > this.maxMessageBytes) {
+      const error = new Error('ACP response byte limit exceeded')
+      this.failOutput(error)
+      throw error
+    }
+    const bytes = Buffer.byteLength(text) + 1
+    if (this.pendingBytes + bytes > 4 * this.maxMessageBytes) {
+      const error = new Error('ACP pending output byte limit exceeded')
+      this.failOutput(error)
+      throw error
+    }
+    try {
+      const result = this.writeFn(text + '\n')
+      if (result && typeof (result as PromiseLike<unknown>).then === 'function') {
+        this.pendingBytes += bytes
+        const pending = Promise.resolve(result).then(() => {
+          this.pendingBytes -= bytes
+          this.pendingWrites.delete(pending)
+        }, error => {
+          this.pendingBytes -= bytes
+          this.pendingWrites.delete(pending)
+          this.failOutput(error instanceof Error ? error : new Error(String(error)))
+        })
+        this.pendingWrites.add(pending)
+      }
+    } catch (error) {
+      this.failOutput(error instanceof Error ? error : new Error(String(error)))
+      throw error
+    }
+  }
+
+  async flush(): Promise<void> {
+    while (this.pendingWrites.size && !this.outputFailure) await Promise.race([Promise.all(this.pendingWrites), this.outputFailed])
+    if (this.outputFailure) throw this.outputFailure
+  }
+
+  private failOutput(error: Error): void {
+    if (this.outputFailure) return
+    this.outputFailure = error
+    this.notifyOutputFailure()
+    this.stop()
+    this.emit('protocolError', error)
   }
 
   notify(method: string, params?: Record<string, unknown>): void {
@@ -123,11 +169,14 @@ export class ACPServer extends EventEmitter {
           await this.handleMessageMethod(id, params)
           break
 
-        case 'interrupt':
+        case 'interrupt': {
           if (!this.handlers.onInterrupt) { this.respondError(id, RPC_ERRORS.METHOD_NOT_FOUND.code, 'Interrupt handler is not configured'); break }
-          this.handlers.onInterrupt()
-          this.respond(id, { interrupted: true })
+          const expectedTurnId = params?.expectedTurnId
+          if (expectedTurnId !== undefined && (typeof expectedTurnId !== 'string' || !expectedTurnId)) { this.respondError(id, RPC_ERRORS.INVALID_PARAMS.code, 'Invalid expectedTurnId'); break }
+          const interrupted = await this.handlers.onInterrupt(expectedTurnId)
+          this.respond(id, { interrupted: interrupted !== false })
           break
+        }
 
         case 'file/read':
           await this.handleFileRead(id, params)
@@ -180,9 +229,10 @@ export class ACPServer extends EventEmitter {
 
       const response = await this.handlers.onMessage(text, images)
 
-      this.respond(id, { text: response, done: true })
+      const result = { ...(typeof response === 'string' ? { text: response } : response), done: true }
+      this.respond(id, result)
 
-      this.notify('response', { text: response, done: true })
+      this.notify('response', result)
     } catch (err) {
       this.respondError(id, RPC_ERRORS.INTERNAL_ERROR.code, (err as Error).message)
     }

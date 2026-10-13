@@ -2,15 +2,12 @@ import type { UIStore } from './store.js'
 import type { ExecutionEngine } from '../../core/engine.js'
 import type { OpenAIMessage } from '../../core/types.js'
 import type { Renderer } from '../renderer.js'
-import { resolve } from 'node:path'
+import { AgentSessionClient } from '../../core/agentSessionClient.js'
+import { InkRenderer } from './inkRenderer.js'
 import { dispatchSlashCommand, type SlashCommandContext } from '../../commands/index.js'
 import {
   listSessions,
-  claimSessionOwnership,
-  loadSession,
-  releaseSessionOwnership,
   resolveSessionPath,
-  saveSession,
 } from '../../core/sessionManager.js'
 import { formatApiError } from '../../utils/apiError.js'
 import { normalizeOutcome, type OutcomeStatus } from '../../core/outcome.js'
@@ -23,11 +20,13 @@ export interface InkReplControllerOptions {
   inkRenderer: Renderer
   skills: Array<{ name: string; description: string }>
   resolveSkillInvocation?: SkillInvocationResolver
-  onUserPromptSubmit?: (prompt: string) => void | Promise<unknown>
+  onUserPromptSubmit?: (prompt: string, signal?: AbortSignal) => void | Promise<unknown>
   sessionDir?: string
   cwd: string
   resumedHistory?: OpenAIMessage[]
   onExit: () => void
+  client?: AgentSessionClient
+  onClient?: (client: AgentSessionClient) => void
 }
 
 export interface InkReplTurnResult {
@@ -38,13 +37,16 @@ export interface InkReplTurnResult {
 
 export interface InkReplController {
   getHistory: () => OpenAIMessage[]
+  getModelHistory: () => OpenAIMessage[]
   runTurn: (
     prompt: string,
     images?: Array<{ path: string; dataUrl: string }>,
+    displayPrompt?: string,
   ) => Promise<InkReplTurnResult>
   dispatchSlash: (input: string) => Promise<boolean>
-  save: () => void
-  release: () => void
+  initialize: () => Promise<void>
+  interrupt: () => Promise<void>
+  release: () => Promise<void>
 }
 
 const modelChoices = [
@@ -61,57 +63,52 @@ const modelChoices = [
 ]
 
 export function createInkReplController(opts: InkReplControllerOptions): InkReplController {
-  const { store, engine } = opts
-  let history: OpenAIMessage[] = opts.resumedHistory ? [...opts.resumedHistory] : []
-  let currentSessionDir = opts.sessionDir
+  const { store } = opts
+  const eventRenderer = new InkRenderer(store)
+  const client = opts.client ?? new AgentSessionClient({
+    engine: opts.engine, observer: opts.inkRenderer, cwd: opts.cwd,
+    sessionDir: opts.sessionDir, history: opts.resumedHistory,
+    onEvent: event => eventRenderer.agentEvent(event),
+  })
+  opts.onClient?.(client)
   let blockedSkill = false
+  let turnRunning = false
 
-  function setHistory(messages: OpenAIMessage[]): void {
-    history = [...messages]
+  async function setHistory(messages: OpenAIMessage[]): Promise<void> {
+    await client.replaceHistory(messages)
     store.clearMessages()
   }
 
-  function save(): void {
-    if (!currentSessionDir) return
-    try {
-      saveSession(currentSessionDir, history)
-    } catch {
-      return
-    }
-  }
-
-  function release(): void {
-    if (currentSessionDir) releaseSessionOwnership(currentSessionDir)
-  }
-
-  function loadSessionByRef(name: string): OpenAIMessage[] | null {
-    let claimedPath: string | undefined
+  async function loadSessionByRef(name: string): Promise<OpenAIMessage[] | null> {
     try {
       const sessionPath = resolveSessionPath(opts.cwd, name)
-      const switching = !currentSessionDir || resolve(currentSessionDir) !== resolve(sessionPath)
-      claimSessionOwnership(sessionPath)
-      if (switching) claimedPath = sessionPath
-      const loaded = loadSession(sessionPath)
-      if (switching && currentSessionDir) releaseSessionOwnership(currentSessionDir)
-      currentSessionDir = sessionPath
+      const loaded = await client.switchSession(sessionPath)
+      store.clearMessages()
       return loaded
-    } catch {
-      if (claimedPath) releaseSessionOwnership(claimedPath)
+    } catch (error) {
+      store.addError(formatApiError(error).detail)
       return null
     }
   }
 
   const slashContext: SlashCommandContext = {
-    engine,
+    get engine() { return client.engine },
     renderer: opts.inkRenderer,
     get history() {
-      return history
+      return client.getHistory()
     },
     cwd: opts.cwd,
     get sessionDir() {
-      return currentSessionDir
+      return client.sessionDir
     },
     setHistory,
+    getModelHistory: () => client.getModelWindow(),
+    setModelWindow: messages => client.replaceModelWindow(messages),
+    recoverSession: async () => {
+      const history = await client.recover()
+      store.clearMessages()
+      return history
+    },
     runPrompt: (prompt) => {
       void runTurn(prompt)
     },
@@ -141,32 +138,40 @@ export function createInkReplController(opts: InkReplControllerOptions): InkRepl
   async function runTurn(
     prompt: string,
     images?: Array<{ path: string; dataUrl: string }>,
+    displayPrompt = prompt,
   ): Promise<InkReplTurnResult> {
+    if (turnRunning) {
+      store.addWarn('A turn is already running. Interrupt it before starting another.')
+      return { newHistory: client.getHistory(), reason: 'error', status: 'failed' }
+    }
+    turnRunning = true
     store.setRunning(true)
     store.setSpinner(true, 'Thinking')
     try {
-      await opts.onUserPromptSubmit?.(prompt)
-      const result = await engine.runTurn(prompt, history, images)
-      history = result.newHistory
-      const tracker = engine.getCostTracker()
+      eventRenderer.setUserPrompt(displayPrompt)
+      const result = await client.runTurn(prompt, images, opts.onUserPromptSubmit ? signal => opts.onUserPromptSubmit!(prompt, signal) : undefined)
+      const tracker = client.engine.getCostTracker()
       store.setCost(tracker.getTotalCost(), tracker.getTotalAPICalls(), tracker.getUsageSummary?.()?.unknownPriceRequestCount ?? 0)
-      save()
       const status = normalizeOutcome(result.result)
       if (status !== 'completed') {
-        const detail = result.result.verification?.output
-        store.addError(`Task ${status}${detail ? `: ${detail}` : ''}`)
+        const detail = result.result.verification?.output ?? result.result.output
+        if (status === 'cancelled') store.addInfo('Task cancelled')
+        else store.addError(`Task ${status}${detail ? `: ${detail}` : ''}`)
       }
-      return { newHistory: history, reason: result.result.reason, status }
+      return { newHistory: result.newHistory, reason: result.result.reason, status }
     } catch (error: unknown) {
-      if (!(error instanceof Error) || error.name !== 'AbortError') {
-        const formatted = formatApiError(error)
-        store.addError(
-          `${formatted.title}: ${formatted.detail}${formatted.hint ? ' ' + formatted.hint : ''}`,
-        )
+      if (error instanceof Error && error.name === 'AbortError') {
+        store.addInfo('Task cancelled')
+        return { newHistory: client.getHistory(), reason: 'interrupted', status: 'cancelled' }
       }
-      return { newHistory: history, reason: 'error' }
+      const formatted = formatApiError(error)
+      store.addError(
+        `${formatted.title}: ${formatted.detail}${formatted.hint ? ' ' + formatted.hint : ''}`,
+      )
+      return { newHistory: client.getHistory(), reason: 'error', status: 'failed' }
     } finally {
       refreshGitBranch()
+      turnRunning = false
       store.setRunning(false)
       store.setSpinner(false)
     }
@@ -185,9 +190,8 @@ export function createInkReplController(opts: InkReplControllerOptions): InkRepl
     }))
     const selected = await store.showSelectPicker('Resume Session', items)
     if (!selected) return
-    const loaded = slashContext.loadSession?.(selected)
+    const loaded = await slashContext.loadSession?.(selected)
     if (loaded) {
-      setHistory(loaded)
       store.addInfo(`Resumed session: ${selected} (${loaded.length} messages)`)
     } else {
       store.addError(`Failed to load session: ${selected}`)
@@ -195,7 +199,7 @@ export function createInkReplController(opts: InkReplControllerOptions): InkRepl
   }
 
   async function selectModel(): Promise<void> {
-    const currentModel = engine.getModel()
+    const currentModel = client.engine.getModel()
     const items = modelChoices.map((model) => ({
       ...model,
       description:
@@ -203,14 +207,29 @@ export function createInkReplController(opts: InkReplControllerOptions): InkRepl
     }))
     const selected = await store.showSelectPicker('Switch Model', items)
     if (selected && selected !== currentModel) {
-      engine.setModel(selected)
+      client.engine.setModel(selected)
       store.setModel(selected)
       store.addInfo(`Switched model: ${selected}`)
     }
   }
 
   async function dispatchSlash(input: string): Promise<boolean> {
+    try {
+      return await performSlash(input)
+    } catch (error) {
+      const formatted = formatApiError(error)
+      store.addError(`${formatted.title}: ${formatted.detail}${formatted.hint ? ' ' + formatted.hint : ''}`)
+      return true
+    }
+  }
+
+  async function performSlash(input: string): Promise<boolean> {
+    if (turnRunning) {
+      store.addWarn('Wait for the current turn to finish before running a command.')
+      return true
+    }
     const trimmed = input.trim()
+    if (!/^\/(?:recover|exit|quit|q)(?:\s|$)/.test(trimmed)) await client.initialize()
     if (trimmed === '/resume' || trimmed === '/r') {
       await resumeSession()
       return true
@@ -234,8 +253,6 @@ export function createInkReplController(opts: InkReplControllerOptions): InkRepl
         void runTurn(result.value)
         break
       case 'clear-history':
-        setHistory([])
-        save()
         break
       case 'noop':
         break
@@ -243,5 +260,8 @@ export function createInkReplController(opts: InkReplControllerOptions): InkRepl
     return true
   }
 
-  return { getHistory: () => history, runTurn, dispatchSlash, save, release }
+  return {
+    getHistory: () => client.getHistory(), getModelHistory: () => client.getModelWindow(), runTurn, dispatchSlash,
+    initialize: () => client.initialize(), interrupt: () => client.interrupt(), release: () => client.dispose(),
+  }
 }

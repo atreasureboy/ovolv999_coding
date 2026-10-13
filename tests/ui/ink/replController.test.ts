@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { tmpdir } from 'node:os'
-import type { ExecutionEngine } from '../../../src/core/engine.js'
+import { ExecutionEngine } from '../../../src/core/engine.js'
+import { TurnEvents } from '../../../src/core/engine/events.js'
 import type { OpenAIMessage, TurnResult } from '../../../src/core/types.js'
 import type { Renderer } from '../../../src/ui/renderer.js'
 import {
@@ -11,7 +12,7 @@ import {
   releaseSessionOwnership,
   saveSession,
 } from '../../../src/core/sessionManager.js'
-import { createInkReplController } from '../../../src/ui/ink/replController.js'
+import { createInkReplController, type InkReplController } from '../../../src/ui/ink/replController.js'
 import { UIStore } from '../../../src/ui/ink/store.js'
 import '../../../src/commands/builtin.js'
 
@@ -24,6 +25,7 @@ describe('Ink REPL controller', () => {
   let result: TurnResult
   let failure: Error | undefined
   let exits: number
+  let controllers: InkReplController[]
 
   beforeEach(() => {
     directory = mkdtempSync(join(tmpdir(), 'ovogo-ink-controller-'))
@@ -35,33 +37,28 @@ describe('Ink REPL controller', () => {
     result = { stopped: true, reason: 'stop_sequence', output: 'Answer' }
     failure = undefined
     exits = 0
+    controllers = []
+    vi.spyOn(ExecutionEngine.prototype, 'runTurn').mockImplementation((prompt, history, _images, options) => {
+      if (failure) return Promise.reject(failure)
+      const turnMessages: OpenAIMessage[] = [{ role: 'user', content: prompt }, { role: 'assistant', content: 'Answer' }]
+      const events = new TurnEvents(options!.runId!, options!.events)
+      events.message('user', prompt, 'user')
+      events.message('reply', 'Answer', 'assistant')
+      return Promise.resolve({ newHistory: [...history, ...turnMessages], turnMessages, result })
+    })
   })
 
-  afterEach(() => {
+  afterEach(async () => {
+    for (const controller of controllers) await controller.release().catch(() => {})
+    vi.restoreAllMocks()
     for (const path of sessionDirs) releaseSessionOwnership(path)
     rmSync(directory, { recursive: true, force: true })
   })
 
   function controller(overrides: { sessionDir?: string; resumedHistory?: OpenAIMessage[] } = {}) {
-    const engine = {
-      runTurn: (prompt: string, history: OpenAIMessage[]) => {
-        if (failure) return Promise.reject(failure)
-        return Promise.resolve({
-          newHistory: [
-            ...history,
-            { role: 'user', content: prompt },
-            { role: 'assistant', content: 'Answer' },
-          ],
-          result,
-        })
-      },
-      getCostTracker: () => ({ getTotalCost: () => 1.25, getTotalAPICalls: () => 3 }),
-      getModel: () => model,
-      setModel: (value: string) => {
-        model = value
-      },
-    } as unknown as ExecutionEngine
-    return createInkReplController({
+    const engine = new ExecutionEngine({ cwd: directory, sessionDir, model, apiKey: 'local', baseURL: 'http://127.0.0.1:1/v1', enabledModules: [], maxIterations: 1, permissionMode: 'deny' }, {} as Renderer)
+    vi.spyOn(engine, 'getCostTracker').mockReturnValue({ getTotalCost: () => 1.25, getTotalAPICalls: () => 3 } as ReturnType<ExecutionEngine['getCostTracker']>)
+    const repl = createInkReplController({
       store,
       engine,
       inkRenderer: {} as Renderer,
@@ -73,6 +70,8 @@ describe('Ink REPL controller', () => {
       },
       ...overrides,
     })
+    controllers.push(repl)
+    return repl
   }
 
   it('saves completed turns and updates visible cost and activity', async () => {
@@ -104,11 +103,10 @@ describe('Ink REPL controller', () => {
     const completed = await controller().runTurn('Question')
     expect(completed.status).toBe('failed')
     expect(completed.newHistory).toHaveLength(2)
-    expect(store.getState().messages).toContainEqual({
-      id: 1,
+    expect(store.getState().messages).toContainEqual(expect.objectContaining({
       type: 'error',
       text: 'Task failed: Build failed',
-    })
+    }))
   })
 
   it('formats API failures and stops the spinner', async () => {
@@ -116,31 +114,32 @@ describe('Ink REPL controller', () => {
     const completed = await controller().runTurn('Question')
     expect(completed).toMatchObject({ reason: 'error', newHistory: [] })
     expect(store.getState()).toMatchObject({ running: false, spinnerActive: false })
-    expect(store.getState().messages[0]).toMatchObject({
+    expect(store.getState().messages.at(-1)).toMatchObject({
       type: 'error',
-      text: expect.stringContaining('Rate limited'),
+      text: expect.stringContaining('429'),
     })
   })
 
-  it('quietly settles an aborted turn', async () => {
-    failure = new Error('cancelled')
-    failure.name = 'AbortError'
+  it('settles a cancelled turn with a visible cancellation outcome', async () => {
+    result = { stopped: true, reason: 'interrupted', status: 'cancelled', output: '' }
     const completed = await controller().runTurn('Question')
-    expect(completed.reason).toBe('error')
-    expect(store.getState()).toMatchObject({ running: false, spinnerActive: false, messages: [] })
+    expect(completed.status).toBe('cancelled')
+    expect(store.getState()).toMatchObject({ running: false, spinnerActive: false })
+    expect(store.getState().messages.at(-1)).toMatchObject({ type: 'info', text: 'Task cancelled' })
   })
 
-  it('completes a turn when the best-effort session save cannot write', async () => {
+  it('rejects a turn when the session directory is a file', async () => {
     const occupiedPath = join(directory, 'occupied')
     writeFileSync(occupiedPath, 'file')
     const completed = await controller({ sessionDir: occupiedPath }).runTurn('Question')
-    expect(completed.status).toBe('completed')
-    expect(completed.newHistory).toHaveLength(2)
+    expect(completed.status).toBe('failed')
+    expect(completed.newHistory).toHaveLength(0)
   })
 
   it('changes the active model through the picker and its slash alias', async () => {
     const repl = controller()
     const pending = repl.dispatchSlash('/model')
+    await vi.waitFor(() => expect(store.getState().selectOverlay).not.toBeNull())
     expect(store.getState().selectOverlay?.title).toBe('Switch Model')
     store.resolveSelect('gpt-4o')
     await pending
@@ -156,6 +155,7 @@ describe('Ink REPL controller', () => {
     saveSession(sessionDir, [{ role: 'user', content: 'Saved question' }])
     const repl = controller()
     const pending = repl.dispatchSlash('/resume')
+    await vi.waitFor(() => expect(store.getState().selectOverlay).not.toBeNull())
     expect(store.getState().selectOverlay?.items[0].value).toBe(basename(sessionDir))
     store.resolveSelect(basename(sessionDir))
     await pending
@@ -203,7 +203,7 @@ describe('Ink REPL controller', () => {
     const repl = controller()
     await repl.dispatchSlash(`/resume ${basename(selected)}`)
     expect(readdirSync(join(selected, 'writer.lock.owners'))).not.toEqual([])
-    repl.release()
+    await repl.release()
     expect(readdirSync(join(selected, 'writer.lock.owners'))).toEqual([])
   })
 
@@ -246,6 +246,7 @@ describe('Ink REPL controller', () => {
     const selected = savedSession([])
     const repl = controller({ resumedHistory: [{ role: 'user', content: 'Old question' }] })
     const pending = repl.dispatchSlash('/resume')
+    await vi.waitFor(() => expect(store.getState().selectOverlay).not.toBeNull())
     store.resolveSelect(basename(selected))
     await pending
     expect(repl.getHistory()).toEqual([])
@@ -270,10 +271,7 @@ describe('Ink REPL controller', () => {
     const options = {
       store, cwd: directory, skills: [{ name: 'inspect-custom', description: 'Inspect' }], onExit: () => {},
       inkRenderer: {} as Renderer,
-      engine: {
-        runTurn: (prompt: string) => { prompts.push(prompt); return Promise.resolve({ newHistory: [], result }) },
-        getCostTracker: () => ({ getTotalCost: () => 0, getTotalAPICalls: () => 1 }),
-      } as unknown as ExecutionEngine,
+      engine: new ExecutionEngine({ cwd: directory, model, apiKey: 'local', baseURL: 'http://127.0.0.1:1/v1', enabledModules: [], maxIterations: 1, permissionMode: 'deny' }, {} as Renderer),
       resolveSkillInvocation: (name: string, args: string, origin: string) => {
         origins.push(origin)
         return { name, args, prompt: `Inspect ${args}`, sourcePath: '/project/inspect.md', eligible: true, requiredTools: [], diagnostics: [] }
@@ -281,6 +279,15 @@ describe('Ink REPL controller', () => {
       onUserPromptSubmit: (prompt: string) => { hookPrompts.push(prompt) },
     }
     const repl = createInkReplController(options)
+    controllers.push(repl)
+    vi.spyOn(ExecutionEngine.prototype, 'runTurn').mockImplementation((prompt, history, _images, options) => {
+      prompts.push(prompt)
+      const turnMessages: OpenAIMessage[] = [{ role: 'user', content: prompt }, { role: 'assistant', content: 'Answer' }]
+      const events = new TurnEvents(options!.runId!, options!.events)
+      events.message('user', prompt, 'user')
+      events.message('reply', 'Answer', 'assistant')
+      return Promise.resolve({ newHistory: [...history, ...turnMessages], turnMessages, result })
+    })
     expect(await repl.dispatchSlash('/inspect-custom src/core')).toBe(true)
     await vi.waitFor(() => expect(store.getState().running).toBe(false))
     expect(prompts).toEqual(['Inspect src/core'])
@@ -294,10 +301,12 @@ describe('Ink REPL controller', () => {
     const options = {
       store, cwd: directory, skills: [{ name: 'complex-custom', description: 'Complex' }], onExit: () => {},
       inkRenderer: {} as Renderer,
-      engine: { runTurn: (prompt: string) => { prompts.push(prompt); return Promise.resolve({ newHistory: [], result }) } } as unknown as ExecutionEngine,
+      engine: new ExecutionEngine({ cwd: directory, model, apiKey: 'local', baseURL: 'http://127.0.0.1:1/v1', enabledModules: [], maxIterations: 1, permissionMode: 'deny' }, {} as Renderer),
       resolveSkillInvocation: (name: string, args: string) => ({ name, args, prompt: 'Complex task', sourcePath: '/project/complex.md', eligible: false, requiredTools: [], diagnostics: ['Unsupported skill metadata: hooks'] }),
     }
-    expect(await createInkReplController(options).dispatchSlash('/complex-custom')).toBe(true)
+    const repl = createInkReplController(options)
+    controllers.push(repl)
+    expect(await repl.dispatchSlash('/complex-custom')).toBe(true)
     expect(prompts).toEqual([])
     expect(store.getState().messages.at(-1)).toMatchObject({ type: 'info', text: expect.stringContaining('Unsupported skill metadata: hooks') })
   })

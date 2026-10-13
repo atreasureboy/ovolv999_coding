@@ -36,6 +36,7 @@ const commandOrder = [
   'security-review',
   'branch',
   'resume',
+  'recover',
   'sessions',
   'status',
   'files',

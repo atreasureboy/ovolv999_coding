@@ -1,3 +1,5 @@
+import type { OutcomeStatus } from '../../core/outcome.js'
+
 export interface JsonRpcRequest {
   jsonrpc: '2.0'
   id?: string | number
@@ -28,9 +30,18 @@ export interface ACPCapabilities {
   interrupts: boolean
 }
 
+export interface ACPMessageResult {
+  text: string
+  status: OutcomeStatus
+  threadId: string
+  turnId: string
+  truncated?: boolean
+  artifact?: string
+}
+
 export interface ACPHandlers {
-  onMessage?: (text: string, images?: string[]) => Promise<string>
-  onInterrupt?: () => void
+  onMessage?: (text: string, images?: string[]) => Promise<string | ACPMessageResult>
+  onInterrupt?: (expectedTurnId?: string) => void | boolean | Promise<void | boolean>
   onFileRead?: (path: string) => string | Promise<string>
   onFileWrite?: (path: string, content: string) => void | Promise<void>
   onCost?: () => { inputTokens: number; outputTokens: number; totalCost: number }

@@ -1,4 +1,4 @@
-import { closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, renameSync, unlinkSync, writeSync } from 'node:fs'
+import { closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, opendirSync, openSync, readSync, realpathSync, renameSync, unlinkSync, writeSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { dirname, join, resolve } from 'node:path'
 import { eventText, eventVerification } from './engine/events.js'
@@ -11,6 +11,7 @@ const MAX_TURN_RESULT_BYTES = 4 * 1024 * 1024
 const MAX_TERMINAL_RESULT_BYTES = 64 * 1024
 const PROJECTION_FILE = 'agent-model-window.json'
 const decoder = new TextDecoder('utf-8', { fatal: true })
+const RESULT_NAME = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\.json$/
 
 function projectionPayload(revision: number, messages: OpenAIMessage[]): string {
   return JSON.stringify({ version: 1, historyRevision: revision, messages })
@@ -133,4 +134,57 @@ export function saveTurnResult(sessionDir: string, turnId: string, result: TurnR
   }
   if (Buffer.byteLength(JSON.stringify(bounded), 'utf8') > MAX_TERMINAL_RESULT_BYTES) throw new Error('Turn terminal result exceeds its event capacity')
   return Promise.resolve({ result: bounded, truncated: true, artifact })
+}
+
+export function pruneTurnResults(sessionDir: string, references: readonly string[]): void {
+  const retained = new Set(references.map(reference => {
+    if (!reference.startsWith('agent-results/') || !RESULT_NAME.test(reference.slice('agent-results/'.length))) throw new Error('Invalid turn result reference')
+    return reference.slice('agent-results/'.length)
+  }))
+  const directory = join(sessionDir, 'agent-results')
+  try {
+    const stat = lstatSync(directory)
+    if (!stat.isDirectory() || stat.isSymbolicLink() || realpathSync(directory) !== resolve(directory)) throw new Error('Unsafe result directory')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT' && !retained.size) return
+    throw error
+  }
+  const entries = opendirSync(directory)
+  const candidates: Array<{ path: string; stat: NonNullable<ReturnType<typeof lstatSync>> }> = []
+  const found = new Set<string>()
+  try {
+    let count = 0
+    for (let entry = entries.readSync(); entry; entry = entries.readSync()) {
+      if (++count > 8192) throw new Error('Result directory exceeds managed capacity')
+      if (!RESULT_NAME.test(entry.name)) continue
+      const path = join(directory, entry.name)
+      privateFile(path)
+      const prior = lstatSync(path)
+      const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
+      try {
+        const stat = fstatSync(fd)
+        if (!stat.isFile() || stat.nlink !== 1 || stat.dev !== prior.dev || stat.ino !== prior.ino || stat.size > MAX_TURN_RESULT_BYTES) throw new Error('Unsafe result file')
+        const bytes = Buffer.alloc(stat.size + 1)
+        let length = 0
+        while (length < bytes.length) {
+          const read = readSync(fd, bytes, length, bytes.length - length, length)
+          if (!read) break
+          length += read
+        }
+        if (length !== stat.size) throw new Error('Result file changed while reading')
+        let parsed: unknown
+        try { parsed = JSON.parse(decoder.decode(bytes.subarray(0, length))) as unknown } catch { throw new Error('Invalid saved turn result') }
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || !('runId' in parsed) || parsed.runId !== entry.name.slice(0, -5)) throw new Error('Invalid saved turn result identity')
+        found.add(entry.name)
+        if (!retained.has(entry.name)) candidates.push({ path, stat })
+      } finally { closeSync(fd) }
+    }
+  } finally { entries.closeSync() }
+  for (const name of retained) if (!found.has(name)) throw new Error(`Missing referenced turn result: ${name}`)
+  for (const candidate of candidates) {
+    privateFile(candidate.path)
+    const current = lstatSync(candidate.path)
+    if (current.dev !== candidate.stat.dev || current.ino !== candidate.stat.ino || current.size !== candidate.stat.size || current.mtimeMs !== candidate.stat.mtimeMs) throw new Error('Result file changed before pruning')
+  }
+  for (const candidate of candidates) unlinkSync(candidate.path)
 }

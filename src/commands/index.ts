@@ -25,7 +25,10 @@ export interface SlashCommandContext {
   cwd: string
   sessionDir?: string
   /** Set new history (for /clear, /compact, etc.) */
-  setHistory: (msgs: OpenAIMessage[]) => void
+  setHistory: (msgs: OpenAIMessage[]) => void | Promise<void>
+  getModelHistory?: () => OpenAIMessage[]
+  setModelWindow?: (msgs: OpenAIMessage[]) => void | Promise<void>
+  recoverSession?: () => Promise<OpenAIMessage[]>
   /** Inject a prompt into the conversation (for /commit, /review, etc.) */
   runPrompt: (prompt: string) => void
   /** Optional REPL-provided dynamic text renderers */
@@ -41,7 +44,7 @@ export interface SlashCommandContext {
    * The REPL is responsible for swapping `history` and rebinding its save
    * target so future saves land in the resumed session directory.
    */
-  loadSession?: (name: string) => OpenAIMessage[] | null | undefined
+  loadSession?: (name: string) => OpenAIMessage[] | null | undefined | Promise<OpenAIMessage[] | null | undefined>
 }
 
 export type SlashCommandResult =

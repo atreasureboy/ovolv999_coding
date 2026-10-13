@@ -311,6 +311,7 @@ export interface EngineConfig {
   /** Unified permission manager; if omitted the engine creates one from permissionMode. */
   permissionManager?: PermissionManager
   systemPrompt?: string
+  sessionSystemPrompt?: (sessionDir: string) => string
   /** Extra tools to inject (e.g. MCP tools) */
   extraTools?: Tool[]
   /**

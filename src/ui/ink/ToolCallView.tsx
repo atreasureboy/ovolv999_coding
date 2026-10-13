@@ -40,6 +40,7 @@ function viz(name: string): ToolVisual {
 
 function previewTool(name: string, input: Record<string, unknown>): string {
   const s = (v: unknown): string => str(v)
+  if (typeof input.preview === 'string') return input.preview.slice(0, 72)
   switch (name) {
     case 'Bash': {
       const c = s(input.command).trim()
@@ -133,7 +134,10 @@ export function ToolCallView({ name, input, result, isError, elapsedMs }: ToolCa
   const preview = previewTool(name, input)
 
   // Show inline diff for Edit/Write tools when result is available
-  const showDiff = (name === 'Edit' || name === 'Write') && result !== undefined && !isError
+  const hasDiffInput = name === 'Edit'
+    ? typeof input.old_string === 'string' && typeof input.new_string === 'string'
+    : name === 'Write' && typeof input.content === 'string'
+  const showDiff = hasDiffInput && result !== undefined && !isError
   const oldText = name === 'Edit' ? str(input.old_string) : ''
   const newText = name === 'Edit' ? str(input.new_string) : name === 'Write' ? str(input.content) : ''
 

@@ -445,10 +445,10 @@ export class ExecutionEngine {
       beginAssistantText: () => {
         this.turnEvents?.emit({ type: 'item.started', turnId: this.activeRun!.runId, itemId, kind: 'message', role: 'assistant' })
         started = true
-        this.renderer.beginAssistantText()
+        if (!this.turnOptions.events) this.renderer.beginAssistantText()
       },
-      streamToken: text => { this.turnEvents?.text(itemId, text); visible += text; this.renderer.streamToken(text) },
-      endAssistantText: () => this.renderer.endAssistantText(),
+      streamToken: text => { this.turnEvents?.text(itemId, text); visible += text; if (!this.turnOptions.events) this.renderer.streamToken(text) },
+      endAssistantText: () => { if (!this.turnOptions.events) this.renderer.endAssistantText() },
       streamReasoning: text => this.renderer.streamReasoning?.(text),
       toolStart: (name, input) => this.renderer.toolStart(name, input),
       toolResult: (name, content, isError) => this.renderer.toolResult(name, content, isError),
@@ -470,7 +470,10 @@ export class ExecutionEngine {
       this.recordUsage(result.usage, callStartMs)
       return result
     } finally {
-      if (started && !completed) this.turnEvents?.complete(itemId, 'message', visible, turnAbortSignal.aborted ? 'cancelled' : 'failed')
+      if (started && !completed) {
+        if (visible) this.appendMessages(messages, { role: 'assistant', content: visible })
+        this.turnEvents?.complete(itemId, 'message', visible, turnAbortSignal.aborted ? 'cancelled' : 'failed')
+      }
     }
   }
   private recordUsage(usage: TokenUsage | null, callStartMs: number): void {
@@ -634,7 +637,7 @@ export class ExecutionEngine {
       if (!signal.aborted) await runHookOperation(run, this.config, 'PostToolCall', signal =>
         this.config.hookRunner?.runPostToolCall(tc.name, result.content, result.isError, signal),
       ).catch(error => { this.renderer.warn('Post-tool hook failed: ' + String(error)) })
-      this.renderer.toolResult(tc.name, result.content, result.isError)
+      if (!this.turnOptions.events) this.renderer.toolResult(tc.name, result.content, result.isError)
       this.eventLog?.append('tool_result', tc.name, {
         content: result.content.slice(0, 500),
         isError: result.isError,
@@ -659,7 +662,7 @@ export class ExecutionEngine {
         const itemId = `tool:${turnNumber}:${tc.id}`
         this.turnEvents?.emit({ type: 'item.started', turnId: run.runId, itemId, kind: 'tool', name: tc.name, toolCallId: tc.id, inputDigest: approvalInputDigest(input), preview: eventText(JSON.stringify(input), 4096).text })
         itemIds.set(tc.id, itemId)
-        this.renderer.toolStart(tc.name, input)
+        if (!this.turnOptions.events) this.renderer.toolStart(tc.name, input)
         return await runOperation(
           run,
           'tool:' + tc.name,

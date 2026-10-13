@@ -12,6 +12,7 @@
  */
 
 import type { UIStore } from './store.js'
+import type { AgentEvent } from '../../core/agentEvents.js'
 
 const VERBS = [
   'Thinking', 'Analyzing', 'Processing', 'Computing',
@@ -21,9 +22,66 @@ const VERBS = [
 
 export class InkRenderer {
   private store: UIStore
+  private eventItems = new Map<string, { id?: number; role?: 'user' | 'assistant'; text: string; displayText?: string }>()
+  private eventThread?: string
+  private eventSequence = 0
+  private userPrompt?: string
 
   constructor(store: UIStore) {
     this.store = store
+  }
+
+  setUserPrompt(text: string): void {
+    this.userPrompt = text
+  }
+
+  agentEvent(event: AgentEvent): void {
+    if (this.eventThread !== event.threadId) {
+      this.eventThread = event.threadId
+      this.eventSequence = 0
+      this.eventItems.clear()
+    }
+    if (event.sequence <= this.eventSequence) return
+    this.eventSequence = event.sequence
+    if (event.type === 'turn.started') {
+      this.eventItems.clear()
+    } else if (event.type === 'item.started') {
+      if (event.kind === 'tool') {
+        let input: Record<string, unknown> = { preview: event.preview ?? '' }
+        try {
+          const value: unknown = JSON.parse(event.preview ?? '{}')
+          if (value && typeof value === 'object' && !Array.isArray(value)) input = value as Record<string, unknown>
+        } catch { input = { preview: event.preview ?? '' } }
+        this.eventItems.set(event.itemId, { id: this.store.addToolStart(event.name ?? 'Tool', input), text: '' })
+      } else if (event.kind === 'message') {
+        const displayText = event.role === 'user' && !event.expectedTurnId ? this.userPrompt : undefined
+        if (displayText !== undefined) this.userPrompt = undefined
+        this.eventItems.set(event.itemId, { role: event.role, text: '', displayText })
+      }
+    } else if (event.type === 'item.delta') {
+      const item = this.eventItems.get(event.itemId)
+      if (!item || event.channel === 'reasoning') return
+      item.text += event.text
+      if (item.role === 'assistant') this.streamToken(event.text)
+    } else if (event.type === 'item.completed') {
+      const item = this.eventItems.get(event.itemId)
+      if (!item) return
+      const text = typeof event.result === 'string' ? event.result : event.result.content
+      if (item.id !== undefined) {
+        this.store.setToolResult(item.id, text, typeof event.result === 'string' ? event.status !== 'completed' : event.result.isError || event.status !== 'completed')
+      } else if (item.role === 'assistant') {
+        if (!item.text && text) this.streamToken(text)
+        this.endAssistantText()
+      } else if (item.role === 'user') {
+        this.store.addUserMessage(item.displayText ?? (item.text || text))
+      }
+      this.eventItems.delete(event.itemId)
+    } else if (event.type === 'turn.finished') {
+      this.endAssistantText()
+      this.eventItems.clear()
+      this.userPrompt = undefined
+      this.stopSpinner()
+    }
   }
 
   // ── Banner ────────────────────────────────────────────────────────────────

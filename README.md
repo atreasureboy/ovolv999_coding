@@ -354,9 +354,10 @@ export const plugin: Plugin = {
 | 入口 | 实际能力与兼容边界 |
 | --- | --- |
 | CLI / `--pipe` | CLI 执行受有效权限和验收控制；原始 `--pipe` 只产生文本，不装配写入工具 |
-| `exec --jsonl` | 通过会话服务运行实际编码任务，输出有序 JSONL 事件；最终状态在验收和历史保存后发布。TTY、Ink、ACP 尚未迁移到该服务 |
+| TTY / Ink | 通过统一会话服务执行与保存，按持久事件显示回答和工具结果；`/compact` 只修改模型窗口，`/history` 保留完整历史；`/recover --fork` 显式从已保存历史创建新会话，不重放中断操作 |
+| `exec --jsonl` | 通过同一会话服务运行实际编码任务，输出有序 JSONL 事件；最终状态在验收和历史保存后发布 |
 | MCP | 默认 stdio，初始化版本 `2024-11-05`；初始化响应必须确认同一版本及有效 capabilities，否则拒绝连接。其他版本尚未验证。tools/resources/prompts 按已连接服务提供；HTTP/SSE/OAuth 不由默认客户端装配 |
-| ACP | 仓库 stdio JSON-RPC adapter，版本 `2025-07-20`；先 initialize，拒绝不支持的版本。没有 handler 的文件读写禁用；能力字段仅描述实际装配，不承诺所有编辑器兼容 |
+| `acp` | 实际 CLI 连接会话服务，stdio 仅输出 JSON-RPC；支持消息、事件、历史和绑定回合的中断。仓库协议方言版本 `2025-07-20`，先 initialize；直接文件读写默认禁用，模型工具仍受实际权限控制。不宣称标准 ACP 或所有编辑器兼容 |
 | 执行隔离 | 支持 trusted-local；要求 isolated-worker 而缺少实际隔离后端时拒绝执行。沙箱策略文件存在不构成操作系统隔离证明 |
 | 构建身份 | `ovolv999 --version` 显示版本、源码 SHA 与 dirty 标志；包内 `dist/build-info.json` 提供构建输入哈希 |
 

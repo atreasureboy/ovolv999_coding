@@ -9,7 +9,8 @@ import { AgentService } from '../../src/core/agentService.js'
 import { readSessionSnapshot, saveSession } from '../../src/core/sessionManager.js'
 import { AgentEventStore } from '../../src/core/agentEventStore.js'
 import { ApprovalBroker } from '../../src/core/approvalBroker.js'
-import { prepareModelWindow, readModelWindow } from '../../src/core/agentSession.js'
+import { prepareModelWindow, readModelWindow, saveTurnResult } from '../../src/core/agentSession.js'
+import { randomUUID } from 'node:crypto'
 import type { EngineConfig, OpenAIMessage, Tool } from '../../src/core/types.js'
 
 const cleanups: Array<() => Promise<void>> = []
@@ -251,6 +252,19 @@ it.each([
   expect(terminal).toMatchObject({ truncated: true, artifact: `agent-results/${started.turnId}.json` })
   const sessionDir = service.engineForThread(started.threadId).getConfig().sessionDir!
   expect(JSON.parse(readFileSync(join(sessionDir, (terminal as typeof terminal & { artifact: string }).artifact), 'utf8'))).toEqual(outcome.result)
+})
+
+it('prunes retired result files before another actual service turn while retaining its last result', async () => {
+  const { cwd, service } = await fixture((_request, res) => response(res, 'large'.repeat(20_000)))
+  const first = await service.start({ cwd, text: 'first' })
+  expect((await service.wait(first.threadId, first.turnId)).result.status).toBe('completed')
+  const sessionDir = join(cwd, 'sessions', readdirSync(join(cwd, 'sessions'))[0])
+  const retiredId = randomUUID()
+  const retired = await saveTurnResult(sessionDir, retiredId, { runId: retiredId, status: 'completed', stopped: false, reason: 'stop_sequence', output: 'old'.repeat(30_000) })
+  const next = await service.start({ cwd, threadId: first.threadId, text: 'next' })
+  expect(existsSync(join(sessionDir, retired.artifact!))).toBe(false)
+  expect(existsSync(join(sessionDir, 'agent-results', first.turnId + '.json'))).toBe(true)
+  expect((await service.wait(next.threadId, next.turnId)).result.status).toBe('completed')
 })
 
 it('rejects and wakes subscribers when the bounded result artifact cannot be saved', async () => {

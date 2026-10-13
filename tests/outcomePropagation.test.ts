@@ -6,6 +6,7 @@ import { ExecutionEngine } from '../src/core/engine.js'
 import { runSingleTask } from '../bin/ovogogogo.js'
 import { runLoop } from '../src/core/loopEngine.js'
 import { Renderer } from '../src/ui/renderer.js'
+import { createSessionDir } from '../src/core/sessionManager.js'
 
 const oldExitCode = process.exitCode
 afterEach(() => { process.exitCode = oldExitCode })
@@ -25,7 +26,7 @@ function fixture() {
     })())
   } } } }
   const engine = new ExecutionEngine({
-    cwd, model: 'offline', apiKey: 'offline', permissionMode: 'auto', maxIterations: 3, enabledModules: [],
+    cwd, sessionDir: createSessionDir(cwd), model: 'offline', apiKey: 'offline', permissionMode: 'auto', maxIterations: 3, enabledModules: [],
     agentFactory: () => ({
       runTurn: () => {
         writeFileSync(join(cwd, 'source.ts'), 'export const value = 2')

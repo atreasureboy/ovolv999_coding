@@ -8,6 +8,7 @@ export function printHelp(skills: Map<string, Skill>): void {
   process.stdout.write(`USAGE
   ovolv999 [options] [task]
   ovolv999 exec --jsonl [--output-schema file] [--resume ref|--continue] [task]
+  ovolv999 acp [--cwd path] [--resume ref|--continue]
 
 OPTIONS
   -m, --model <model>       LLM model  (env: OVOGO_MODEL, default: ${defaultModel})
@@ -21,6 +22,7 @@ OPTIONS
   --pipe                    Pipe mode: read stdin as context, output to stdout (no UI)
   --format <text|json>      Output format for pipe mode (default: text)
   exec --jsonl              Run an agent task and emit durable ordered JSONL events
+  acp                       Serve the repository ACP JSON-RPC dialect over standard input/output
   --output-schema <file>    exec only: validate a bounded JSON Schema subset and final output
   --runtime-status [path]  Inspect retained runs and workspace recovery state
   --run-id <id>            Select one runtime-status record; optionally --operation-id <id>

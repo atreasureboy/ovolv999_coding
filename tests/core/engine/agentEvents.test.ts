@@ -95,6 +95,7 @@ it('terminates a partial message when a real HTTP stream disconnects', async () 
   const events: AgentEventInput[] = []
   const out = await engine.runTurn('partial', [], undefined, { events: { emit: event => { events.push(event) } } })
   expect(out.result.status).toBe('failed')
+  expect(out.turnMessages).toContainEqual(expect.objectContaining({ role: 'assistant', content: '部分输出' }))
   const item = events.find((event): event is Extract<AgentEventInput, { type: 'item.started' }> => event.type === 'item.started' && event.kind === 'message' && event.role === 'assistant')
   expect(item).toBeDefined()
   expect(events.filter((event): event is Extract<AgentEventInput, { type: 'item.delta' }> => event.type === 'item.delta' && event.itemId === item?.itemId).map(event => event.text).join('')).toBe('部分输出')

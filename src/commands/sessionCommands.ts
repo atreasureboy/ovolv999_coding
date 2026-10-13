@@ -35,16 +35,16 @@ export const sessionCommands: Command[] = [
   {
     name: 'clear',
     description: 'Clear conversation history',
-    handler: (_args, ctx) => {
-      ctx.setHistory([])
+    handler: async (_args, ctx) => {
+      await ctx.setHistory([])
       return { type: 'clear-history' }
     },
   },
   {
     name: 'reset',
     description: 'Reset everything: history + cost + context (fresh start)',
-    handler: (_args, ctx) => {
-      ctx.setHistory([])
+    handler: async (_args, ctx) => {
+      await ctx.setHistory([])
       ctx.engine.getCostTracker().reset()
       return { type: 'clear-history' }
     },
@@ -80,14 +80,15 @@ export const sessionCommands: Command[] = [
     description: 'Summarize conversation to save context (manual trigger)',
     usage: '/compact [optional instructions]',
     aliases: ['c'],
-    handler: (args, ctx) => {
-      if (ctx.history.length < 4) {
+    handler: async (args, ctx) => {
+      const history = ctx.getModelHistory?.() ?? ctx.history
+      if (history.length < 4) {
         return text('Not enough messages to compact (need at least 4).')
       }
       ctx.renderer.warn('Compacting conversation...')
-      const mc = microCompact([...ctx.history])
+      const mc = microCompact([...history])
       if (mc.compacted) {
-        ctx.setHistory(mc.messages)
+        await (ctx.setModelWindow ?? ctx.setHistory)(mc.messages)
         return text(
           `Micro-compacted: cleared ${mc.toolsCleared} old tool results (${mc.tokensBefore}→${mc.tokensAfter} tokens). Full LLM compaction will trigger automatically at 85% pressure.`,
         )
@@ -166,7 +167,7 @@ export const sessionCommands: Command[] = [
     name: 'resume',
     description: 'List saved sessions, or resume one by name/prefix/path',
     usage: '/resume [session_name]',
-    handler: (args, ctx) => {
+    handler: async (args, ctx) => {
       const name = args.trim()
       if (!name) {
         return text(ctx.getSessionsText?.() ?? 'No saved sessions found.')
@@ -176,14 +177,25 @@ export const sessionCommands: Command[] = [
           'In-session resume is not available in this context. Use ovolv999 --resume <session_name>  or  ovolv999 --continue from the command line.',
         )
       }
-      const loaded = ctx.loadSession(name)
+      const loaded = await ctx.loadSession(name)
       if (!loaded) {
         return text(
           `Session not found: "${name}". Use /resume with no args to list available sessions.`,
         )
       }
-      ctx.setHistory(loaded)
+      await ctx.setHistory(loaded)
       return text(`Resumed session: ${loaded.length} messages loaded.`)
+    },
+  },
+  {
+    name: 'recover',
+    description: 'Create a new session from saved history without replaying interrupted work',
+    usage: '/recover --fork',
+    handler: async (args, ctx) => {
+      if (args.trim() !== '--fork') return text('Use /recover --fork to create a new session from the last saved history. Original events and unresolved approvals are preserved; no interrupted work is replayed. Unfinished workspace resources must be inspected first.')
+      if (!ctx.recoverSession) return text('Session recovery is not available in this context.')
+      const history = await ctx.recoverSession()
+      return text(`Created a recovery session with ${history.length} saved messages. Submit a new instruction to continue; interrupted work was not replayed.`)
     },
   },
   {

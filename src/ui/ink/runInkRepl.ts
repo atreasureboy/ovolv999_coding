@@ -11,6 +11,10 @@ export interface InkReplOptions extends Omit<InkReplControllerOptions, 'onExit'>
 
 export async function runInkRepl(opts: InkReplOptions): Promise<void> {
   const controller = createInkReplController({ ...opts, onExit: () => instance.unmount() })
+  try { await controller.initialize() } catch (error) {
+    opts.store.addError(error instanceof Error ? error.message : String(error))
+    opts.store.addInfo('Use /recover --fork to continue from saved history in a new session.')
+  }
   const { App } = await import('./App.js')
   const instance = render(
     createElement(App, {
@@ -18,11 +22,13 @@ export async function runInkRepl(opts: InkReplOptions): Promise<void> {
       _version: opts.version,
       model: opts.model,
       skills: opts.skills,
-      runTurn: (prompt, _history, images) => controller.runTurn(prompt, images),
+      runTurn: (prompt, _history, images, displayPrompt) => controller.runTurn(prompt, images, displayPrompt),
+      displayUserViaEvents: true,
       dispatchSlash: controller.dispatchSlash,
       initialHistory: controller.getHistory(),
       getHistory: controller.getHistory,
-      onInterrupt: () => opts.engine.abort(),
+      getModelHistory: controller.getModelHistory,
+      onInterrupt: () => { void controller.interrupt().catch(error => opts.store.addError(error instanceof Error ? error.message : String(error))) },
       maxContextTokens: opts.maxContextTokens,
       cwd: opts.cwd,
     }),
@@ -30,12 +36,9 @@ export async function runInkRepl(opts: InkReplOptions): Promise<void> {
   opts.store.setBanner(opts.version, opts.model)
   const cleanup = registerCleanup({
     onCleanup: async () => {
-      controller.save()
       opts.store.cancelOverlays()
-      opts.engine.abort()
       try {
-        await opts.engine.dispose()
-        controller.release()
+        await controller.release()
       } finally {
         instance.unmount()
       }

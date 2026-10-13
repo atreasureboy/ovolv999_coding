@@ -114,7 +114,7 @@ export const automationCommands: Command[] = [
               const result = await dispatchSlashCommand(cmd, ctx)
               if (!result) throw new Error(`Unknown slash command: ${cmd}`)
               if (result.type === 'text') return result.value
-              if (result.type === 'clear-history') ctx.setHistory([])
+              if (result.type === 'clear-history') await ctx.setHistory([])
               if (result.type === 'prompt' || result.type === 'exit') throw new Error(`Command ${cmd} requires an interactive turn`)
               return `(executed: ${cmd})`
             },

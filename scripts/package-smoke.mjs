@@ -147,6 +147,14 @@ try {
     assert.equal(structured.code, scenario === 'structured-valid' ? 0 : 1)
     assert.equal(provider.state.records.at(-1).responseFormat?.type, 'json_schema')
   }
+  provider.state.scenario = 'edit'
+  const acpWorkspace = join(base, 'acp-agent')
+  mkdirSync(acpWorkspace)
+  writeFileSync(join(acpWorkspace, '.ovolv999.json'), JSON.stringify({ enabledModules: [], permissionMode: 'auto', model: 'fixture' }))
+  writeFileSync(join(acpWorkspace, 'source.txt'), 'before')
+  writeFileSync(join(acpWorkspace, 'package.json'), JSON.stringify({ scripts: { test: 'node verify.cjs' } }))
+  writeFileSync(join(acpWorkspace, 'verify.cjs'), "const fs=require('fs');if(fs.readFileSync('source.txt','utf8')!=='after')process.exit(9);fs.mkdirSync('dist',{recursive:true});fs.writeFileSync('dist/verified','yes')")
+  record('installed-acp-agent', await runNode([join(root, 'scripts/fixtures/acp-agent-installed.mjs'), cli, acpWorkspace], { cwd: installed, env, timeout: 30_000 }))
   provider.state.scenario = 'text'
   const compatibility = join(base, 'compatibility')
   mkdirSync(compatibility)

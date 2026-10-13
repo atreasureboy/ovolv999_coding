@@ -3,7 +3,7 @@ import { readdirSync, realpathSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { AgentEventStore } from './agentEventStore.js'
 import type { AgentEvent, AgentThreadSnapshot } from './agentEvents.js'
-import { prepareModelWindow, readModelWindow, saveModelWindow, saveTurnResult } from './agentSession.js'
+import { prepareModelWindow, pruneTurnResults, readModelWindow, saveModelWindow, saveTurnResult } from './agentSession.js'
 import type { ExecutionEngine } from './engine.js'
 import { eventText, TurnEvents } from './engine/events.js'
 import { settleHistory } from './messageGroups.js'
@@ -194,6 +194,7 @@ export class AgentService {
     if (thread.recoveryRequired) throw new AgentServiceError('recovery_required', 'Thread requires explicit recovery before another turn')
     if (isWorkspaceQuarantined(cwd)) throw new AgentServiceError('workspace_quarantined', 'Workspace has unfinished operations')
     if (input.responseSchema && !resolveModelRuntime(thread.engine.getConfig()).options.capabilities.structuredOutput) throw new AgentServiceError('unsupported_output_schema', 'Configured model does not support structured output')
+    pruneTurnResults(thread.sessionDir, thread.store.retainedArtifacts())
     const turnId = randomUUID()
     const turn: ServiceTurn = {
       turnId, accepting: true, finalized: false, physicalSettled: false, settled: false, steering: [], steeringCount: 0, steeringBytes: 0,
@@ -271,6 +272,18 @@ export class AgentService {
 
   async getHistory(threadId: string): Promise<readonly OpenAIMessage[]> {
     return await Promise.resolve(structuredClone(this.thread(threadId).history))
+  }
+
+  async getModelWindow(threadId: string): Promise<readonly OpenAIMessage[]> {
+    return await Promise.resolve(structuredClone(this.thread(threadId).modelWindow))
+  }
+
+  async replaceModelWindow(threadId: string, messages: readonly OpenAIMessage[]): Promise<void> {
+    const thread = this.thread(threadId)
+    this.assertIdle(thread)
+    const projection = prepareModelWindow([...messages], true)
+    await saveModelWindow(thread.sessionDir, thread.revision, projection)
+    thread.modelWindow = projection
   }
 
   engineForThread(threadId: string): ExecutionEngine {

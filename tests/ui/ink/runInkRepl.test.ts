@@ -1,12 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AppProps } from '../../../src/ui/ink/App.js'
-import type { ExecutionEngine } from '../../../src/core/engine.js'
+import { ExecutionEngine } from '../../../src/core/engine.js'
+import { TurnEvents } from '../../../src/core/engine/events.js'
 import type { OpenAIMessage } from '../../../src/core/types.js'
 import type { Renderer } from '../../../src/ui/renderer.js'
 import { mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createSessionDir } from '../../../src/core/sessionManager.js'
+import { createSessionDir, saveSession } from '../../../src/core/sessionManager.js'
 import { UIStore } from '../../../src/ui/ink/store.js'
 import { runInkRepl } from '../../../src/ui/ink/runInkRepl.js'
 import '../../../src/commands/builtin.js'
@@ -41,20 +42,18 @@ describe('Ink REPL conversation ownership', () => {
     directory = mkdtempSync(join(tmpdir(), 'ovogo-repl-history-'))
     sessionDir = createSessionDir(directory)
     turns = []
-    const engine = {
-      runTurn: (prompt: string, history: OpenAIMessage[]) => {
+    const engine = new ExecutionEngine({ cwd: directory, sessionDir, model: 'fixture', apiKey: 'local', baseURL: 'http://127.0.0.1:1/v1', enabledModules: [], maxIterations: 1, permissionMode: 'deny' }, {} as Renderer)
+    vi.spyOn(engine, 'runTurn').mockImplementation((prompt, history, _images, options) => {
         turns.push([...history])
-        const newHistory: OpenAIMessage[] = [
-          ...history,
+        const turnMessages: OpenAIMessage[] = [
           { role: 'user', content: prompt },
           { role: 'assistant', content: 'Latest answer' },
         ]
-        return Promise.resolve({ newHistory, result: { reason: 'stop', output: 'Latest answer' } })
-      },
-      getCostTracker: () => ({ getTotalCost: () => 0, getTotalAPICalls: () => 1 }),
-      abort: () => {},
-      dispose: async () => {},
-    } as unknown as ExecutionEngine
+        const events = new TurnEvents(options!.runId!, options!.events)
+        events.message('user', prompt, 'user')
+        events.message('reply', 'Latest answer', 'assistant')
+        return Promise.resolve({ newHistory: [...history, ...turnMessages], turnMessages, result: { stopped: true, reason: 'stop_sequence', output: 'Latest answer' } })
+    })
     repl = runInkRepl({
       store,
       engine,
@@ -72,6 +71,7 @@ describe('Ink REPL conversation ownership', () => {
   afterEach(async () => {
     rendered.finish()
     await repl
+    vi.restoreAllMocks()
     expect(readdirSync(join(sessionDir, 'writer.lock.owners'))).toEqual([])
     rmSync(directory, { recursive: true, force: true })
   })
@@ -102,5 +102,18 @@ describe('Ink REPL conversation ownership', () => {
     await rendered.props!.runTurn('Follow-up question', [], undefined)
     expect(turns[1]).toHaveLength(2)
     expect(turns[1][1]).toMatchObject({ role: 'assistant', content: 'Latest answer' })
+  })
+
+  it('loads saved history and model context before rendering the first prompt', async () => {
+    rendered.finish()
+    await repl
+    const saved: OpenAIMessage[] = [{ role: 'user', content: 'saved question' }, { role: 'assistant', content: 'saved reply' }]
+    saveSession(sessionDir, saved)
+    rendered.props = null
+    const engine = new ExecutionEngine({ cwd: directory, sessionDir, model: 'fixture', apiKey: 'local', baseURL: 'http://127.0.0.1:1/v1', enabledModules: [], maxIterations: 1, permissionMode: 'deny' }, {} as Renderer)
+    repl = runInkRepl({ store, engine, inkRenderer: {} as Renderer, version: 'test', model: 'fixture', skills: [], cwd: directory, sessionDir, maxContextTokens: 1000 })
+    await vi.waitFor(() => expect(rendered.props).not.toBeNull())
+    expect(rendered.props!.getHistory?.()).toEqual(saved)
+    expect(rendered.props!.getModelHistory?.()).toEqual(saved)
   })
 })

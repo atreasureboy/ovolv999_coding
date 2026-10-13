@@ -216,6 +216,7 @@ export class Renderer {
   }
 
   private preview(name: string, input: Record<string, unknown>): string {
+    if (typeof input.preview === 'string') return input.preview.length > 120 ? input.preview.slice(0, 117) + '...' : input.preview
     switch (name) {
       case 'Bash': {
         const c = str(input.command).trim()

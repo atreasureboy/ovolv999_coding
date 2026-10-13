@@ -50,6 +50,37 @@ it('closes oversized unterminated input before dispatch', () => {
   input.destroy()
 })
 
+it.each(['end', 'close'])('reports transport %s once and removes input listeners', async event => {
+  const input = new PassThrough()
+  const server = new ACPServer({}, { cwd: process.cwd(), write: () => {} })
+  const closed = vi.fn()
+  server.on('close', closed)
+  server.start(input)
+  if (event === 'end') input.end()
+  else input.destroy()
+  await new Promise<void>(resolve => setImmediate(resolve))
+  expect(closed).toHaveBeenCalledOnce()
+  expect(input.listenerCount('data')).toBe(0)
+  expect(input.listenerCount('end')).toBe(0)
+  expect(input.listenerCount('close')).toBe(0)
+  expect(input.listenerCount('error')).toBe(0)
+})
+
+it('reports a failed input stream without leaking its listeners', async () => {
+  const input = new PassThrough()
+  const server = new ACPServer({}, { cwd: process.cwd(), write: () => {} })
+  const failed = vi.fn()
+  server.on('protocolError', failed)
+  server.start(input)
+  const error = new Error('input disconnected')
+  input.destroy(error)
+  await new Promise<void>(resolve => setImmediate(resolve))
+  expect(failed).toHaveBeenCalledOnce()
+  expect(failed).toHaveBeenCalledWith(error)
+  expect(input.listenerCount('data')).toBe(0)
+  expect(input.listenerCount('error')).toBe(0)
+})
+
 it('decodes UTF-8 split across chunks before processing a complete frame', async () => {
   const input = new PassThrough()
   const output: string[] = []
@@ -129,4 +160,72 @@ it('bounds response bytes without emitting the oversized content', () => {
   server.send({ jsonrpc: '2.0', id: 4, result: '密'.repeat(100) })
   expect(output).toHaveLength(1)
   expect(JSON.parse(output[0])).toEqual({ jsonrpc: '2.0', id: 4, error: { code: -32603, message: 'ACP response byte limit exceeded' } })
+})
+
+it('advertises streaming and images only when explicitly implemented', () => {
+  const handlers = { onMessage: () => Promise.resolve('ready') }
+  expect(new ACPServer(handlers, { cwd: process.cwd() }).getCapabilities()).toMatchObject({ streaming: false, multiModal: false })
+  expect(new ACPServer(handlers, { cwd: process.cwd(), capabilities: { streaming: true, multiModal: true } }).getCapabilities()).toMatchObject({ streaming: true, multiModal: true })
+})
+
+it('preserves durable status and identifiers in rich message results', async () => {
+  const output: string[] = []
+  const result = { text: 'partial result', status: 'cancelled' as const, threadId: 'thread-1', turnId: 'turn-1', truncated: true, artifact: 'result.json' }
+  const server = new ACPServer({ onMessage: () => Promise.resolve(result) }, { cwd: process.cwd(), write: line => output.push(line) })
+  await server.handleMessage({ jsonrpc: '2.0', id: 0, method: 'initialize' })
+  await server.handleMessage({ jsonrpc: '2.0', id: 1, method: 'message', params: { text: 'work' } })
+  const messages = output.map(line => JSON.parse(line) as JsonRpcResponse)
+  expect(messages.find(message => message.id === 1)?.result).toEqual({ ...result, done: true })
+})
+
+it('awaits fenced interrupt decisions instead of acknowledging stale turns', async () => {
+  const output: string[] = []
+  const interrupt = vi.fn((_expectedTurnId?: string) => Promise.resolve(false))
+  const server = new ACPServer({ onInterrupt: interrupt }, { cwd: process.cwd(), write: line => output.push(line) })
+  await server.handleMessage({ jsonrpc: '2.0', id: 0, method: 'initialize' })
+  await server.handleMessage({ jsonrpc: '2.0', id: 1, method: 'interrupt', params: { expectedTurnId: 'stale' } })
+  expect(interrupt).toHaveBeenCalledWith('stale')
+  expect(JSON.parse(output.at(-1)!).result).toEqual({ interrupted: false })
+})
+
+it('waits for asynchronous output and reports a failed transport', async () => {
+  let fail!: (error: Error) => void
+  const server = new ACPServer({}, { cwd: process.cwd(), write: () => new Promise<void>((_resolve, reject) => { fail = reject }) })
+  const errors: Error[] = []
+  server.on('protocolError', error => errors.push(error as Error))
+  server.notify('event', { text: 'ready' })
+  const flush = server.flush()
+  fail(new Error('closed output'))
+  await expect(flush).rejects.toThrow('closed output')
+  expect(errors).toHaveLength(1)
+})
+
+it('bounds queued output when the transport is not draining', async () => {
+  const complete: Array<() => void> = []
+  const server = new ACPServer({}, { cwd: process.cwd(), maxMessageBytes: 128, write: () => new Promise<void>(resolve => complete.push(resolve)) })
+  const errors: Error[] = []
+  server.on('protocolError', error => errors.push(error as Error))
+  expect(() => { for (let index = 0; index < 10; index++) server.notify('event', { text: 'x'.repeat(50) }) }).toThrow(/pending output byte limit/)
+  expect(complete.length).toBeLessThan(10)
+  expect(errors).toHaveLength(1)
+  for (const finish of complete) finish()
+  await expect(server.flush()).rejects.toThrow(/pending output byte limit/)
+})
+
+it('rejects flush promptly when another pending write never settles', async () => {
+  let rejectWrite!: (error: Error) => void
+  let count = 0
+  const server = new ACPServer({}, { cwd: process.cwd(), write: () => new Promise<void>((_resolve, reject) => { if (!count++) rejectWrite = reject }) })
+  server.notify('first')
+  server.notify('second')
+  const flush = server.flush().then(() => 'completed', () => 'failed')
+  rejectWrite(new Error('transport closed'))
+  expect(await Promise.race([flush, new Promise<string>(resolve => setTimeout(() => resolve('still waiting'), 20))])).toBe('failed')
+})
+
+it('never emits an oversized fallback error when the response identifier is too large', () => {
+  const output: string[] = []
+  const server = new ACPServer({}, { cwd: process.cwd(), maxMessageBytes: 128, write: text => output.push(text) })
+  expect(() => server.send({ jsonrpc: '2.0', id: 'x'.repeat(128), result: 'oversized'.repeat(50) })).toThrow(/response byte limit/)
+  expect(output).toEqual([])
 })

@@ -6,6 +6,8 @@ import { join, resolve } from 'path'
 import { fileURLToPath, pathToFileURL } from 'url'
 import { ArgError, parseArgs, type Args } from '../src/cli/args.js'
 import { parseExecArgs } from '../src/cli/execArgs.js'
+import { parseAcpArgs } from '../src/cli/acpArgs.js'
+import { runAcp } from '../src/cli/acp.js'
 import { runExec } from '../src/cli/exec.js'
 import { readOutputSchema } from '../src/core/outputSchema.js'
 import { VERSION, buildVersion, resolveApiEnvironment } from '../src/cli/environment.js'
@@ -32,6 +34,7 @@ import { createInkApprovalHost, createTerminalApprovalHost } from '../src/cli/ap
 import { recordBackgroundOutcome } from '../src/core/backgroundSession.js'
 import { resolveContextWindow } from '../src/core/compact.js'
 import { ExecutionEngine } from '../src/core/engine.js'
+import type { AgentSessionClient } from '../src/core/agentSessionClient.js'
 import { EpisodicMemory } from '../src/core/episodicMemory.js'
 import { EventLog } from '../src/core/eventLog.js'
 import { getCurrentMode, getVerbosityPrompt } from '../src/core/modes.js'
@@ -47,7 +50,6 @@ import {
   findLatestSession,
   loadSession,
   releaseSessionOwnership,
-  saveSession,
 } from '../src/core/sessionManager.js'
 import type { AgentChildEngineFactory, EngineConfig, OpenAIMessage } from '../src/core/types.js'
 import { getMemoryDir, getMemoryStats } from '../src/memory/index.js'
@@ -72,6 +74,8 @@ export { runSingleTask } from '../src/cli/tasks.js'
 loadEnvironment(import.meta.url)
 async function main(): Promise<void> {
   const execArgs = process.argv[2] === 'exec' ? parseExecArgs(process.argv.slice(2)) : undefined
+  const acpArgs = process.argv[2] === 'acp' ? parseAcpArgs(process.argv.slice(2)) : undefined
+  const serviceArgs = execArgs ?? acpArgs
   const responseSchema = execArgs?.outputSchemaPath ? readOutputSchema(resolve(execArgs.cwd ?? process.cwd(), execArgs.outputSchemaPath)) : undefined
   const sessionState: CliSessionState = { prompt: null, saveOnExit: null }
   const { handleRuntimeCommand } = await import('../src/core/runtimeRecovery.js')
@@ -85,12 +89,12 @@ async function main(): Promise<void> {
   initChildLogCapture()
   let args: Args
   try {
-    args = execArgs ? parseArgs([
+    args = serviceArgs ? parseArgs([
       ...process.argv.slice(0, 2),
-      ...(execArgs.cwd ? ['--cwd', execArgs.cwd] : []),
-      ...(execArgs.model ? ['--model', execArgs.model] : []),
-      ...(execArgs.resume ? ['--resume', execArgs.resume] : []),
-      ...(execArgs.continueSession ? ['--continue'] : []),
+      ...(serviceArgs.cwd ? ['--cwd', serviceArgs.cwd] : []),
+      ...(serviceArgs.model ? ['--model', serviceArgs.model] : []),
+      ...(serviceArgs.resume ? ['--resume', serviceArgs.resume] : []),
+      ...(serviceArgs.continueSession ? ['--continue'] : []),
     ]) : parseArgs(process.argv)
     if (execArgs) args.task = execArgs.task || undefined
   } catch (error) {
@@ -230,7 +234,7 @@ async function main(): Promise<void> {
     }
     process.exit(0)
   }
-  const renderer = new Renderer(execArgs ? { stream: process.stderr } : undefined)
+  const renderer = new Renderer(serviceArgs ? { stream: process.stderr } : undefined)
   renderer.banner(VERSION, effectiveModel)
   renderer.info(`cwd: ${cwd}`)
   if (projectConfig) {
@@ -332,15 +336,10 @@ async function main(): Promise<void> {
   const mode = getCurrentMode(modesDir)
   const verbosityPrompt = getVerbosityPrompt(mode.verbosity)
   const modePrompt = [mode.systemPrompt, verbosityPrompt].filter(Boolean).join('\n\n')
-  const systemPrompt = buildFullSystemPrompt(
-    cwd,
-    [],
-    modePrompt,
-    taskContext,
-    sessionDir,
-    skillIndex,
-    projectCtxSection,
-  )
+  const sessionSystemPrompt = (directory: string): string => {
+    const prompt = buildFullSystemPrompt(cwd, [], modePrompt, taskContext, directory, skillIndex, projectCtxSection)
+    return projectConfig?.systemPrompt ? prompt + '\n\n' + projectConfig.systemPrompt : prompt
+  }
   const eventLog = new EventLog(sessionDir)
   renderer.info(`EventLog: ${eventLog.getFilePath()}`)
   const projectSlug =
@@ -371,7 +370,7 @@ async function main(): Promise<void> {
     new ExecutionEngine(childConfig, childRenderer as Renderer)
   let uiStore: UIStore | undefined
   let inkRendererInstance: InkRenderer | undefined
-  const interactiveRepl = !loop && !task && Boolean(process.stdin.isTTY)
+  const interactiveRepl = !serviceArgs && !loop && !task && Boolean(process.stdin.isTTY)
   if (ink && interactiveRepl) {
     const { UIStore: UIStoreClass } = await import('../src/ui/ink/store.js')
     const { InkRenderer: InkRendererClass } = await import('../src/ui/ink/inkRenderer.js')
@@ -393,7 +392,7 @@ async function main(): Promise<void> {
   }
   const config: EngineConfig = {
     model: effectiveModel,
-    ...(execArgs?.effort ? { effort: execArgs.effort } : {}),
+    ...(serviceArgs?.effort ? { effort: serviceArgs.effort } : {}),
     modelProtocol: apiEnvironment.protocol,
     modelSettings: executionSettings.modelSettings,
     apiKey,
@@ -406,9 +405,8 @@ async function main(): Promise<void> {
     permissionMode: projectConfig?.permissionMode ?? 'auto',
     permissionManager,
     hookRunner,
-    systemPrompt: projectConfig?.systemPrompt
-      ? systemPrompt + '\n\n' + projectConfig.systemPrompt
-      : systemPrompt,
+    systemPrompt: sessionSystemPrompt(sessionDir),
+    sessionSystemPrompt,
     sessionDir,
     maxContextTokens: projectConfig?.maxContextTokens ?? maxCtxTokens,
     temperature:
@@ -435,6 +433,7 @@ async function main(): Promise<void> {
     askUserQuestion: createTerminalAskUserHandler({
       prompt: {
         get isTTY(): boolean {
+          if (serviceArgs) return false
           if (sessionState.prompt) return sessionState.prompt.isTTY
           return Boolean(process.stdout.isTTY && process.stdin.isTTY)
         },
@@ -444,10 +443,10 @@ async function main(): Promise<void> {
             : Promise.resolve({ text: '', eof: true }),
         close: () => sessionState.prompt?.close(),
       },
-      writeOut: (s) => process.stdout.write(s),
+      writeOut: (s) => (serviceArgs ? process.stderr : process.stdout).write(s),
     }),
     exitPlanMode:
-      uiStore || (process.stdin.isTTY && process.stdout.isTTY)
+      !serviceArgs && (uiStore || (process.stdin.isTTY && process.stdout.isTTY))
         ? async (plan: string): Promise<boolean> => {
             if (uiStore) {
               return uiStore.showPlanApproval(plan)
@@ -469,9 +468,10 @@ async function main(): Promise<void> {
           }
         : undefined,
   }
-  if (execArgs) {
+  if (serviceArgs) {
     try {
-      await runExec({ config, sessionDir, task: execArgs.task, responseSchema, onUserPromptSubmit: text => hookRunner.runUserPromptSubmit(text) })
+      if (execArgs) await runExec({ config, sessionDir, task: execArgs.task, responseSchema, onUserPromptSubmit: text => hookRunner.runUserPromptSubmit(text) })
+      else await runAcp({ config, sessionDir, onUserPromptSubmit: (text, signal) => hookRunner.runUserPromptSubmit(text, signal) })
     } finally {
       releaseSessionOwnership(sessionDir)
       tmuxLayout.destroy()
@@ -488,6 +488,11 @@ async function main(): Promise<void> {
     enabledModules: ['memory', 'workspace'],
   }
   const engine = new ExecutionEngine(config, inkRendererInstance ? inkRendererInstance : renderer)
+  const bindClient = (client: AgentSessionClient): void => {
+    sessionState.interrupt = () => client.interrupt()
+    sessionState.dispose = () => client.dispose()
+    sessionState.getEngine = () => client.engine
+  }
   const { markBackgroundReady } = await import('../src/core/backgroundSession.js')
   markBackgroundReady()
   let cleanupPromise: Promise<void> | undefined
@@ -504,7 +509,7 @@ async function main(): Promise<void> {
       let resourcesSettled = true
       try {
         await settleWithin(
-          Promise.resolve().then(() => engine.dispose()),
+          Promise.resolve().then(() => sessionState.dispose ? sessionState.dispose() : engine.dispose()),
           3000,
         )
       } catch (error) {
@@ -520,7 +525,7 @@ async function main(): Promise<void> {
           renderer.warn(`Terminal cleanup: ${(error as Error).message}`)
         }
       }
-      const costTracker = engine.getCostTracker()
+      const costTracker = (sessionState.getEngine?.() ?? engine).getCostTracker()
       try {
         if (costTracker.getTotalAPICalls() > 0)
           process.stdout.write('\n' + costTracker.formatSummary() + '\n')
@@ -541,7 +546,8 @@ async function main(): Promise<void> {
   }
   const terminate = (): void => {
     lifecycleController.abort()
-    engine.abort()
+    if (sessionState.interrupt) void Promise.resolve(sessionState.interrupt()).catch(error => renderer.warn(String(error)))
+    else engine.abort()
     process.exitCode = 130
     updateProgressLog(cwd, 'cancelled', 'Termination requested; waiting for cleanup')
     recordBackgroundOutcome('cancelled')
@@ -552,18 +558,10 @@ async function main(): Promise<void> {
   process.on('SIGHUP', terminate)
   if (loop || task || !process.stdin.isTTY) process.on('SIGINT', terminate)
   try {
-    sessionState.saveOnExit = (): void => {
-      if (!sessionDir) return
-      try {
-        saveSession(sessionDir, resumedHistory)
-      } catch (error) {
-        void error
-      }
-    }
+    sessionState.saveOnExit = null
     if (!process.stdin.isTTY) {
       const piped = await readStdin()
       if (piped) {
-        await hookRunner.runUserPromptSubmit(piped)
         await runSingleTask(
           engine,
           renderer,
@@ -572,6 +570,7 @@ async function main(): Promise<void> {
           resumedHistory,
           sessionDir,
           resumedHistory,
+          { onClient: bindClient, onPromptSubmit: signal => hookRunner.runUserPromptSubmit(piped, signal) },
         )
         return
       }
@@ -592,8 +591,7 @@ async function main(): Promise<void> {
       return
     }
     if (task) {
-      await hookRunner.runUserPromptSubmit(task)
-      await runSingleTask(engine, renderer, task, cwd, resumedHistory, sessionDir, resumedHistory)
+      await runSingleTask(engine, renderer, task, cwd, resumedHistory, sessionDir, resumedHistory, { onClient: bindClient, onPromptSubmit: signal => hookRunner.runUserPromptSubmit(task, signal) })
       return
     }
     if (ink && uiStore && inkRendererInstance) {
@@ -603,6 +601,7 @@ async function main(): Promise<void> {
         description: s.description,
       }))
       await runInkRepl({
+        onClient: bindClient,
         store: uiStore,
         engine,
         inkRenderer: inkRendererInstance as unknown as Renderer,
@@ -610,7 +609,7 @@ async function main(): Promise<void> {
         model,
         skills: skillsArray,
         resolveSkillInvocation: createSkillRuntime(skills).resolveSkillInvocation,
-        onUserPromptSubmit: (prompt) => hookRunner.runUserPromptSubmit(prompt),
+        onUserPromptSubmit: (prompt, signal) => hookRunner.runUserPromptSubmit(prompt, signal),
         cwd,
         sessionDir,
         resumedHistory,
