@@ -1,4 +1,5 @@
 import type OpenAI from 'openai'
+import { auxiliaryModelOptions } from './modelRequestPolicy.js'
 import { createHash } from 'node:crypto'
 import type { OpenAIMessage } from './types.js'
 import { safeHistoryStart } from './messageGroups.js'
@@ -361,7 +362,7 @@ export async function maybeCompact(
       // hard deadline can interrupt the summarization. Without this,
       // auto-compact could park indefinitely after a user cancel and
       // the engine would silently fall through to `compacted: false`.
-      signal ? { signal } : undefined,
+      auxiliaryModelOptions(signal ? { signal } : undefined),
     )
     const choice = response.choices[0]
     if (choice?.finish_reason !== 'stop' || choice.message.tool_calls?.length) {
@@ -394,15 +395,19 @@ export async function maybeCompact(
     content: summaryContent,
   }
 
-  const syntheticAssistantAck: OpenAIMessage = {
-    role: 'assistant',
-    content: `I've reviewed the conversation summary and have the context needed to continue.`,
+  const continuationPrompt: OpenAIMessage = {
+    role: 'user', source: 'summary',
+    content: 'Continue using the conversation summary and the recent context below.',
   }
 
   const compactedMessages: OpenAIMessage[] = [
     summaryMessage,
-    syntheticAssistantAck,
-    ...recentMessages,
+    continuationPrompt,
+    ...recentMessages.map(message => {
+      const visible = { ...message }
+      delete visible.providerState
+      return visible
+    }),
   ]
 
   const summaryTokens = estimateTokens(compactedMessages)

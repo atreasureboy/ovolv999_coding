@@ -5,6 +5,7 @@ export type ApprovalStatus = 'decided' | 'needs_input' | 'cancelled' | 'stale'
 
 export interface ApprovalRequest {
   requestId: string
+  sessionId?: string
   runId: string
   operationId: string
   inputDigest: string
@@ -165,7 +166,7 @@ export class ApprovalBroker {
   }
 
   private sessionKey(request: ApprovalRequest): string {
-    return JSON.stringify([request.tool, request.cwd, request.inputDigest, request.policyDigest ?? null])
+    return JSON.stringify([request.sessionId ? 'session' : 'run', request.sessionId || request.runId, request.tool, request.cwd, request.inputDigest, request.policyDigest ?? null])
   }
 
   private denied(request: ApprovalRequest, status: ApprovalStatus, feedback?: string): ApprovalDecision {
@@ -173,7 +174,7 @@ export class ApprovalBroker {
   }
 
   private unchanged(pending: PendingApproval): boolean {
-    return (['requestId', 'runId', 'operationId', 'tool', 'inputDigest', 'cwd', 'policyDigest'] as const)
+    return (['requestId', 'sessionId', 'runId', 'operationId', 'tool', 'inputDigest', 'cwd', 'policyDigest'] as const)
       .every((key) => pending.original[key] === pending.request[key])
   }
 

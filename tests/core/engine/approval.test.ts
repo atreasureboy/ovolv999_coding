@@ -38,6 +38,36 @@ function setup() {
 }
 
 describe('operation approval policy binding', () => {
+  it('isolates standalone engine configurations sharing an approval broker', async () => {
+    const { requests, state, context } = setup()
+    const other = { ...state, config: { ...state.config } }
+    await requestOperationApproval(state, 'Write', { file_path: 'target.txt', content: 'approved' }, 'needs-approval', context)
+    await requestOperationApproval(state, 'Write', { file_path: 'target.txt', content: 'approved' }, 'needs-approval', { ...context, runId: 'next-run' })
+    await requestOperationApproval(other, 'Write', { file_path: 'target.txt', content: 'approved' }, 'needs-approval', context)
+    expect(requests).toHaveLength(2)
+  })
+
+  it('does not copy an implicit standalone session grant with engine configuration', async () => {
+    const { requests, state, context } = setup()
+    const input = { file_path: 'target.txt', content: 'approved' }
+    await requestOperationApproval(state, 'Write', input, 'needs-approval', context)
+    const other = { ...state, config: { ...state.config } }
+    await requestOperationApproval(other, 'Write', input, 'needs-approval', context)
+    expect(requests).toHaveLength(2)
+  })
+
+  it('rejects an approval after the configured session binding changes', async () => {
+    const { config, state, context } = setup()
+    config.approvalSessionId = 'session-a'
+    config.approvalBroker!.attachHost({ request: request => {
+      config.approvalSessionId = 'session-b'
+      return Promise.resolve({ requestId: request.requestId, inputDigest: request.inputDigest, cwd: request.cwd,
+        action: 'allow', scope: 'session', status: 'decided' })
+    } })
+    await expect(requestOperationApproval(state, 'Write', { file_path: 'target.txt', content: 'approved' }, 'needs-approval', context))
+      .resolves.toMatchObject({ approved: false, status: 'blocked' })
+  })
+
   it('requests another approval when execution policy changes after a session grant', async () => {
     const { requests, config, state, context } = setup()
     const input = { command: 'npm test' }

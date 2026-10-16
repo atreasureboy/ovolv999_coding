@@ -6,9 +6,10 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { ExecutionEngine } from '../../src/core/engine.js'
 import type { EngineObserver } from '../../src/core/engine/observer.js'
 import { AgentService } from '../../src/core/agentService.js'
-import { readSessionSnapshot, saveSession } from '../../src/core/sessionManager.js'
+import { readSessionSnapshot, releaseSessionOwnership, saveSession } from '../../src/core/sessionManager.js'
 import { AgentEventStore } from '../../src/core/agentEventStore.js'
 import { ApprovalBroker } from '../../src/core/approvalBroker.js'
+import { PermissionManager } from '../../src/core/permissionSystem.js'
 import { prepareModelWindow, readModelWindow, saveTurnResult } from '../../src/core/agentSession.js'
 import { randomUUID } from 'node:crypto'
 import type { EngineConfig, OpenAIMessage, Tool } from '../../src/core/types.js'
@@ -29,7 +30,7 @@ function response(res: ServerResponse, text = 'ready') {
   res.end('data: [DONE]\n\n')
 }
 
-async function fixture(handler?: (request: Record<string, unknown>, res: ServerResponse, index: number) => void, config: Partial<EngineConfig> = {}, timing: { deadlineMs?: number; finalizationGraceMs?: number } = {}, prepareEngine?: (engine: ExecutionEngine) => Promise<ExecutionEngine>) {
+async function fixture(handler?: (request: Record<string, unknown>, res: ServerResponse, index: number) => void, config: Partial<EngineConfig> = {}, timing: { deadlineMs?: number; finalizationGraceMs?: number; expectedDisposalFailure?: boolean } = {}, prepareEngine?: (engine: ExecutionEngine) => Promise<ExecutionEngine>) {
   const cwd = mkdtempSync(join(tmpdir(), 'ovo-agent-service-'))
   const requests: Record<string, unknown>[] = []
   const server = createServer((req, res) => {
@@ -55,7 +56,7 @@ async function fixture(handler?: (request: Record<string, unknown>, res: ServerR
       }, quiet)
       return prepareEngine ? prepareEngine(engine) : engine
     } })
-    cleanups.push(() => service.dispose())
+    cleanups.push(() => service.dispose().catch(error => { if (!timing.expectedDisposalFailure) throw error }))
     return service
   }
   cleanups.push(async () => {
@@ -98,6 +99,75 @@ it('binds turn identity to the real engine and persists full history across rest
   expect(second.result.status, second.result.output).toBe('completed')
   expect(second.newHistory).toHaveLength(134)
   expect(requests[1].messages).toContainEqual(expect.objectContaining({ role: 'assistant', content: 'ready', reasoning_content: 'opaque fixture reasoning' }))
+})
+
+it.each([false, true])('rejects a start racing idle release without persisting an orphan turn (start first: %s)', async startFirst => {
+  const { cwd, service, createService, requests } = await fixture()
+  const sessionDir = join(cwd, 'sessions', 'session_release_race')
+  mkdirSync(sessionDir, { recursive: true })
+  const { threadId } = await service.register({ sessionDir, cwd })
+  const start = () => service.start({ threadId, cwd, text: 'must not start' }).then(async accepted => {
+    await service.wait(threadId, accepted.turnId).catch(() => {})
+    return accepted
+  }, error => error as Error)
+  const started = startFirst ? start() : undefined
+  const released = service.release(threadId)
+  const attempted = started ?? start()
+  const outcome = await attempted
+  await released
+  expect(outcome).toMatchObject({ code: 'thread_releasing' })
+  expect(requests).toHaveLength(0)
+  const next = createService()
+  await next.register({ sessionDir, cwd })
+  expect(await next.snapshot(threadId)).toMatchObject({ lastSequence: 0, activeTurn: null, recovery: 'clean' })
+  const resumed = await next.start({ threadId, cwd, text: 'clean restart' })
+  expect((await next.wait(threadId, resumed.turnId)).result.status).toBe('completed')
+})
+
+it('shares one cleanup between repeated release and service disposal', async () => {
+  const { cwd, service, createService } = await fixture()
+  const sessionDir = join(cwd, 'sessions', 'session_release_dispose')
+  mkdirSync(sessionDir, { recursive: true })
+  const { threadId } = await service.register({ sessionDir, cwd })
+  const engine = service.engineForThread(threadId)
+  const dispose = vi.spyOn(engine, 'dispose')
+  const released = service.release(threadId)
+  const again = service.release(threadId)
+  const disposed = service.dispose()
+  await Promise.all([released, again, disposed])
+  expect(dispose).toHaveBeenCalledTimes(1)
+  const next = createService()
+  await next.register({ sessionDir, cwd })
+  await service.dispose()
+  const resumed = await next.start({ threadId, cwd, text: 'still owned by next service' })
+  expect((await next.wait(threadId, resumed.turnId)).result.status).toBe('completed')
+})
+
+it('retains the release fence and ownership when engine cleanup fails, including after disposal', async () => {
+  const { cwd, service, createService } = await fixture(undefined, {}, { expectedDisposalFailure: true })
+  const sessionDir = join(cwd, 'sessions', 'session_release_failure')
+  mkdirSync(sessionDir, { recursive: true })
+  const { threadId } = await service.register({ sessionDir, cwd })
+  const engine = service.engineForThread(threadId)
+  const failure = new Error('unfinished cleanup')
+  const dispose = vi.spyOn(engine, 'dispose').mockRejectedValue(failure)
+  try {
+    await expect(service.release(threadId)).rejects.toBe(failure)
+    await expect(service.release(threadId)).rejects.toBe(failure)
+    await expect(service.start({ threadId, cwd, text: 'must remain fenced' })).rejects.toMatchObject({ code: 'thread_releasing' })
+    await expect(service.register({ sessionDir, cwd })).rejects.toMatchObject({ code: 'thread_releasing' })
+    await expect(service.replaceHistory(threadId, [])).rejects.toMatchObject({ code: 'thread_releasing' })
+    await expect(service.dispose()).rejects.toThrow(/disposal failed/)
+    expect(dispose).toHaveBeenCalledTimes(1)
+    const next = createService()
+    await expect(next.register({ sessionDir, cwd })).rejects.toMatchObject({ code: 'session_owned' })
+    expect(JSON.parse(readFileSync(join(sessionDir, 'agent-events', 'manifest.json'), 'utf8')).writer).not.toBeNull()
+    expect(existsSync(join(sessionDir, 'writer.lock.owners'))).toBe(true)
+  } finally {
+    dispose.mockRestore()
+    await engine.dispose()
+    releaseSessionOwnership(sessionDir)
+  }
 })
 
 it('fences stale control, rejects concurrent starts, and steers inside the same real run', async () => {
@@ -478,6 +548,48 @@ it('persists needs_input approval when the approval host disconnects without exe
   expect(existsSync(target)).toBe(false)
   expect((await service.snapshot(started.threadId)).pendingApprovals).toMatchObject([{ runId: started.turnId, tool: 'Write', status: 'needs_input' }])
   await expect(service.start({ threadId: started.threadId, cwd, text: 'must not bypass approval' })).rejects.toThrow(/recovery/)
+})
+
+it('isolates Write grants between concurrently active threads sharing a broker and workspace', async () => {
+  const broker = new ApprovalBroker()
+  const approvals: string[] = []
+  broker.attachHost({ request: request => {
+    approvals.push(request.runId)
+    return Promise.resolve({ requestId: request.requestId, inputDigest: request.inputDigest, cwd: request.cwd,
+      action: approvals.length === 1 ? 'allow' : 'deny', scope: 'session', status: 'decided' })
+  } })
+  const permissions = new PermissionManager()
+  permissions.addRule({ toolName: 'Write', ruleContent: '*', behavior: 'ask', source: 'user' })
+  let target = '', held: ServerResponse | undefined, reached!: () => void
+  const firstWritten = new Promise<void>(resolve => { reached = resolve })
+  const { cwd, service } = await fixture((request, res, index) => {
+    const messages = request.messages as OpenAIMessage[]
+    const start = messages.map(message => message.role).lastIndexOf('user')
+    const tools = messages.slice(start).filter(message => message.role === 'tool')
+    if (!tools.length) toolResponse(res, 'Read', { file_path: target }, `read-${index}`)
+    else if (tools.length === 1) toolResponse(res, 'Write', { file_path: target, content: 'first session approved' }, `write-${index}`)
+    else if (messages[start].content === 'first session') { held = res; reached() }
+    else response(res)
+  }, { approvalBroker: broker, permissionManager: permissions, permissionMode: 'ask', agent: { identity: { systemPrompt: () => 'local fixture' }, tools: ['Read', 'Write'] } })
+  target = join(cwd, 'shared.txt')
+  writeFileSync(target, 'original')
+  const first = await service.start({ cwd, text: 'first session' })
+  await firstWritten
+  expect(readFileSync(target, 'utf8')).toBe('first session approved')
+  writeFileSync(target, 'external edit while first session remains active')
+  try {
+    const second = await service.start({ cwd, text: 'second session' })
+    await service.wait(second.threadId, second.turnId)
+    expect(approvals).toEqual([first.turnId, second.turnId])
+    expect(readFileSync(target, 'utf8')).toBe('external edit while first session remains active')
+    const events = service.subscribe(second.threadId, 0)
+    const requested = []
+    for await (const event of events) {
+      if (event.type === 'approval.requested') requested.push(event)
+      if (event.type === 'turn.finished') break
+    }
+    expect(requested).toHaveLength(1)
+  } finally { response(held!); await service.wait(first.threadId, first.turnId) }
 })
 
 it('blocks another turn while a deadline-cancelled real tool remains physically unsettled', async () => {

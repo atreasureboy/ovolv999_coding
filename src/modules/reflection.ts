@@ -10,6 +10,7 @@
  */
 
 import type OpenAI from 'openai'
+import { auxiliaryModelOptions } from '../core/modelRequestPolicy.js'
 import type { OpenAIMessage } from '../core/types.js'
 import type { AgentModule, ModuleBootResult, ModuleRunContext } from '../core/module.js'
 import type { MemorySourceRef, SemanticMemory } from '../core/semanticMemory.js'
@@ -59,7 +60,7 @@ async function requestReflection(client: OpenAI, model: string, prompt: string, 
     messages: [{ role: 'system', content: REFLECTION_SYSTEM_PROMPT }, { role: 'user', content: prompt }],
     temperature: 0,
     max_tokens: REFLECTION_MAX_TOKENS,
-  }, { timeout: 30_000, signal, maxRetries: 0 })
+  }, auxiliaryModelOptions({ timeout: 30_000, signal, maxRetries: 0 }))
   return parseReflection(response.choices[0]?.message?.content ?? '')
 }
 

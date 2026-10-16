@@ -66,6 +66,7 @@ interface ServiceThread extends AgentEngineContext {
   subscriptionAbort: AbortController
   subscriptionError?: unknown
   unsubscribeApproval?: () => void
+  releasing?: boolean
 }
 
 export class AgentServiceError extends Error {
@@ -104,6 +105,7 @@ export class AgentService {
   private readonly threads = new Map<string, ServiceThread>()
   private readonly registrations = new Map<string, { cwd: string; promise: Promise<{ threadId: string }> }>()
   private readonly threadLocations = new Map<string, string>()
+  private readonly releases = new Map<string, Promise<void>>()
   private disposed = false
   private disposal?: Promise<void>
 
@@ -122,7 +124,9 @@ export class AgentService {
     const existing = this.registrations.get(key)
     if (existing) {
       if (!samePath(existing.cwd, cwd)) throw new AgentServiceError('workspace_mismatch', 'Session registration belongs to another workspace')
-      return existing.promise
+      const registered = await existing.promise
+      this.assertAvailable(this.thread(registered.threadId))
+      return registered
     }
     const registration = this.registerThread({ ...input, cwd, sessionDir })
     this.registrations.set(key, { cwd, promise: registration })
@@ -152,6 +156,7 @@ export class AgentService {
       engine = input.engine ?? await this.options.engineFactory({ sessionDir: input.sessionDir, cwd: input.cwd, threadId: envelope.sessionId })
       this.assertOpen()
       if (!samePath(workspace(engine.getConfig().cwd), input.cwd)) throw new AgentServiceError('workspace_mismatch', 'Configured engine belongs to another workspace')
+      engine.getConfig().approvalSessionId = envelope.sessionId
       const saved = store.snapshot()
       const thread: ServiceThread = {
         threadId: envelope.sessionId, cwd: input.cwd, sessionDir: input.sessionDir, engine, store,
@@ -170,6 +175,7 @@ export class AgentService {
         } else thread.store.append({ type: 'approval.resolved', turnId: turn.turnId, decision: event.decision })
       })
       this.threads.set(thread.threadId, thread)
+      this.releases.delete(thread.threadId)
       return { threadId: thread.threadId }
     } catch (error) {
       try { store?.close() } finally {
@@ -189,6 +195,7 @@ export class AgentService {
     if (input.responseSchema) validateOutputSchema(input.responseSchema)
     const cwd = workspace(input.cwd)
     const thread = input.threadId ? await this.resolveThread(input.threadId, cwd) : this.thread((await this.register({ cwd, sessionDir: createSessionDir(cwd) })).threadId)
+    this.assertAvailable(thread)
     if (!samePath(thread.cwd, cwd)) throw new AgentServiceError('workspace_mismatch', 'Thread belongs to another workspace')
     if (thread.active) throw new AgentServiceError('turn_active', 'Another turn is active on this thread')
     if (thread.recoveryRequired) throw new AgentServiceError('recovery_required', 'Thread requires explicit recovery before another turn')
@@ -302,16 +309,29 @@ export class AgentService {
   }
 
   async release(threadId: string): Promise<void> {
+    const existing = this.releases.get(threadId)
+    if (existing) return existing
     const thread = this.thread(threadId)
     this.assertIdle(thread)
-    await thread.engine.dispose()
-    thread.unsubscribeApproval?.()
-    thread.store.close()
-    releaseSessionOwnership(thread.sessionDir)
-    ownedSessions.delete(pathKey(thread.sessionDir))
-    this.threadLocations.delete(threadId)
-    this.threads.delete(threadId)
-    this.registrations.delete(pathKey(thread.sessionDir))
+    return this.releaseThread(thread)
+  }
+
+  private releaseThread(thread: ServiceThread): Promise<void> {
+    const existing = this.releases.get(thread.threadId)
+    if (existing) return existing
+    thread.releasing = true
+    const released = Promise.resolve().then(async () => {
+      await thread.engine.dispose()
+      thread.unsubscribeApproval?.()
+      thread.store.close()
+      releaseSessionOwnership(thread.sessionDir)
+      ownedSessions.delete(pathKey(thread.sessionDir))
+      this.threadLocations.delete(thread.threadId)
+      this.threads.delete(thread.threadId)
+      this.registrations.delete(pathKey(thread.sessionDir))
+    })
+    this.releases.set(thread.threadId, released)
+    return released
   }
 
   dispose(): Promise<void> {
@@ -324,16 +344,8 @@ export class AgentService {
         if (thread.active) thread.active.accepting = false
         thread.engine.abort()
         if (thread.active) await thread.active.promise.catch(error => { failures.push(error) })
-        try { await thread.engine.dispose() } catch (error) { failures.push(error) }
-        thread.unsubscribeApproval?.()
-        try { thread.store.close() } catch (error) { failures.push(error) } finally {
-          releaseSessionOwnership(thread.sessionDir)
-          ownedSessions.delete(pathKey(thread.sessionDir))
-        }
+        try { await this.releaseThread(thread) } catch (error) { failures.push(error) }
       }
-      this.threads.clear()
-      this.registrations.clear()
-      this.threadLocations.clear()
       if (failures.length) throw new AggregateError(failures, 'Agent service disposal failed')
     })()
     return this.disposal
@@ -451,7 +463,13 @@ export class AgentService {
   }
 
   private assertIdle(thread: ServiceThread): void {
+    this.assertAvailable(thread)
     if (thread.active || isWorkspaceQuarantined(thread.cwd)) throw new AgentServiceError('turn_active', 'Thread has an active turn or unfinished resources')
+  }
+
+  private assertAvailable(thread: ServiceThread): void {
+    this.assertOpen()
+    if (thread.releasing) throw new AgentServiceError('thread_releasing', 'Thread is releasing or has unfinished cleanup')
   }
 
   private assertOpen(): void {

@@ -105,6 +105,44 @@ describe('approval broker', () => {
     expect(calls[1].policyDigest).toBe(secondPolicy)
   })
 
+  it('isolates grants between stable sessions while reusing them across runs of one session', async () => {
+    const broker = new ApprovalBroker()
+    const calls: ApprovalRequest[] = []
+    broker.attachHost({ request: req => {
+      calls.push(req)
+      return Promise.resolve({ requestId: req.requestId, inputDigest: req.inputDigest, cwd: req.cwd,
+        action: calls.length === 1 ? 'allow' : 'deny', scope: 'session', status: 'decided' })
+    } })
+    await expect(broker.request({ ...request('one'), sessionId: 'session-a', runId: 'run-a' })).resolves.toMatchObject({ action: 'allow' })
+    await expect(broker.request({ ...request('two'), sessionId: 'session-a', runId: 'run-b' })).resolves.toMatchObject({ action: 'allow' })
+    await expect(broker.request({ ...request('three'), sessionId: 'session-b', runId: 'run-c' })).resolves.toMatchObject({ action: 'deny' })
+    await expect(broker.request({ ...request('four'), sessionId: 'session-a', runId: 'run-d' })).resolves.toMatchObject({ action: 'allow' })
+    expect(calls).toHaveLength(2)
+  })
+
+  it('limits a legacy request without session identity to its own run', async () => {
+    const broker = new ApprovalBroker()
+    const calls: ApprovalRequest[] = []
+    broker.attachHost({ request: req => {
+      calls.push(req)
+      return Promise.resolve({ requestId: req.requestId, inputDigest: req.inputDigest, cwd: req.cwd,
+        action: calls.length === 1 ? 'allow' : 'deny', scope: 'session', status: 'decided' })
+    } })
+    await broker.request(request('one'))
+    await expect(broker.request({ ...request('two'), runId: 'another-run' })).resolves.toMatchObject({ action: 'deny' })
+    expect(calls).toHaveLength(2)
+  })
+
+  it('rejects a grant if the submitted session identity changes during approval', async () => {
+    const broker = new ApprovalBroker()
+    const host = controlledHost(broker)
+    const req = { ...request('one'), sessionId: 'session-a' }
+    const pending = broker.request(req)
+    req.sessionId = 'session-b'
+    host.decide(0, { scope: 'session' })
+    await expect(pending).resolves.toMatchObject({ action: 'deny', status: 'stale' })
+  })
+
   it('rejects a decision when the submitted reviewed policy changes during the wait', async () => {
     const broker = new ApprovalBroker()
     const host = controlledHost(broker)

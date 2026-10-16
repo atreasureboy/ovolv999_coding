@@ -14,7 +14,10 @@ import { runHookOperation } from './hookLifecycle.js'
 import { createHash, randomUUID } from 'crypto'
 import { join, resolve } from 'node:path'
 import { UsageLedger } from './usageLedger.js'
-import { resolveModelRuntime } from './modelRuntime.js'
+import { nativeModelAdapter, resolveModelRuntime } from './modelRuntime.js'
+import { AdapterError } from './model/common.js'
+import { historyDigest } from './model/state.js'
+import type { ModelAdapter } from './model/types.js'
 import { usagePricing } from './modelPricing.js'
 import { normalizeModelSettings, normalizeModelProtocol } from '../config/modelSettings.js'
 import OpenAI from 'openai'
@@ -122,6 +125,7 @@ export class ExecutionEngine {
   private disposed = false
   private lastAssistantTs: number | undefined = undefined
   private pendingSnipCount: number | null = null
+  private previousModelAdapters = new Map<string, ModelAdapter>()
   private getModelContextWindow(): number {
     return resolveModelRuntime(this.config).options.capabilities.contextWindow
   }
@@ -390,6 +394,7 @@ export class ExecutionEngine {
     toolDefs: ToolDefinition[],
     turnAbortSignal: AbortSignal,
   ): Promise<ModelResponse> {
+    this.migrateProviderContinuation(messages, systemPrompt)
     this.renderer.startSpinner()
     const callStartMs = Date.now()
     const createStream = (): Promise<AsyncIterable<OpenAI.Chat.ChatCompletionChunk>> =>
@@ -1284,8 +1289,15 @@ export class ExecutionEngine {
     return this.client
   }
   setModel(model: string): void {
+    if (model !== this.config.model) {
+      const runtime = resolveModelRuntime(this.config)
+      this.previousModelAdapters.set(this.config.model, nativeModelAdapter(runtime.protocol, runtime.options))
+    }
     this.config.model = model
     for (const module of this.modules) module.onModelChange?.(model)
+  }
+  inheritModelTransitions(previous: ExecutionEngine): void {
+    this.previousModelAdapters = new Map(previous.previousModelAdapters)
   }
   getCostTracker(): CostTracker {
     return this.costTracker
@@ -1317,6 +1329,21 @@ export class ExecutionEngine {
     if (!Number.isSafeInteger(keepRecent) || keepRecent < 0)
       throw new Error('keepRecent must be a finite non-negative integer')
     this.pendingSnipCount = keepRecent
+  }
+  private migrateProviderContinuation(messages: OpenAIMessage[], systemPrompt: string): void {
+    const requestMessages: OpenAIMessage[] = [{ role: 'system', source: 'runtime', content: systemPrompt }, ...messages]
+    for (const [index, message] of messages.entries()) {
+      const state = message.providerState
+      if (!state || typeof state !== 'object' || !('model' in state) || typeof state.model !== 'string' || state.model === this.config.model) continue
+      const adapter = this.previousModelAdapters.get(state.model)
+      if (!adapter) continue
+      const validated = adapter.validateState(state, state.model)
+      for (const turn of validated.turns) {
+        if (turn.messageIndex >= requestMessages.length || historyDigest(requestMessages.slice(0, turn.messageIndex)) !== turn.prefixDigest || historyDigest([requestMessages[turn.messageIndex]]) !== turn.messageDigest) throw new AdapterError('invalid_provider_state', 'Native continuation does not match the conversation history')
+      }
+      messages[index] = { ...message }
+      delete messages[index].providerState
+    }
   }
   private discardProviderContinuation(messages: OpenAIMessage[]): void {
     for (const [index, message] of messages.entries()) {

@@ -9,6 +9,7 @@
  */
 
 import type OpenAI from 'openai'
+import { auxiliaryModelOptions } from '../core/modelRequestPolicy.js'
 import type { AgentModule, ModuleBootResult, ModuleIterationContext, ModuleIterationResult } from '../core/module.js'
 import {
   CRITIC_INTERVAL,
@@ -58,7 +59,7 @@ export class CriticModule implements AgentModule {
           temperature: 0,
           max_tokens: CRITIC_MAX_TOKENS,
         },
-        { signal: ctx.abortSignal },
+        auxiliaryModelOptions({ signal: ctx.abortSignal }),
       )
 
       const output = response.choices[0]?.message?.content ?? ''

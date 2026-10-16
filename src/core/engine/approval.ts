@@ -11,6 +11,18 @@ export interface OperationApprovalState {
   getRun: () => RunContext | null
 }
 
+const standaloneSessions = new WeakMap<EngineConfig, string>()
+
+function sessionIdentity(config: EngineConfig): string {
+  if (config.approvalSessionId) return config.approvalSessionId
+  let identity = standaloneSessions.get(config)
+  if (!identity) {
+    identity = randomUUID()
+    standaloneSessions.set(config, identity)
+  }
+  return identity
+}
+
 function policyDigest(state: OperationApprovalState): string {
   return approvalInputDigest({
     cwd: state.config.cwd,
@@ -34,6 +46,7 @@ export async function requestOperationApproval(
   context: Pick<ToolContext, 'cwd' | 'runId' | 'signal'>,
 ): Promise<{ approved: boolean; feedback?: string; status?: ToolResult['status'] }> {
   const inputDigest = approvalInputDigest(input)
+  const sessionId = sessionIdentity(state.config)
   const cwd = context.cwd
   const reviewedPolicy = policyDigest(state)
   context.signal?.throwIfAborted()
@@ -41,6 +54,7 @@ export async function requestOperationApproval(
   if (state.config.approvalBroker) {
     const decision = await state.config.approvalBroker.request({
       requestId: randomUUID(),
+      sessionId,
       runId: context.runId ?? state.getRun()?.runId ?? randomUUID(),
       operationId: randomUUID(),
       inputDigest,
@@ -71,13 +85,14 @@ export async function requestOperationApproval(
   if (
     approvalInputDigest(input) !== inputDigest ||
     state.config.cwd !== cwd ||
+    sessionIdentity(state.config) !== sessionId ||
     context.cwd !== cwd ||
     policyDigest(state) !== reviewedPolicy
   ) {
     return {
       approved: false,
       feedback:
-        'Input, workspace, or execution policy changed during approval. Request approval again.',
+        'Input, session, workspace, or execution policy changed during approval. Request approval again.',
       status: 'blocked',
     }
   }

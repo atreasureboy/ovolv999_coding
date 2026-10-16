@@ -11,6 +11,7 @@ import { gatewayModelRequest, nativeModelAdapter, resolveModelRuntime, sendNativ
 import type { NormalizedUsage } from './model/types.js'
 import { usagePricing } from './modelPricing.js'
 import { AdapterError } from './model/common.js'
+import type { ModelRequestOptions } from './modelRequestPolicy.js'
 
 const anonymousClients = new WeakMap<object, string>()
 
@@ -69,12 +70,13 @@ export function createModelGateway(client: OpenAI, config: EngineConfig, current
   const admission = providerAdmission(providerKey(client, config), policy)
   const standaloneRun = randomUUID()
   const ledger = config.usageLedger ?? new UsageLedger({ pricing: model => config.modelSettings && Object.hasOwn(config.modelSettings, model) ? config.modelSettings[model].pricing ?? usagePricing(model) : usagePricing(model) })
-  const create = (async (params: OpenAI.Chat.ChatCompletionCreateParams, options?: OpenAI.RequestOptions) => {
+  const create = (async (params: OpenAI.Chat.ChatCompletionCreateParams, options?: ModelRequestOptions) => {
     const run = currentRun()
     const parentSignal = options?.signal ?? run?.controller.signal
     parentSignal?.throwIfAborted()
     const model = params.model
     const runtime = resolveModelRuntime(config, model)
+    if (options?.reasoningPolicy === 'omit') runtime.options.effort = undefined
     const window = runtime.options.capabilities.contextWindow
     const maxTokens = clampMaxOutputTokens(params.max_tokens, window)
     const request = gatewayModelRequest(config, params, maxTokens)

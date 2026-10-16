@@ -213,7 +213,9 @@ export class AgentSessionClient {
   }
 
   private createEngine(sessionDir: string): ExecutionEngine {
-    return new ExecutionEngine(bindEngineSession(this.currentEngine.getConfig(), sessionDir), this.options.observer)
+    const engine = new ExecutionEngine(bindEngineSession(this.currentEngine.getConfig(), sessionDir), this.options.observer)
+    engine.inheritModelTransitions(this.currentEngine)
+    return engine
   }
 
   private async refresh(): Promise<void> {

@@ -43,7 +43,7 @@ it('persists bounded run knowledge with failure provenance and the active cancel
     turnResult: { stopped: true, reason: 'error', status: 'failed', output: 'Build failed' },
     messages: [1, 2, 3].map(index => ({ role: 'tool', tool_call_id: String(index), content: 'Build failed' })),
   })
-  expect(test.requests).toEqual([{ model: 'current-model', signal: controller.signal, timeout: 30_000, maxRetries: 0 }])
+  expect(test.requests).toEqual([{ model: 'current-model', signal: controller.signal, timeout: 30_000, maxRetries: 0, reasoningPolicy: 'omit' }])
   const entries = test.semantic.readAll()
   expect(entries).toHaveLength(3)
   expect(entries.map(entry => entry.confidence)).toEqual([0.9, 0.5, 0.5])
@@ -63,7 +63,7 @@ it('consolidates partial sessions with distinct source attribution and persisted
     outcome: index === 0 ? 'partial' : 'success', timestamp: new Date().toISOString(),
   })
   expect(await consolidateSession(test.client, 'session-model', test.episodic, test.semantic, undefined, controller.signal)).toEqual({ episodes: 5, knowledgeExtracted: 3 })
-  expect(test.requests).toEqual([{ model: 'session-model', signal: controller.signal, timeout: 30_000, maxRetries: 0 }])
+  expect(test.requests).toEqual([{ model: 'session-model', signal: controller.signal, timeout: 30_000, maxRetries: 0, reasoningPolicy: 'omit' }])
   for (const entry of test.semantic.readAll()) {
     expect(entry.source).toBe('consolidation')
     expect(entry.content).toMatch(/^\[session contains_failures_or_incomplete_actions; verification not_run\]/)

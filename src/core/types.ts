@@ -294,6 +294,7 @@ export interface EngineConfig {
   executionProfile?: ExecutionProfile
   executionPolicy?: ExecutionPolicy
   approvalBroker?: ApprovalBroker
+  approvalSessionId?: string
   verificationExcludedPaths?: readonly string[]
   model: string
   baseURL?: string

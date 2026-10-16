@@ -1,4 +1,4 @@
-import { createServer } from 'node:http'
+import { createServer, type ServerResponse } from 'node:http'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -6,17 +6,20 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { ExecutionEngine } from '../../src/core/engine.js'
 import type { EngineObserver } from '../../src/core/engine/observer.js'
 import type { AgentEvent } from '../../src/core/agentEvents.js'
-import type { OpenAIMessage } from '../../src/core/types.js'
+import type { EngineConfig, OpenAIMessage } from '../../src/core/types.js'
 import { readSessionSnapshot, releaseSessionOwnership, saveSession } from '../../src/core/sessionManager.js'
 import { AgentSessionClient } from '../../src/core/agentSessionClient.js'
 import { EventLog } from '../../src/core/eventLog.js'
 import { getSystemPrompt } from '../../src/prompts/system.js'
 import { isWorkspaceQuarantined } from '../../src/core/runContext.js'
+import { ApprovalBroker, type ApprovalRequest } from '../../src/core/approvalBroker.js'
+import { PermissionManager } from '../../src/core/permissionSystem.js'
+import type { ProviderContinuationState } from '../../src/core/model/types.js'
 
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.unstubAllEnvs() })
 
-async function fixture(options: { history?: OpenAIMessage[]; onEvent?: (event: AgentEvent) => void | Promise<void>; sessionResources?: boolean; finalizationGraceMs?: number; expectedDisposalFailure?: boolean } = {}) {
+async function fixture(options: { history?: OpenAIMessage[]; onEvent?: (event: AgentEvent) => void | Promise<void>; sessionResources?: boolean; finalizationGraceMs?: number; expectedDisposalFailure?: boolean; engineConfig?: Partial<EngineConfig>; respond?: (request: Record<string, unknown>, response: ServerResponse, index: number) => void } = {}) {
   const base = mkdtempSync(join(tmpdir(), 'ovo-session-client-'))
   const cwd = join(base, 'workspace'), sessionDir = join(cwd, 'sessions', 'session_first')
   mkdirSync(sessionDir, { recursive: true })
@@ -27,6 +30,7 @@ async function fixture(options: { history?: OpenAIMessage[]; onEvent?: (event: A
     req.on('data', chunk => { text += String(chunk) })
     req.on('end', () => {
       requests.push(JSON.parse(text) as Record<string, unknown>)
+      if (options.respond) { options.respond(requests.at(-1)!, res, requests.length); return }
       res.writeHead(200, { 'Content-Type': 'text/event-stream' })
       res.end('data: {"choices":[{"index":0,"delta":{"content":"ready"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
     })
@@ -38,7 +42,7 @@ async function fixture(options: { history?: OpenAIMessage[]; onEvent?: (event: A
   const observer = { startSpinner: vi.fn(), stopSpinner: vi.fn(), beginAssistantText: vi.fn(), streamToken: vi.fn(), endAssistantText: vi.fn(), toolStart: vi.fn(), toolResult: vi.fn(), contextWarning: vi.fn(), compactStart: vi.fn(), compactDone: vi.fn(), warn: vi.fn(), error: vi.fn() } satisfies EngineObserver
   const events: AgentEvent[] = []
   const createClient = () => {
-    const engine = new ExecutionEngine({ cwd, sessionDir, model: 'fixture', apiKey: 'fixture', baseURL: `http://127.0.0.1:${address.port}/v1`, enabledModules: [], maxIterations: 2, permissionMode: 'auto', ...(options.sessionResources ? { systemPrompt: getSystemPrompt(cwd, undefined, sessionDir), sessionSystemPrompt: (directory: string) => getSystemPrompt(cwd, undefined, directory), eventLog: new EventLog(sessionDir) } : { agent: { identity: { systemPrompt: () => 'fixture' }, tools: [] } }) }, observer)
+    const engine = new ExecutionEngine({ cwd, sessionDir, model: 'fixture', apiKey: 'fixture', baseURL: `http://127.0.0.1:${address.port}/v1`, enabledModules: [], maxIterations: 2, permissionMode: 'auto', ...(options.sessionResources ? { systemPrompt: getSystemPrompt(cwd, undefined, sessionDir), sessionSystemPrompt: (directory: string) => getSystemPrompt(cwd, undefined, directory), eventLog: new EventLog(sessionDir) } : { agent: { identity: { systemPrompt: () => 'fixture' }, tools: [] } }), ...options.engineConfig }, observer)
     const client = new AgentSessionClient({ engine, observer, cwd, sessionDir, history: options.history, finalizationGraceMs: options.finalizationGraceMs, onEvent: async event => { events.push(event); await options.onEvent?.(event) } })
     cleanups.push(() => client.dispose().catch(error => { if (!options.expectedDisposalFailure) throw error }))
     return client
@@ -93,6 +97,79 @@ it('switches engines and durable resources together and preserves the old bindin
   await expect(client.switchSession(broken)).rejects.toThrow()
   expect(client.sessionDir).toBe(other)
   expect((await client.runTurn('third')).result.status).toBe('completed')
+})
+
+it.each(['switch', 'recover'] as const)('requires new Write approval after %s while preserving grants across turns and failed switching', async transition => {
+  const broker = new ApprovalBroker()
+  const asks: ApprovalRequest[] = []
+  broker.attachHost({ request: request => {
+    asks.push(request)
+    return Promise.resolve({ requestId: request.requestId, inputDigest: request.inputDigest, cwd: request.cwd,
+      action: asks.length === 1 ? 'allow' : 'deny', scope: 'session', status: 'decided' })
+  } })
+  const permissions = new PermissionManager()
+  permissions.addRule({ toolName: 'Write', ruleContent: '*', behavior: 'ask', source: 'user' })
+  let target = ''
+  const { client, cwd, events } = await fixture({ engineConfig: {
+    approvalBroker: broker, permissionManager: permissions, permissionMode: 'ask', maxIterations: 3,
+    agent: { identity: { systemPrompt: () => 'local fixture' }, tools: ['Read', 'Write'] },
+  }, respond: (_request, res, index) => {
+    const tool = index % 3 === 1 ? 'Read' : 'Write'
+    const input = tool === 'Read' ? { file_path: target } : { file_path: target, content: 'approved content' }
+    const delta = index % 3 === 0 ? { content: 'ready' } : { tool_calls: [{ index: 0, id: `tool-${index}`, type: 'function', function: { name: tool, arguments: JSON.stringify(input) } }] }
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+    res.end(`data: ${JSON.stringify({ choices: [{ index: 0, delta, finish_reason: index % 3 === 0 ? 'stop' : 'tool_calls' }] })}\n\ndata: [DONE]\n\n`)
+  } })
+  target = join(cwd, 'target.txt')
+  writeFileSync(target, 'original content')
+  await client.runTurn('write in first session')
+  expect(readFileSync(target, 'utf8')).toBe('approved content')
+  expect(asks).toHaveLength(1)
+  const original = client.threadId
+  const broken = join(cwd, 'sessions', 'session_broken_approval')
+  mkdirSync(broken)
+  writeFileSync(join(broken, 'history.json'), '{')
+  await expect(client.switchSession(broken)).rejects.toThrow()
+  writeFileSync(target, 'external edit before same-session reuse')
+  await client.runTurn('write again in same session')
+  expect(readFileSync(target, 'utf8')).toBe('approved content')
+  expect(asks).toHaveLength(1)
+  if (transition === 'switch') {
+    const next = join(cwd, 'sessions', 'session_next_approval')
+    mkdirSync(next)
+    await client.switchSession(next)
+  } else await client.recover()
+  expect(client.threadId).not.toBe(original)
+  expect(client.engine.getConfig().approvalBroker).toBe(broker)
+  writeFileSync(target, 'external edit after session changed')
+  await client.runTurn('write in new session')
+  expect(asks).toHaveLength(2)
+  expect(readFileSync(target, 'utf8')).toBe('external edit after session changed')
+  expect(events.filter(event => event.type === 'approval.requested').map(event => event.threadId)).toEqual([original, client.threadId])
+})
+
+it('preserves the failed-release binding and cleans up the destination when switching cannot release the old engine', async () => {
+  const { client, cwd, sessionDir } = await fixture({ expectedDisposalFailure: true })
+  await client.initialize()
+  const original = client.engine
+  const failure = new Error('old engine cleanup is unfinished')
+  const dispose = vi.spyOn(original, 'dispose').mockRejectedValue(failure)
+  const next = join(cwd, 'sessions', 'session_failed_release')
+  mkdirSync(next)
+  try {
+    await expect(client.switchSession(next)).rejects.toBe(failure)
+    expect(client.sessionDir).toBe(sessionDir)
+    expect(client.engine).toBe(original)
+    await expect(client.runTurn('must remain fenced')).rejects.toMatchObject({ code: 'thread_releasing' })
+    expect(JSON.parse(readFileSync(join(next, 'agent-events', 'manifest.json'), 'utf8')).writer).toBeNull()
+    expect(JSON.parse(readFileSync(join(sessionDir, 'agent-events', 'manifest.json'), 'utf8')).writer).not.toBeNull()
+    await expect(client.dispose()).rejects.toThrow(/disposal failed/)
+    expect(dispose).toHaveBeenCalledTimes(1)
+  } finally {
+    dispose.mockRestore()
+    await original.dispose()
+    releaseSessionOwnership(sessionDir)
+  }
 })
 
 it('recovers explicitly into a new session without modifying corrupt event evidence or replaying work', async () => {
@@ -191,4 +268,50 @@ it('bounds disposal of an uncooperative prompt hook and preserves its quarantine
   } finally { release() }
   await vi.waitFor(() => expect(isWorkspaceQuarantined(cwd)).toBe(false))
   await expect(client.runTurn('closed')).rejects.toThrow(/disposed/i)
+})
+
+it.each(['switch', 'recover'] as const)('retains explicit model transitions through %s and reopening the earlier session', async transition => {
+  const { client, cwd, sessionDir, requests } = await fixture()
+  expect((await client.runTurn('Saved under the first model')).result.status).toBe('completed')
+  const original = client.getHistory()
+  expect(client.getModelWindow().some(message => message.providerState !== undefined)).toBe(true)
+  client.engine.setModel('model-b')
+  if (transition === 'recover') {
+    await client.recover()
+    expect(client.sessionDir).not.toBe(sessionDir)
+    expect(client.getHistory()).toEqual(original)
+  } else {
+    const next = join(cwd, 'sessions', 'session_model_switch')
+    mkdirSync(next)
+    await client.switchSession(next)
+  }
+  await client.switchSession(sessionDir)
+  expect(client.engine.getModel()).toBe('model-b')
+  expect(client.getHistory()).toEqual(original)
+  const result = await client.runTurn('Continue after reopening')
+  expect(result.result.status, result.result.output).toBe('completed')
+  expect(requests).toHaveLength(2)
+  expect(requests[1].model).toBe('model-b')
+  expect(requests[1].messages).toContainEqual({ role: 'user', content: 'Saved under the first model' })
+  expect((await client.runTurn('Continue again')).result.status).toBe('completed')
+})
+
+it.each(['unknown-model', 'corrupt-state'] as const)('rejects %s after inheriting explicit model transitions into a rebuilt session engine', async corruption => {
+  const { client, cwd, sessionDir, requests } = await fixture()
+  await client.runTurn('Saved under the first model')
+  client.engine.setModel('model-b')
+  const next = join(cwd, 'sessions', 'session_model_switch')
+  mkdirSync(next)
+  await client.switchSession(next)
+  const path = join(sessionDir, 'agent-model-window.json')
+  const projection = JSON.parse(readFileSync(path, 'utf8')) as { messages: OpenAIMessage[] }
+  const state = projection.messages.find(message => message.providerState)?.providerState as ProviderContinuationState
+  if (corruption === 'unknown-model') state.model = 'unrecognized-model'
+  else state.turns = []
+  writeFileSync(path, JSON.stringify(projection))
+  await client.switchSession(sessionDir)
+  const result = await client.runTurn('Must reject this continuation')
+  expect(result.result.status).toBe('failed')
+  expect(result.result.output).toMatch(/continuation/i)
+  expect(requests).toHaveLength(1)
 })
