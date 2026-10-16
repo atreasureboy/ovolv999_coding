@@ -59,14 +59,14 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reje
   return { promise, resolve: complete, reject: fail }
 }
 
-function checkedExecutable(executable: string, env: NodeJS.ProcessEnv): string {
+function checkedExecutable(executable: string, env: NodeJS.ProcessEnv, cwd: string): string {
   if (!executable || executable.includes('\0')) throw new Error('Invalid managed executable')
-  if (isAbsolute(executable) || executable.includes('/') || executable.includes('\\')) return resolve(executable)
+  if (isAbsolute(executable) || executable.includes('/') || executable.includes('\\')) return resolve(cwd, executable)
   const path = Object.entries(env).find(([key]) => key.toUpperCase() === 'PATH')?.[1] ?? ''
   const extensions = process.platform === 'win32' ? ['', '.exe', '.com'] : ['']
   for (const directory of path.split(delimiter).filter(Boolean)) {
     for (const extension of extensions) {
-      const candidate = join(directory, executable + extension)
+      const candidate = resolve(cwd, directory, executable + extension)
       if (existsSync(candidate)) return candidate
     }
   }
@@ -91,7 +91,7 @@ export async function spawnManagedProcess(executable: string, args: readonly str
   assertSupportedExecutionPolicy(policy)
   if (active.size >= policy.limits.processes) throw new Error('Managed process physical capacity exceeded')
   const env = buildChildEnvironment(policy, options.env)
-  const worker = checkedExecutable(executable, env)
+  const worker = checkedExecutable(executable, env, options.cwd)
   return process.platform === 'win32' ? startWindows(worker, args, { ...options, env, policy }, checkedHelper(options.helperPath)) : startObserved(worker, args, { ...options, env, policy })
 }
 
