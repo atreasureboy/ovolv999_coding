@@ -41,12 +41,19 @@ export async function runPlanMode(
   const planSessionDir = createSessionDir(cwd)
   const planEngine = new ExecutionEngine(bindEngineSession(planConfig, planSessionDir), renderer)
   const planClient = new AgentSessionClient({ engine: planEngine, observer: renderer, cwd, sessionDir: planSessionDir, history, onEvent: createAgentEventRenderer(renderer) })
+  let approvedPlan: string
   try {
     onActiveClient?.(planClient)
     const { result } = await planClient.runTurn(task, undefined, onPromptSubmit)
     const status = normalizeOutcome(result)
     if (status !== 'completed') {
       renderer.warn(`Planning ${status}: ${result.reason}`)
+      updateProgressLog(cwd, 'idle', 'waiting for next task')
+      return
+    }
+    approvedPlan = result.output.trim()
+    if (!approvedPlan) {
+      renderer.warn('Planning returned no plan. Submit the task again before executing.')
       updateProgressLog(cwd, 'idle', 'waiting for next task')
       return
     }
@@ -73,7 +80,8 @@ export async function runPlanMode(
     const client = executionClient ?? new AgentSessionClient({ engine, observer: renderer, cwd, sessionDir: engine.getConfig().sessionDir, history, onEvent: createAgentEventRenderer(renderer) })
     try {
       onActiveClient?.(client)
-      const { result, newHistory } = await client.runTurn(task)
+      const executionPrompt = `${task}\n\nThe user approved the following plan. Execute it while preserving its scope and constraints:\n\n${approvedPlan}`
+      const { result, newHistory } = await client.runTurn(executionPrompt)
       history.length = 0
       history.push(...newHistory)
       const elapsed = ((Date.now() - startMs) / 1000).toFixed(1)
@@ -365,11 +373,11 @@ export async function runRepl(
         }
         let blockedSkill = false
         const slashCtx: SlashCommandContext = {
-          engine: client.engine,
+          get engine() { return client.engine },
           renderer,
           history,
           cwd,
-          sessionDir: client.sessionDir,
+          get sessionDir() { return client.sessionDir },
           setHistory: async (msgs: OpenAIMessage[]) => {
             await client.replaceHistory(msgs)
             history.length = 0

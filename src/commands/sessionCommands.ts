@@ -1,8 +1,9 @@
-import type { Command } from './index.js'
+import type { Command, SlashCommandContext } from './index.js'
 import { formatTrackedCost } from '../core/costTracker.js'
 import { text } from './results.js'
 import type { SlashCommandResult } from './index.js'
-import { estimateTokens, calculateContextState, microCompact } from '../core/compact.js'
+import { estimateTokens, calculateContextState, effectiveInputBudget, microCompact } from '../core/compact.js'
+import { resolveModelRuntime } from '../core/modelRuntime.js'
 import type { OpenAIMessage } from '../core/types.js'
 import { copyToClipboard } from '../utils/clipboard.js'
 
@@ -23,6 +24,13 @@ function roleLabel(role: string): string {
   if (role === 'tool') return 'Tool'
   if (role === 'system') return 'Sys'
   return role
+}
+
+function modelContext(ctx: SlashCommandContext) {
+  const history = ctx.getModelHistory?.() ?? ctx.history
+  const config = ctx.engine.getConfig()
+  const window = resolveModelRuntime(config, ctx.engine.getModel()).options.capabilities.contextWindow
+  return { history, state: calculateContextState(history, effectiveInputBudget(window, config.maxOutputTokens)) }
 }
 
 export const sessionCommands: Command[] = [
@@ -116,9 +124,9 @@ export const sessionCommands: Command[] = [
     aliases: ['ctx'],
     usage: '/context [top N]  (show top N token consumers)',
     handler: (args, ctx) => {
-      const state = calculateContextState(ctx.history)
+      const { history, state } = modelContext(ctx)
       const bar_len = 30
-      const filled = Math.round(state.pct * bar_len)
+      const filled = Math.max(0, Math.min(bar_len, Math.round(state.pct * bar_len)))
       const bar = '\u2588'.repeat(filled) + '\u2591'.repeat(bar_len - filled)
       const pct_str = (state.pct * 100).toFixed(1)
       const status = state.shouldCompact ? '!! COMPACTING' : state.shouldWarn ? '! HIGH' : 'OK'
@@ -130,15 +138,17 @@ export const sessionCommands: Command[] = [
           ' / ' +
           state.maxTokens.toLocaleString(),
         '  Strategy: ' + state.strategy,
-        '  Messages: ' + ctx.history.length,
+        '  Model messages: ' + history.length,
+        '  Saved messages: ' + ctx.history.length,
+        '  Estimate excludes system instructions and tool definitions.',
       ]
       const topN = args.trim()
         ? Math.min(20, Math.max(1, parseInt(args.trim(), 10) || 5))
         : state.pct > 0.5
           ? 5
           : 0
-      if (topN > 0 && ctx.history.length > 0) {
-        const consumers = ctx.history
+      if (topN > 0 && history.length > 0) {
+        const consumers = history
           .map((m, i) => {
             const content =
               typeof m.content === 'string'
@@ -147,7 +157,7 @@ export const sessionCommands: Command[] = [
             return {
               idx: i,
               role: m.role,
-              tokens: Math.ceil(content.length / 4),
+              tokens: estimateTokens([m]),
               preview: content.slice(0, 60).replace(/\n/g, ' '),
             }
           })
@@ -209,14 +219,15 @@ export const sessionCommands: Command[] = [
     aliases: ['st', 'info'],
     handler: (_args, ctx) => {
       const cost = ctx.engine.getCostTracker()
-      const state = calculateContextState(ctx.history)
+      const { history, state } = modelContext(ctx)
       const fh = ctx.engine.getFileHistory()
       const mgr = ctx.engine.getBackgroundTaskManager()
       const tasks = mgr.listTasks()
       const running = tasks.filter((t) => t.status === 'running').length
       const lines = [
         'Model: ' + ctx.engine.getModel(),
-        'Messages: ' + ctx.history.length,
+        'Model messages: ' + history.length,
+        'Saved messages: ' + ctx.history.length,
         'Context: ' +
           (state.pct * 100).toFixed(0) +
           '% (' +

@@ -4,6 +4,7 @@ import { basename, join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
+import { createServer } from 'node:http'
 import { Renderer as TerminalRenderer } from '../../src/ui/renderer.js'
 import { runPlanMode, runRepl } from '../../src/cli/repl.js'
 import type { CliSessionState } from '../../src/cli/sessionState.js'
@@ -459,10 +460,10 @@ describe('terminal session resource ownership', () => {
   it('isolates planning records and persists only the confirmed execution into the main session', async () => {
     const { cwd, config, renderer, engine } = setup()
     const history = [{ role: 'user' as const, content: 'original question' }, { role: 'assistant' as const, content: 'original answer' }]
-    const calls: Array<{ directory: string; plan: boolean }> = []
+    const calls: Array<{ directory: string; plan: boolean; prompt: string }> = []
     vi.spyOn(ExecutionEngine.prototype, 'runTurn').mockImplementation(function (this: ExecutionEngine, prompt, window) {
       const plan = this.isPlanMode()
-      calls.push({ directory: this.getConfig().sessionDir!, plan })
+      calls.push({ directory: this.getConfig().sessionDir!, plan, prompt })
       const turnMessages = [{ role: 'user' as const, content: prompt }, { role: 'assistant' as const, content: plan ? 'proposed plan' : 'executed answer' }]
       return Promise.resolve({ result: { stopped: true, reason: 'stop_sequence', status: 'completed', output: plan ? 'proposed plan' : 'executed answer' }, newHistory: [...window, ...turnMessages], turnMessages })
     })
@@ -472,9 +473,37 @@ describe('terminal session resource ownership', () => {
     expect(calls.map(call => call.plan)).toEqual([true, false])
     expect(calls[0].directory).not.toBe(calls[1].directory)
     expect(calls[1].directory).toBe(config.sessionDir)
+    expect(calls[1].prompt).toContain('plan then execute')
+    expect(calls[1].prompt).toContain('proposed plan')
     expect(loadSession(calls[0].directory).at(-1)?.content).toBe('proposed plan')
     expect(loadSession(config.sessionDir!).at(-1)?.content).toBe('executed answer')
     expect(history.some(message => message.content === 'proposed plan')).toBe(false)
+  })
+
+  it('uses the resumed engine and session directory throughout one workflow', async () => {
+    const { cwd, config, renderer, engine, state } = setup()
+    const resumed = createSessionDir(cwd)
+    sessions.push(resumed)
+    registerBuiltinCommands()
+    let inspected = false
+    registerCommand({ name: 'inspect-active', description: 'inspect current workflow session', handler: (_args, ctx) => {
+      expect(ctx.sessionDir).toBe(resumed)
+      expect(ctx.engine).not.toBe(engine)
+      expect(ctx.engine.getConfig().sessionDir).toBe(resumed)
+      expect(ctx.engine.getEffort()).toBe('high')
+      inspected = true
+      return { type: 'noop' }
+    } })
+    mkdirSync(join(cwd, '.ovolv999', 'workflows'), { recursive: true })
+    writeFileSync(join(cwd, '.ovolv999', 'workflows', 'switch.json'), JSON.stringify({ name: 'switch', steps: [
+      { type: 'slash', command: `/resume ${resumed}` },
+      { type: 'slash', command: '/effort high' },
+      { type: 'slash', command: '/inspect-active' },
+    ] }))
+    io.readLine.mockResolvedValueOnce({ text: '/workflow run switch', eof: false }).mockResolvedValueOnce({ text: '', eof: true })
+    await runRepl(state, engine, config, renderer, cwd, new Map(), { runUserPromptSubmit: () => {} }, undefined, config.sessionDir)
+    expect(inspected).toBe(true)
+    expect(engine.getEffort()).toBe('medium')
   })
 
   it('does not ask to execute a failed planning turn and resets progress to idle', async () => {
@@ -483,6 +512,52 @@ describe('terminal session resource ownership', () => {
     io.readLine.mockResolvedValue({ text: 'yes', eof: false })
     await runPlanMode('make a plan', engine, config, renderer, new InputHandler(), [], cwd)
     expect(io.readLine).not.toHaveBeenCalled()
+    expect(JSON.parse(readFileSync(join(cwd, 'ovogo_progress.json'), 'utf8')).current_step).toBe('idle')
+    await engine.dispose()
+  })
+
+  it('sends the approved plan in the actual execution model request', async () => {
+    const { cwd, config, renderer, engine: unused } = setup()
+    await unused.dispose()
+    const requests: Array<{ messages: Array<{ role: string; content: unknown }> }> = []
+    const plan = 'Change alpha.ts only. Preserve beta.ts and verify the parser.'
+    const server = createServer((request, response) => {
+      let body = ''
+      request.on('data', chunk => { body += String(chunk) })
+      request.on('end', () => {
+        requests.push(JSON.parse(body))
+        response.writeHead(200, { 'content-type': 'text/event-stream' })
+        response.end(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: requests.length === 1 ? plan : 'Executed the approved plan.' }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 10 } })}\n\ndata: [DONE]\n\n`)
+      })
+    })
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('Missing local fixture address')
+    const localConfig = { ...config, baseURL: `http://127.0.0.1:${address.port}/v1`, agent: { identity: { systemPrompt: () => 'local planning fixture' }, tools: [] } }
+    const engine = new ExecutionEngine(localConfig, renderer)
+    io.readLine.mockResolvedValueOnce({ text: 'yes', eof: false })
+    try {
+      await runPlanMode('Fix the parser', engine, { ...localConfig, planMode: true }, renderer, new InputHandler(), [], cwd)
+      expect(requests).toHaveLength(2)
+      const input = requests[1].messages.filter(message => message.role === 'user')
+      expect(input).toHaveLength(1)
+      expect(input[0].content).toContain('Fix the parser')
+      expect(input[0].content).toContain(plan)
+      expect(loadSession(config.sessionDir!).some(message => typeof message.content === 'string' && message.content.includes(plan))).toBe(true)
+    } finally {
+      await engine.dispose()
+      server.closeAllConnections()
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
+  })
+
+  it('does not offer execution when a completed planning turn returned no plan', async () => {
+    const { cwd, config, renderer, engine } = setup()
+    const turn = vi.spyOn(ExecutionEngine.prototype, 'runTurn').mockResolvedValue({ result: { stopped: true, reason: 'stop_sequence', status: 'completed', output: '  ' }, newHistory: [], turnMessages: [] })
+    io.readLine.mockResolvedValueOnce({ text: 'yes', eof: false })
+    await runPlanMode('make a plan', engine, config, renderer, new InputHandler(), [], cwd)
+    expect(io.readLine).not.toHaveBeenCalled()
+    expect(turn).toHaveBeenCalledOnce()
     expect(JSON.parse(readFileSync(join(cwd, 'ovogo_progress.json'), 'utf8')).current_step).toBe('idle')
     await engine.dispose()
   })
