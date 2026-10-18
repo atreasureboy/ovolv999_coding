@@ -88,7 +88,7 @@
 - [x] Inspect every domain diff and run typecheck plus focused integration tests; resolve shared API/behavior conflicts.
 - [x] Run complete Vitest suite, lint, production build, package smoke and relevant offline coding checks on the final implementation.
 - [x] Obtain fresh independent code review of changes from baseline, including the five Review Focus conditions; fix material issues with regressions.
-- [ ] Record exact evidence, remaining platform/provider limitations, final source/build identity; commit coherent verified changes and push the existing authorized GitHub branch.
+- [x] Record exact evidence, remaining platform/provider limitations, final source/build identity; commit coherent verified changes and push the existing authorized GitHub branch.
 
 ## Decisions and Progress
 
@@ -112,3 +112,10 @@
 - Short soak: `node scripts/soak.mjs --profile short`, exit 0, 152 completed MCP requests; final pending/queued/buffered counts all zero and client closed. Log: `.artifacts/repairs-2026-10-16-r2/root/soak-short.log`; report: `.artifacts/production/release-soak-short.json`. This does not replace the separate long-soak contract.
 - Fresh independent review found no remaining confirmed P1/P2 defect. It independently ran 145 checks across shell, export, memory, session aliases and runtime profiles. Its startup-failure listener finding was reproduced, fixed by constructing the output pump after the engine/client, and covered by a regression. Suspected Git option abbreviation and child-prompt regressions were investigated and rejected based on actual Git behavior and child configuration respectively.
 - Accepted limits: conservative full-capacity budget admission can reject small requests; uncertain billing and crash reservations are not automatically refunded. Windows/local offline checks do not establish Linux/macOS, native OS signal, paid provider, power-loss or long-soak qualification. The README documents budget and public-share versus raw-backup behavior.
+
+## GitHub Delivery — 2026-10-18
+
+- Published the repair as `0fa82f5508b72cfc4501004369e20d06e36b72ef` on `atreasureboy/ovolv999_coding`, branch `codex/module-refinement`, after explicit destination confirmation. The remote branch was read back and the fetched commit was verified locally.
+- GitHub's tree `625c5e65cf88b0a173f9d0c1926e0ca0298f796c` exactly matches the verified local repair commit `5f24795e8bd6ae8b6ff5bbe9b6c084f70cfed1f3`. GitHub API delivery changed commit metadata only; local branch history was synchronized after checking the clean checkout and identical trees.
+- The clean committed build recorded `5f24795e8bd6ae8b6ff5bbe9b6c084f70cfed1f3`, `sourceDirty: false`, and source SHA256 `608384f3bebd3c213821a085d3c13b7d4ba1c0427137a4d4a22d0e8f1a559cc1`. Package and soak evidence used the same source hash before commit; their build metadata and execution-host binary hash differ, so they do not establish byte-identical validation of the later build.
+- This follow-up changes delivery documentation only. No additional source changes are included after the completed validation.
