@@ -64,4 +64,22 @@ describe('transcript commands use the active conversation', () => {
     expect(JSON.parse(shared)[1].tool_calls[0].function.arguments).toContain('...')
     expect(context.history[1].tool_calls![0].function.arguments).toContain(secret)
   })
+
+  it('shares only public conversation fields while keeping the original JSON backup complete', async () => {
+    context.history.unshift({ role: 'system', content: 'private-system-sentinel' })
+    context.history[2].providerState = { version: 1, turns: [{ items: [{ type: 'reasoning', encrypted_content: 'private-reasoning-sentinel' }] }] }
+    const snapshot = structuredClone(context.history)
+    const result = await dispatchSlashCommand('/share json', context)
+    if (result?.type !== 'text') throw new Error('Missing share result')
+    const sharedPath = result.value.split('\n')[0].replace('✓ Shared (secrets masked): ', '')
+    const shared = readFileSync(sharedPath, 'utf8')
+    expect(shared).not.toContain('private-reasoning-sentinel')
+    expect(shared).not.toContain('private-system-sentinel')
+    expect(shared).not.toContain('providerState')
+    expect(JSON.parse(shared)).toHaveLength(3)
+    expect(JSON.parse(shared)[1].content).toBe('Answer')
+    await dispatchSlashCommand('/export json backup.json', context)
+    expect(JSON.parse(readFileSync(join(directory, 'backup.json'), 'utf8'))).toEqual(snapshot)
+    expect(context.history).toEqual(snapshot)
+  })
 })

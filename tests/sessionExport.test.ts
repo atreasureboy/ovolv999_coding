@@ -117,15 +117,27 @@ describe('exportSession (markdown)', () => {
 // ── JSON Export ─────────────────────────────────────────────────────────────
 
 describe('exportSession (json)', () => {
-  it('produces valid JSON', () => {
-    const result = exportSession(sampleMessages, { format: 'json' })
+  it('honors public JSON options without leaking internal message state', () => {
+    const messages = [{ role: 'assistant' as const, content: 'Visible answer', reasoning: 'private-thought', providerState: { secret: 'private-native' }, tool_calls: [toolCall('Read', {})] }] as unknown as OpenAIMessage[]
+    const result = exportSession(messages, { format: 'json', includeReasoning: false, includeTools: false, maxCharsPerMessage: 7 })
+    expect(JSON.parse(result.content)).toEqual([{ role: 'assistant', content: 'Visible...' }])
+    expect(messages[0].content).toBe('Visible answer')
+  })
+
+  it('includes only explicit readable reasoning when requested', () => {
+    const messages = [{ role: 'assistant' as const, content: 'Visible', reasoning: 'readable-thought', providerState: { encrypted: 'private-native' } }]
+    const result = exportSession(messages, { format: 'json', includeReasoning: true })
+    expect(JSON.parse(result.content)).toEqual([{ role: 'assistant', content: 'Visible', reasoning: 'readable-thought' }])
+  })
+  it('produces valid complete JSON backups when explicitly requested', () => {
+    const result = exportSession(sampleMessages, { format: 'json', raw: true })
     const parsed = JSON.parse(result.content)
     expect(Array.isArray(parsed)).toBe(true)
     expect(parsed).toHaveLength(7)
   })
 
-  it('preserves all fields', () => {
-    const result = exportSession(sampleMessages, { format: 'json' })
+  it('preserves all fields in complete backups', () => {
+    const result = exportSession(sampleMessages, { format: 'json', raw: true })
     const parsed = JSON.parse(result.content)
     expect(parsed[1].role).toBe('user')
     expect(parsed[1].content).toBe('Hello, world!')
@@ -249,7 +261,7 @@ describe('exportSessionToFile', () => {
   })
 
   it('writes JSON to .json file', () => {
-    const path = exportSessionToFile(sampleMessages, dir, 'data.json', { format: 'json' })
+    const path = exportSessionToFile(sampleMessages, dir, 'data.json', { format: 'json', raw: true })
     expect(existsSync(path)).toBe(true)
     const content = readFileSync(path, 'utf8')
     expect(JSON.parse(content)).toHaveLength(7)

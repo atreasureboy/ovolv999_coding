@@ -35,7 +35,7 @@ function taskNotFound(taskId: string): ToolResult {
 
 export class TaskCreateTool implements Tool {
   name = 'TaskCreate'
-  metadata = { mutatesState: true, longRunning: true, concurrencySafe: false }
+  metadata = { shellCommand: true, mutatesState: true, longRunning: true, concurrencySafe: false }
 
   definition: ToolDefinition = {
     type: 'function',

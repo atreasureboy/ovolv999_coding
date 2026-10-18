@@ -12,6 +12,7 @@ import type { NormalizedUsage } from './model/types.js'
 import { usagePricing } from './modelPricing.js'
 import { AdapterError } from './model/common.js'
 import type { ModelRequestOptions } from './modelRequestPolicy.js'
+import { reserveModelBudget, type ModelBudgetReservation } from './budget.js'
 
 const anonymousClients = new WeakMap<object, string>()
 
@@ -66,11 +67,12 @@ function iterable(value: unknown): value is AsyncIterable<OpenAI.Chat.ChatComple
 
 export function createModelGateway(client: OpenAI, config: EngineConfig, currentRun: () => RunContext | null): OpenAI {
   const original = client.chat.completions.create.bind(client.chat.completions)
-  const policy = modelGatewayPolicy(config.modelGateway)
-  const admission = providerAdmission(providerKey(client, config), policy)
+  modelGatewayPolicy(config.modelGateway)
   const standaloneRun = randomUUID()
   const ledger = config.usageLedger ?? new UsageLedger({ pricing: model => config.modelSettings && Object.hasOwn(config.modelSettings, model) ? config.modelSettings[model].pricing ?? usagePricing(model) : usagePricing(model) })
   const create = (async (params: OpenAI.Chat.ChatCompletionCreateParams, options?: ModelRequestOptions) => {
+    const policy = modelGatewayPolicy(config.modelGateway)
+    const admission = providerAdmission(providerKey(client, config), policy)
     const run = currentRun()
     const parentSignal = options?.signal ?? run?.controller.signal
     parentSignal?.throwIfAborted()
@@ -121,23 +123,31 @@ export function createModelGateway(client: OpenAI, config: EngineConfig, current
         signal.throwIfAborted()
         const reservation = await admission.acquire(estimated + maxTokens, run?.familyId ?? config.runFamilyId ?? standaloneRun, signal, deadline)
         const requestId = randomUUID()
+        const pricing = config.modelSettings && Object.hasOwn(config.modelSettings, model) ? config.modelSettings[model].pricing ?? usagePricing(model) : usagePricing(model)
+        let projectReservation: ModelBudgetReservation
+        try { projectReservation = reserveModelBudget(config.budgetRoot ?? config.cwd, requestId, window, maxTokens, pricing) } catch (error) {
+          reservation.settle({ kind: 'actual', inputTokens: 0, outputTokens: 0 })
+          throw error
+        }
         const startedAt = Date.now()
         let settled = false
+        let dispatched = false
         let settlementError: Error | undefined
         const identity = { requestId, runId: run?.runId ?? standaloneRun, familyId: run?.familyId ?? config.runFamilyId ?? standaloneRun, model, ownerId: config.usageOwnerId }
         const settle = (usage: NormalizedUsage, phase: string) => {
           if (settled) return
           settled = true
           reservation.settle(usage)
+          try { projectReservation.settle(usage, dispatched) } catch (error) { settlementError = new Error('Project model budget settlement failed; preserve reserved usage for recovery', { cause: error }) }
           try {
             ledger.recordUsage({ ...usage, ...identity, durationMs: Date.now() - startedAt })
             emit(phase, { attempt, usage: usage.kind, input_tokens: usage.inputTokens, output_tokens: usage.outputTokens })
-          } catch (error) { settlementError = new Error('Model usage settlement failed; preserve pending usage for recovery', { cause: error }) }
+          } catch (error) { settlementError ??= new Error('Model usage settlement failed; preserve pending usage for recovery', { cause: error }) }
         }
         try {
           ledger.beginUsage({ ...identity, kind: 'unknown' })
           emit('started', { attempt, usage: 'unknown' })
-          const send = () => sendNativeModelRequest(adapter, request, params.stream === true, signal)
+          const send = () => { signal.throwIfAborted(); dispatched = true; return sendNativeModelRequest(adapter, request, params.stream === true, signal) }
           const response = await (run ? runOperation(run, 'model:' + model, send, duration, config.cancellationGraceMs ?? 2000) : send())
           if (iterable(response)) {
             let usage: NormalizedUsage | null = null

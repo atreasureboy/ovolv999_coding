@@ -1,6 +1,7 @@
 import type { Command } from './index.js'
 import { text } from './results.js'
 import type { BudgetType, BudgetPeriod } from '../core/budget.js'
+import { applyActiveProfile } from '../cli/runtimeConfiguration.js'
 
 export const resourcesCommands: Command[] = [
   {
@@ -116,6 +117,7 @@ export const resourcesCommands: Command[] = [
         setActiveProfile,
         listProfiles,
         loadProfiles,
+        saveProfiles,
         cloneProfile,
         exportProfile,
         importProfile,
@@ -127,25 +129,40 @@ export const resourcesCommands: Command[] = [
       } = await import('../core/profiles.js')
       const parts = args.trim().split(/\s+/).filter(Boolean)
       const sub = parts[0] ?? 'list'
+      const mutateProfiles = <T>(mutation: () => T): T => {
+        const previous = loadProfiles(ctx.cwd)
+        try {
+          const result = mutation()
+          const next = loadProfiles(ctx.cwd)
+          const active = (store: typeof previous) => store.activeProfile ? store.profiles[store.activeProfile] : null
+          if (previous.activeProfile !== next.activeProfile || JSON.stringify(active(previous)) !== JSON.stringify(active(next))) {
+            applyActiveProfile(ctx.engine, ctx.cwd)
+          }
+          return result
+        } catch (error) {
+          saveProfiles(ctx.cwd, previous)
+          throw error
+        }
+      }
       if (sub === 'create' || sub === 'add') {
         const name = parts[1]
         if (!name) return text('Usage: /profile create <name>')
-        const p = createProfile(ctx.cwd, name, {
+        const p = mutateProfiles(() => createProfile(ctx.cwd, name, {
           description: parts.slice(2).join(' ') || undefined,
-        })
+        }))
         return text(`✓ Profile created: ${p.name}`)
       }
       if (sub === 'switch' || sub === 'use') {
         const name = parts[1]
         if (!name) return text('Usage: /profile switch <name>')
-        if (!setActiveProfile(ctx.cwd, name)) return text('Profile not found')
+        if (!mutateProfiles(() => setActiveProfile(ctx.cwd, name))) return text('Profile not found')
         return text(`✓ Switched to profile: ${name}`)
       }
       if (sub === 'remove' || sub === 'rm') {
         const name = parts[1]
         if (!name) return text('Usage: /profile remove <name>')
         return text(
-          removeProfile(ctx.cwd, name) ? `✓ Removed profile "${name}"` : 'Profile not found',
+          mutateProfiles(() => removeProfile(ctx.cwd, name)) ? `✓ Removed profile "${name}"` : 'Profile not found',
         )
       }
       if (sub === 'show') {
@@ -158,7 +175,7 @@ export const resourcesCommands: Command[] = [
         const src = parts[1]
         const dst = parts[2]
         if (!src || !dst) return text('Usage: /profile clone <source> <new-name>')
-        const cloned = cloneProfile(ctx.cwd, src, dst)
+        const cloned = mutateProfiles(() => cloneProfile(ctx.cwd, src, dst))
         return cloned ? text(`✓ Cloned "${src}" → "${dst}"`) : text('Source profile not found')
       }
       if (sub === 'export') {
@@ -170,15 +187,21 @@ export const resourcesCommands: Command[] = [
       if (sub === 'import') {
         const json = parts.slice(1).join(' ')
         if (!json) return text('Usage: /profile import <json>')
-        const p = importProfile(ctx.cwd, json)
+        const p = mutateProfiles(() => importProfile(ctx.cwd, json))
         return p ? text(`✓ Imported profile: ${p.name}`) : text('Invalid JSON')
       }
       if (sub === 'config') {
         const config = getEffectiveConfig(ctx.cwd)
+        const runtime = ctx.engine.getConfig()
+        config.provider.model = runtime.model
+        config.provider.baseUrl = runtime.baseURL
+        config.temperature = runtime.temperature ?? 0
+        config.maxTokens = runtime.maxOutputTokens
+        config.permissionLevel = `${runtime.permissionMode}; ${ctx.engine.getPermissionManager().getMode()}${runtime.requireToolApproval ? '; strict (all tools require approval)' : ''}`
         return text(formatEffectiveConfig(config))
       }
       if (sub === 'init') {
-        const profiles = initializeBuiltinProfiles(ctx.cwd)
+        const profiles = mutateProfiles(() => initializeBuiltinProfiles(ctx.cwd))
         return text(`✓ Initialized ${profiles.length} builtin profiles`)
       }
       if (sub === 'list' || !sub) {

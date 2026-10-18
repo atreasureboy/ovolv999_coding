@@ -5,6 +5,7 @@ import type { EngineConfig } from '../core/types.js'
 import { settleWithin } from '../core/outcome.js'
 import { ACPServer } from '../integrations/acp.js'
 import { ACPAgentAdapter } from '../integrations/acp/agentAdapter.js'
+import { ProtocolOutput } from './protocolOutput.js'
 
 const silentObserver: EngineObserver = {
   startSpinner() {}, stopSpinner() {}, beginAssistantText() {}, streamToken() {},
@@ -21,11 +22,18 @@ export async function runAcp(options: {
   let server: ACPServer | undefined
   let outputFailure: Error | undefined
   let closed = false
+  let outputDeadline: ReturnType<typeof setTimeout> | undefined
   let end!: () => void
   const disconnected = new Promise<void>(resolve => { end = resolve })
-  const stop = (): void => { closed = true; server?.stop(); end() }
+  const boundOutputWait = (): void => {
+    outputDeadline ??= setTimeout(() => {
+      outputDeadline = undefined
+      if (output.pendingBytes) output.abort(new Error('ACP output did not drain after interruption'))
+    }, 1000)
+  }
+  const stop = (): void => { closed = true; server?.stop(); boundOutputWait(); end() }
   const fail = (error: Error): void => { outputFailure ??= error; stop() }
-  const interrupt = (): void => { void client.interrupt().catch(fail) }
+  const interrupt = (): void => { boundOutputWait(); void client.interrupt().catch(fail) }
   const client = new AgentSessionClient({
     engine: new ExecutionEngine(options.config, silentObserver), observer: silentObserver,
     cwd: options.config.cwd, sessionDir: options.sessionDir,
@@ -34,10 +42,10 @@ export async function runAcp(options: {
       return adapter.publish(event)
     },
   })
+  const output = new ProtocolOutput(fail)
   process.on('SIGINT', interrupt)
   process.on('SIGTERM', stop)
   process.on('SIGHUP', stop)
-  process.stdout.on('error', fail)
   process.stdin.on('error', fail)
   try {
     await client.initialize()
@@ -45,12 +53,13 @@ export async function runAcp(options: {
       client, onUserPromptSubmit: options.onUserPromptSubmit,
       emit: async event => { server!.notify('agent/event', { event }); await server!.flush() },
     })
-    server = new ACPServer(adapter.handlers, {
+    server = new ACPServer({ ...adapter.handlers, onInterrupt: async turnId => {
+      const interrupted = await adapter!.handlers.onInterrupt!(turnId)
+      if (interrupted !== false) boundOutputWait()
+      return interrupted
+    } }, {
       cwd: options.config.cwd, capabilities: adapter.capabilities,
-      write: text => new Promise<void>((resolve, reject) => {
-        if (outputFailure) { reject(outputFailure); return }
-        process.stdout.write(text, error => error ? reject(error) : resolve())
-      }),
+      write: text => output.write(text),
     })
     server.on('protocolError', fail)
     server.on('shutdown', stop)
@@ -64,16 +73,17 @@ export async function runAcp(options: {
       await client.dispose()
       await adapter?.drain()
       await settleWithin(server?.flush() ?? Promise.resolve(), 3000).catch(error => {
-        process.stdout.destroy()
+        output.abort(error instanceof Error ? error : new Error(String(error)))
         throw error
       })
     } finally {
       process.off('SIGINT', interrupt)
       process.off('SIGTERM', stop)
       process.off('SIGHUP', stop)
-      process.stdout.off('error', fail)
       process.stdin.off('error', fail)
       process.stdin.pause()
+      clearTimeout(outputDeadline)
+      await output.close()
     }
   }
   if (outputFailure) throw outputFailure

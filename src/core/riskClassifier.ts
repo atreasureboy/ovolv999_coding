@@ -76,6 +76,24 @@ function extractFirstWord(segment: string): string {
   return stripped.split(/\s+/)[0] ?? ''
 }
 
+const READ_ONLY_OPTIONS: Record<string, RegExp> = {
+  file: /^(?:-[bcdhiklLnNprsvzZ0]+|--(?:brief|checking-printout|dereference|help|keep-going|mime|mime-type|mime-encoding|no-buffer|no-dereference|no-pad|preserve-date|raw|special-files|uncompress|uncompress-noreport|version)|--(?:exclude|exclude-quiet|files-from|magic-file|parameter|separator)(?:=.*)?)$/,
+  find: /^(?:-[HLP]|-O[0-3]|-(?:name|iname|path|ipath|regex|iregex|type|xtype|size|empty|readable|writable|executable|maxdepth|mindepth|depth|mount|xdev|mtime|mmin|atime|amin|ctime|cmin|newer|anewer|cnewer|user|group|uid|gid|nouser|nogroup|perm|links|inum|samefile|print|print0|printf|ls|prune|quit|true|false|a|o|and|or|not)|-\d+)$/,
+  rg: /^(?:-[nNiIlLacqwvFsSuUHpPeEfFgGtTz0]+|-[ABCm]\d*|--(?:hidden|no-hidden|no-ignore|no-ignore-vcs|no-ignore-parent|no-config|files|files-with-matches|files-without-match|count|count-matches|line-number|no-line-number|ignore-case|smart-case|case-sensitive|fixed-strings|word-regexp|invert-match|multiline|multiline-dotall|text|follow|no-follow|null|null-data|json|stats|quiet|only-matching|passthru|pcre2|no-pcre2|no-messages|version|help)|--(?:glob|iglob|type|type-not|regexp|file|encoding|color|colors|context|before-context|after-context|max-count|max-depth|max-filesize|sort|sortr|threads)(?:=.*)?)$/,
+  fd: /^(?:-[HIiSs0lLagptTeEd]+|--(?:hidden|no-hidden|no-ignore|no-ignore-vcs|no-ignore-parent|case-sensitive|ignore-case|glob|regex|absolute-path|relative-path|follow|no-follow|print0|list-details|full-path|strip-cwd-prefix|one-file-system|quiet|version|help)|--(?:type|extension|exclude|max-depth|min-depth|exact-depth|base-directory|search-path|size|changed-within|changed-before|owner|format|color|threads)(?:=.*)?)$/,
+  tree: /^(?:-[adfhlpugsiDqNQnCxrUF]+|-L\d*|--(?:dirsfirst|noreport|gitignore|prune|du|inodes|device|version|help)|--(?:charset|filelimit|sort)(?:=.*)?)$/,
+}
+
+function readOnlyOptions(command: string, segment: string): boolean {
+  if (!Object.hasOwn(READ_ONLY_OPTIONS, command) && command !== 'hostname' && command !== 'date') return true
+  if (/[\\$]/.test(segment)) return false
+  const words = segment.replace(/["']/g, '').trim().split(/\s+/).slice(1)
+  if (command === 'hostname') return words.every(word => /^(?:-[adfisAI]|--(?:alias|domain|fqdn|long|short|ip-address|all-ip-addresses|all-fqdns|version|help))$/.test(word))
+  if (command === 'date') return words.every(word => /^(?:-[uIR]|--(?:utc|universal|rfc-email|version|help)|--(?:iso-8601|rfc-3339)(?:=(?:date|hours|minutes|seconds|ns))?|\+[^\r\n]+)$/.test(word))
+  const options = READ_ONLY_OPTIONS[command]
+  return !options || words.filter(word => word.startsWith('-')).every(word => word === '--' || options.test(word))
+}
+
 function classifySegment(segment: string): RiskLevel {
   // Check dangerous patterns first
   for (const pattern of DANGEROUS_PATTERNS) {
@@ -92,6 +110,7 @@ function classifySegment(segment: string): RiskLevel {
   // Safe prefixes
   if (SAFE_PREFIXES.has(firstWord)) {
     if (firstWord === 'git') return classifyGit(segment)
+    if (!readOnlyOptions(firstWord, segment)) return 'needs_approval'
     // Command substitution / eval channels bypass the safe prefix.
     // A user-facing segment like `echo $(rm -rf /)` or `cat \`curl evil\``
     // would pass the SAFE_PREFIXES check on `echo`/`cat` but executes
@@ -107,19 +126,23 @@ function classifySegment(segment: string): RiskLevel {
 }
 
 function classifyGit(segment: string): RiskLevel {
-  const tokens = segment.split(/\s+/)
+  if (/[\\$]/.test(segment)) return 'needs_approval'
+  if (/(?:^|\s)(?:--(?:output|ext-diff|textconv|exec-path|config-env|edit-description|add|replace-all|unset|unset-all|rename-section|remove-section)(?:[=\s]|$)|-c(?:\s|$))/.test(segment.replace(/["']/g, ''))) return 'needs_approval'
+  const tokens = segment.replace(/["']/g, '').split(/\s+/)
   for (let index = 1; index < tokens.length; index++) {
     const token = tokens[index]
+    if (token.startsWith('-') && !['--no-pager', '--no-optional-locks', '--no-replace-objects'].includes(token)) return 'needs_approval'
     if (!token.startsWith('-')) {
       const args = tokens.slice(index + 1)
       if (token === 'branch' || token === 'tag') {
-        if (args.some(arg => /^-(?:d|D|m|M|c|C|f)$|^--(?:delete|move|copy|force|set-upstream|unset-upstream)/.test(arg))) return 'needs_approval'
-        if (args.some(arg => !arg.startsWith('-')) && !args.includes('--list') && !args.includes('-l')) return 'needs_approval'
+        if (args.some(arg => arg.startsWith('-') && !/^(?:-[arvni]+|--(?:list|all|remotes|verbose|no-color|ignore-case|show-current)|--(?:color|format|sort|contains|no-contains|merged|no-merged|points-at)(?:=.*)?)$/.test(arg) && !(token === 'tag' && arg === '-l'))) return 'needs_approval'
+        if (args.some(arg => !arg.startsWith('-')) && !args.includes('--list') && !(token === 'tag' && args.includes('-l'))) return 'needs_approval'
       }
       if (token === 'remote' && args.length && !['-v', '--verbose', 'show', 'get-url'].includes(args[0])) return 'needs_approval'
       if (token === 'stash' && args.length && !['list', 'show'].includes(args[0])) return 'needs_approval'
       if (token === 'stash' && !args.length) return 'needs_approval'
       if (token === 'config' && !args.some(arg => ['--get', '--get-all', '--get-regexp', '--list', '-l'].includes(arg))) return 'needs_approval'
+      if (token === 'config' && args.some(arg => arg.startsWith('-') && !/^(?:-l|--(?:get|get-all|get-regexp|list|show-origin|show-scope|local|global|system|includes|no-includes|null|name-only)|--(?:file|blob|type|default)(?:=.*)?)$/.test(arg))) return 'needs_approval'
       return SAFE_GIT_SUBCOMMANDS.has(token) ? 'safe' : 'needs_approval'
     }
   }

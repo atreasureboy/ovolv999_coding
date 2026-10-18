@@ -1,5 +1,4 @@
 import {
-  appendFileSync,
   closeSync,
   fsyncSync,
   mkdirSync,
@@ -14,6 +13,7 @@ import { join } from 'path'
 import { createHash, randomBytes, randomUUID } from 'crypto'
 import { acquirePersistenceLease, acquirePersistenceLeaseSync } from './persistenceLock.js'
 import { isRecord, isStringArray } from './persistedData.js'
+import { appendJsonlRecord } from './jsonlAppend.js'
 
 export interface MemoryProvenance {
   status: 'unverified' | 'verified'
@@ -259,13 +259,7 @@ export class SemanticMemory {
           return { ...updated, persistence: 'persisted' }
         }
         assertOwned()
-        const fd = openSync(this.filePath, 'a')
-        try {
-          appendFileSync(fd, JSON.stringify(full) + '\n', 'utf8')
-          fsyncSync(fd)
-        } finally {
-          closeSync(fd)
-        }
+        appendJsonlRecord(this.filePath, full)
         next.set(full.id, full)
         this.replaceEntries(next, -1, -1)
         return { ...full, persistence: 'persisted' }

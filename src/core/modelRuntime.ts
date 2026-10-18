@@ -1,7 +1,7 @@
 import type OpenAI from 'openai'
 import { randomUUID } from 'node:crypto'
 import type { EngineConfig, OpenAIMessage } from './types.js'
-import { resolveContextWindow } from './compact/budget.js'
+import { effectiveInputBudget, MAX_OUTPUT_TOKENS_DEFAULT, resolveContextWindow } from './compact/budget.js'
 import { getModelInfo } from './providers.js'
 import { createChatCompletionsAdapter, createResponsesAdapter, createAnthropicAdapter } from './model/index.js'
 import { AdapterError, effortParameters, validateRequest } from './model/common.js'
@@ -28,6 +28,11 @@ export function resolveModelRuntime(config: EngineConfig, model = config.model):
     ...settings?.capabilities,
   }
   return { protocol, options: { capabilities, baseURL: config.baseURL, apiKey: config.apiKey, effort: settings?.effort } }
+}
+
+export function resolveModelInputBudget(config: EngineConfig, model = config.model): number {
+  const { capabilities } = resolveModelRuntime(config, model).options
+  return effectiveInputBudget(capabilities.contextWindow, Math.min(config.maxOutputTokens ?? MAX_OUTPUT_TOKENS_DEFAULT, capabilities.maxOutputTokens))
 }
 
 export function gatewayModelRequest(config: EngineConfig, params: OpenAI.Chat.ChatCompletionCreateParams, maxOutputTokens: number): ModelRequest {

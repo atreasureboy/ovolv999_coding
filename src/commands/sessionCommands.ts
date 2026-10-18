@@ -2,8 +2,8 @@ import type { Command, SlashCommandContext } from './index.js'
 import { formatTrackedCost } from '../core/costTracker.js'
 import { text } from './results.js'
 import type { SlashCommandResult } from './index.js'
-import { estimateTokens, calculateContextState, effectiveInputBudget, microCompact } from '../core/compact.js'
-import { resolveModelRuntime } from '../core/modelRuntime.js'
+import { estimateTokens, calculateContextState, microCompact } from '../core/compact.js'
+import { resolveModelInputBudget } from '../core/modelRuntime.js'
 import type { OpenAIMessage } from '../core/types.js'
 import { copyToClipboard } from '../utils/clipboard.js'
 
@@ -29,8 +29,7 @@ function roleLabel(role: string): string {
 function modelContext(ctx: SlashCommandContext) {
   const history = ctx.getModelHistory?.() ?? ctx.history
   const config = ctx.engine.getConfig()
-  const window = resolveModelRuntime(config, ctx.engine.getModel()).options.capabilities.contextWindow
-  return { history, state: calculateContextState(history, effectiveInputBudget(window, config.maxOutputTokens)) }
+  return { history, state: calculateContextState(history, resolveModelInputBudget(config, ctx.engine.getModel())) }
 }
 
 export const sessionCommands: Command[] = [

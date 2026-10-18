@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, openSync, writeSync, fsyncSync, closeSync } from 'fs'
-import { basename, join, resolve } from 'path'
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, unlinkSync, openSync, writeSync, fsyncSync, closeSync } from 'fs'
+import { basename, dirname, join, resolve } from 'path'
 import { createHash, randomBytes, randomUUID } from 'crypto'
 import type { OpenAIMessage, ToolCall } from './types.js'
 import { acquirePersistenceLeaseSync, type PersistenceLease } from './persistenceLock.js'
@@ -209,8 +209,9 @@ function validateStoredMessages(messages: unknown[], sessionDir: string): assert
 }
 
 function sessionIdFor(sessionDir: string): string {
+  sessionDir = canonicalSessionDirectory(sessionDir)
   return basename(sessionDir).match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)?.[0]
-    ?? `legacy_${createHash('sha256').update(resolve(sessionDir)).digest('hex')}`
+    ?? `legacy_${createHash('sha256').update(sessionDir).digest('hex')}`
 }
 
 /**
@@ -406,6 +407,26 @@ interface SessionWriter {
 const writers = new Map<string, SessionWriter>()
 const observedRevisions = new Map<string, number>()
 
+export function canonicalSessionDirectory(sessionDir: string): string {
+  assertNonEmpty(sessionDir, 'sessionDir')
+  let existing = resolve(sessionDir)
+  const missing: string[] = []
+  for (;;) {
+    try { return join(realpathSync(existing), ...missing) } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      const parent = dirname(existing)
+      if (parent === existing) throw error
+      missing.unshift(basename(existing))
+      existing = parent
+    }
+  }
+}
+
+function sessionWriterKey(sessionDir: string): string {
+  const directory = canonicalSessionDirectory(sessionDir)
+  return process.platform === 'win32' ? directory.toLowerCase() : directory
+}
+
 export class SessionConflictError extends Error {
   constructor(sessionDir: string, expected: number, actual: number) {
     super(`Session revision conflict at ${sessionDir}: expected ${expected}, found ${actual}; reload before saving`)
@@ -424,21 +445,22 @@ function readEnvelope(sessionDir: string): SessionEnvelope | null {
 
 export function claimSessionOwnership(sessionDir: string): void {
   assertNonEmpty(sessionDir, 'sessionDir')
-  const key = resolve(sessionDir)
+  const directory = canonicalSessionDirectory(sessionDir)
+  const key = sessionWriterKey(directory)
   if (writers.has(key)) { writers.get(key)!.lease.assertOwned(); return }
-  mkdirSync(key, { recursive: true })
-  const lease = acquirePersistenceLeaseSync(join(key, 'writer'))
+  mkdirSync(directory, { recursive: true })
+  const lease = acquirePersistenceLeaseSync(join(directory, 'writer'))
   try {
-    const current = readEnvelope(key)
+    const current = readEnvelope(directory)
     const revision = current?.revision ?? 0
     const observed = observedRevisions.get(key)
     if (observed !== undefined && observed !== revision) throw new SessionConflictError(key, observed, revision)
-    writers.set(key, { lease, revision, sessionId: current?.sessionId ?? sessionIdFor(key) })
+    writers.set(key, { lease, revision, sessionId: current?.sessionId ?? sessionIdFor(directory) })
   } catch (error) { lease.release(); throw error }
 }
 
 export function releaseSessionOwnership(sessionDir: string): void {
-  const key = resolve(sessionDir)
+  const key = sessionWriterKey(sessionDir)
   const writer = writers.get(key)
   if (writer) { writer.lease.release(); writers.delete(key) }
 }
@@ -503,6 +525,8 @@ export function saveSession(sessionDir: string, history: OpenAIMessage[], expect
     `(role='tool' rows must include a non-empty tool_call_id; all rows need a valid role and string-or-null content)`,
   ))
 
+  sessionDir = canonicalSessionDirectory(sessionDir)
+
   const historyPath = join(sessionDir, 'history.json')
   // Uniquely-suffixed tmp — pid + ms + 8 random bytes hex. Same shape as
   // atomicWrite in src/core/atomicWrite.ts so a single convention covers
@@ -510,7 +534,7 @@ export function saveSession(sessionDir: string, history: OpenAIMessage[], expect
   const tmpPath = `${historyPath}.tmp.${process.pid}.${Date.now()}.${randomBytes(8).toString('hex')}`
   mkdirSync(sessionDir, { recursive: true })
   claimSessionOwnership(sessionDir)
-  const writer = writers.get(resolve(sessionDir))!
+  const writer = writers.get(sessionWriterKey(sessionDir))!
   writer.lease.assertOwned()
   const current = readEnvelope(sessionDir)
   const actualRevision = current?.revision ?? 0
@@ -553,7 +577,7 @@ export function saveSession(sessionDir: string, history: OpenAIMessage[], expect
     writer.lease.assertOwned()
     renameSync(tmpPath, historyPath)
     writer.revision = envelope.revision
-    observedRevisions.set(resolve(sessionDir), envelope.revision)
+    observedRevisions.set(sessionWriterKey(sessionDir), envelope.revision)
   } catch (err) {
     // Best-effort: remove OUR orphan tmp file so we don't leak it on disk.
     // We only touch the path we just created — concurrent writers' tmps
@@ -572,8 +596,9 @@ export function saveSession(sessionDir: string, history: OpenAIMessage[], expect
 
 export function readSessionSnapshot(sessionDir: string): SessionEnvelope {
   assertNonEmpty(sessionDir, 'sessionDir')
+  sessionDir = canonicalSessionDirectory(sessionDir)
   const envelope = readEnvelope(sessionDir)
-  observedRevisions.set(resolve(sessionDir), envelope?.revision ?? 0)
+  observedRevisions.set(sessionWriterKey(sessionDir), envelope?.revision ?? 0)
   return structuredClone(envelope ?? {
     version: CURRENT_SESSION_VERSION,
     schema: CURRENT_SESSION_SCHEMA,
@@ -608,8 +633,9 @@ export function validateSessionMessages(messages: unknown): asserts messages is 
  */
 export function loadSession(sessionDir: string): OpenAIMessage[] {
   assertNonEmpty(sessionDir, 'sessionDir')
+  sessionDir = canonicalSessionDirectory(sessionDir)
   const envelope = readEnvelope(sessionDir)
-  observedRevisions.set(resolve(sessionDir), envelope?.revision ?? 0)
+  observedRevisions.set(sessionWriterKey(sessionDir), envelope?.revision ?? 0)
   return envelope?.messages ?? []
 }
 

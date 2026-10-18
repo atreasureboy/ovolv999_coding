@@ -114,6 +114,7 @@ export interface WorkspaceBinding {
 }
 
 export interface ToolMetadata {
+  shellCommand?: boolean
   /** Safe to expose in plan/read-only mode. */
   readOnly?: boolean
   /** Default concurrency behavior when isConcurrencySafe is not implemented. */
@@ -285,6 +286,8 @@ export interface IHookRunner {
 }
 
 export interface EngineConfig {
+  requireToolApproval?: boolean
+  resolveRuntimeConfiguration?: () => Partial<Pick<EngineConfig, 'model' | 'apiKey' | 'baseURL' | 'modelProtocol' | 'temperature' | 'maxOutputTokens' | 'permissionMode' | 'requireToolApproval'>>
   modelProtocol?: ModelProtocol
   modelSettings?: Record<string, ModelSettings>
   usageLedger?: UsageLedger
@@ -301,6 +304,7 @@ export interface EngineConfig {
   apiKey: string
   maxIterations: number
   cwd: string
+  budgetRoot?: string
   workspace?: WorkspaceBinding
   parentRunId?: string
   runFamilyId?: string

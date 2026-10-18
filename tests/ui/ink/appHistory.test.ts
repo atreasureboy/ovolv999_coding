@@ -130,7 +130,7 @@ describe('App conversation history contract', () => {
     await vi.waitFor(() => {
       expect(view.lastFrame()).toContain('Latest command reply')
       expect(view.lastFrame()).toContain('4 msgs')
-      expect(view.lastFrame()).toContain('13/100')
+      expect(view.lastFrame()).toContain('57/100')
     })
   })
 
@@ -161,7 +161,7 @@ describe('App conversation history contract', () => {
     const { view } = mount(true, [{ role: 'assistant', content: '12345678' }])
     await vi.waitFor(() => {
       expect(view.lastFrame()).toContain('2 msgs')
-      expect(view.lastFrame()).toContain('2/100')
+      expect(view.lastFrame()).toContain('14/100')
     })
   })
 })

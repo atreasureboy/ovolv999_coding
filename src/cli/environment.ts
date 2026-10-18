@@ -9,15 +9,15 @@ export interface ResolvedApiEnvironment {
   provider: 'minimax' | 'openai' | 'anthropic'
   protocol: ModelProtocol
 }
-export function resolveApiEnvironment(configuredProtocol?: ModelProtocol): ResolvedApiEnvironment {
-  const protocol = configuredProtocol ?? (process.env.OVOGO_MODEL_PROTOCOL ? normalizeModelProtocol(process.env.OVOGO_MODEL_PROTOCOL) : undefined)
-  const anthropicBaseURL = process.env.ANTHROPIC_BASE_URL
-  const anthropicApiKey = process.env.ANTHROPIC_AUTH_TOKEN ?? process.env.ANTHROPIC_API_KEY
+export function resolveApiEnvironment(configuredProtocol?: ModelProtocol, env: NodeJS.ProcessEnv = process.env): ResolvedApiEnvironment {
+  const protocol = configuredProtocol ?? (env.OVOGO_MODEL_PROTOCOL ? normalizeModelProtocol(env.OVOGO_MODEL_PROTOCOL) : undefined)
+  const anthropicBaseURL = env.ANTHROPIC_BASE_URL
+  const anthropicApiKey = env.ANTHROPIC_AUTH_TOKEN || env.ANTHROPIC_API_KEY
   if (protocol === 'anthropic') {
     return {
       apiKey: anthropicApiKey,
       baseURL: anthropicBaseURL ?? 'https://api.anthropic.com/v1',
-      model: process.env.OVOGO_MODEL ?? process.env.ANTHROPIC_MODEL ?? '',
+      model: env.OVOGO_MODEL ?? env.ANTHROPIC_MODEL ?? '',
       provider: 'anthropic',
       protocol,
     }
@@ -31,15 +31,15 @@ export function resolveApiEnvironment(configuredProtocol?: ModelProtocol): Resol
     return {
       apiKey: anthropicApiKey,
       baseURL: anthropicBaseURL!.replace(/\/anthropic\/?$/i, '/v1'),
-      model: process.env.OVOGO_MODEL ?? process.env.ANTHROPIC_MODEL ?? 'MiniMax-M3',
+      model: env.OVOGO_MODEL ?? env.ANTHROPIC_MODEL ?? 'MiniMax-M3',
       provider: 'minimax',
       protocol: protocol ?? 'chat-completions',
     }
   }
   return {
-    apiKey: process.env.OPENAI_API_KEY,
-    baseURL: process.env.OPENAI_BASE_URL,
-    model: process.env.OVOGO_MODEL ?? 'gpt-4o',
+    apiKey: env.OPENAI_API_KEY,
+    baseURL: env.OPENAI_BASE_URL,
+    model: env.OVOGO_MODEL ?? 'gpt-4o',
     provider: 'openai',
     protocol: protocol ?? 'chat-completions',
   }

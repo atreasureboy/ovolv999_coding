@@ -75,6 +75,17 @@ function toolResponse(res: ServerResponse, name: string, input: Record<string, u
   res.end('data: [DONE]\n\n')
 }
 
+it('rejects registering an engine that is already bound to another session', async () => {
+  const { cwd, service } = await fixture()
+  const bound = join(cwd, 'sessions', 'session_bound')
+  const requested = join(cwd, 'sessions', 'session_requested')
+  const engine = new ExecutionEngine({ cwd, sessionDir: bound, model: 'fixture', apiKey: 'fixture', maxIterations: 1, permissionMode: 'auto', enabledModules: [], agent: { identity: { systemPrompt: () => 'fixture' }, tools: [] } }, quiet)
+  cleanups.push(() => engine.dispose())
+  await expect(service.register({ cwd, sessionDir: requested, engine })).rejects.toMatchObject({ code: 'session_mismatch' })
+  expect(engine.getConfig().sessionDir).toBe(bound)
+  await expect(service.register({ cwd, sessionDir: requested })).resolves.toHaveProperty('threadId')
+})
+
 it('binds turn identity to the real engine and persists full history across restart', async () => {
   const { cwd, requests, service, createService } = await fixture()
   const sessionDir = join(cwd, 'sessions', 'session_seed')

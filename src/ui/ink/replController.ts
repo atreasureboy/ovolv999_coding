@@ -13,6 +13,8 @@ import { formatApiError } from '../../utils/apiError.js'
 import { normalizeOutcome, type OutcomeStatus } from '../../core/outcome.js'
 import { refreshGitBranch } from './gitInfo.js'
 import { formatSkillInvocation, type SkillInvocationResolver } from '../../skills/runtime.js'
+import { persistCliPermissions } from '../../cli/permissions.js'
+import { resolveModelInputBudget } from '../../core/modelRuntime.js'
 
 export interface InkReplControllerOptions {
   store: UIStore
@@ -38,6 +40,7 @@ export interface InkReplTurnResult {
 export interface InkReplController {
   getHistory: () => OpenAIMessage[]
   getModelHistory: () => OpenAIMessage[]
+  getContextBudget: () => number
   runTurn: (
     prompt: string,
     images?: Array<{ path: string; dataUrl: string }>,
@@ -102,6 +105,7 @@ export function createInkReplController(opts: InkReplControllerOptions): InkRepl
       return client.sessionDir
     },
     setHistory,
+    persistPermissions: (mode, rules) => persistCliPermissions(opts.cwd, mode, rules),
     getModelHistory: () => client.getModelWindow(),
     setModelWindow: messages => client.replaceModelWindow(messages),
     recoverSession: async () => {
@@ -240,6 +244,7 @@ export function createInkReplController(opts: InkReplControllerOptions): InkRepl
     }
     blockedSkill = false
     const result = await dispatchSlashCommand(input, slashContext)
+    store.setModel(client.engine.getModel())
     refreshGitBranch()
     if (result === null) return blockedSkill
     switch (result.type) {
@@ -261,6 +266,7 @@ export function createInkReplController(opts: InkReplControllerOptions): InkRepl
   }
 
   return {
+    getContextBudget: () => resolveModelInputBudget(client.engine.getConfig()),
     getHistory: () => client.getHistory(), getModelHistory: () => client.getModelWindow(), runTurn, dispatchSlash,
     initialize: () => client.initialize(), interrupt: () => client.interrupt(), release: () => client.dispose(),
   }

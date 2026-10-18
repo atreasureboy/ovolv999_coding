@@ -16,10 +16,11 @@
  * layer so a crash mid-rewrite never leaves a torn file.
  */
 
-import { appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync, statSync } from 'fs'
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync, statSync } from 'fs'
 import { join } from 'path'
 import { randomBytes, randomUUID } from 'crypto'
 import { acquirePersistenceLease, withPersistenceLock } from './persistenceLock.js'
+import { appendJsonlRecord } from './jsonlAppend.js'
 
 export interface EpisodicMemoryEntry {
   id: string
@@ -190,13 +191,7 @@ export class EpisodicMemory {
           this.entryCount = 0
         }
         const count = this.ensureCount()
-        const fd = openSync(this.filePath, 'a')
-        try {
-          appendFileSync(fd, JSON.stringify(full) + '\n', 'utf8')
-          fsyncSync(fd)
-        } finally {
-          closeSync(fd)
-        }
+        appendJsonlRecord(this.filePath, full)
         this.entryCount = count + 1
         const retained = this.enforceCap()
         try {

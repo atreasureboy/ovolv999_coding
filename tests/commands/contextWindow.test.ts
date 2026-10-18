@@ -25,6 +25,13 @@ function context(): SlashCommandContext {
 }
 
 describe('context commands after model-window projection', () => {
+  it('reserves the actual model output cap when it is below the requested output limit', async () => {
+    const ctx = context()
+    ctx.engine.getConfig().maxOutputTokens = 2048
+    ctx.engine.getConfig().modelSettings!.fixture.capabilities!.maxOutputTokens = 512
+    const result = await sessionCommands.find(command => command.name === 'context')!.handler('', ctx)
+    expect(result).toMatchObject({ type: 'text', value: expect.stringContaining('12 / 3,584') })
+  })
   it.each(['context', 'status'])('uses the active model projection and input budget in /%s', async name => {
     const ctx = context()
     const before = structuredClone(ctx.history)

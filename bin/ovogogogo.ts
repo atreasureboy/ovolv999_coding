@@ -10,11 +10,13 @@ import { parseAcpArgs } from '../src/cli/acpArgs.js'
 import { runAcp } from '../src/cli/acp.js'
 import { runExec } from '../src/cli/exec.js'
 import { readOutputSchema } from '../src/core/outputSchema.js'
-import { VERSION, buildVersion, resolveApiEnvironment } from '../src/cli/environment.js'
+import { VERSION, buildVersion } from '../src/cli/environment.js'
 import { printHelp } from '../src/cli/help.js'
 import { loadEnvironment } from '../src/cli/loadEnvironment.js'
 import { resolveResumePath } from '../src/cli/paths.js'
 import { createCliPermissionManager } from '../src/cli/permissions.js'
+import { createRuntimeConfigurationResolver, resolveProfilePermissionMode } from '../src/cli/runtimeConfiguration.js'
+import { getActiveProfile } from '../src/core/profiles.js'
 import { updateProgressLog } from '../src/cli/progress.js'
 import { runRepl } from '../src/cli/repl.js'
 import { SESSION_SUBCOMMANDS, handleSessionSubcommand } from '../src/cli/sessions.js'
@@ -140,8 +142,12 @@ async function main(): Promise<void> {
     executionProfile: projectConfig?.executionProfile,
     modelSettings: projectConfig?.modelSettings,
   })
-  const effectiveModel = args.modelExplicit ? model : projectConfig?.model ?? model
-  const apiEnvironment = resolveApiEnvironment(executionSettings.modelSettings?.[effectiveModel]?.protocol)
+  const resolveRuntimeConfiguration = createRuntimeConfigurationResolver(cwd, {
+    model, modelExplicit: args.modelExplicit, projectConfig, modelSettings: executionSettings.modelSettings,
+  })
+  const runtimeConfiguration = resolveRuntimeConfiguration()
+  const effectiveModel = runtimeConfiguration.model
+  const apiEnvironment = { apiKey: runtimeConfiguration.apiKey, baseURL: runtimeConfiguration.baseURL, protocol: runtimeConfiguration.modelProtocol! }
   if (!effectiveModel.trim()) throw new ArgError('Configure a model with --model, project settings, OVOGO_MODEL, or ANTHROPIC_MODEL before running a native model request')
   if (pipe) {
     const apiKey = apiEnvironment.apiKey
@@ -169,6 +175,7 @@ async function main(): Promise<void> {
     const client = createModelGateway(
       new OpenAI({ apiKey, baseURL: apiEnvironment.baseURL, maxRetries: 0 }),
       {
+        ...runtimeConfiguration,
         model: effectiveModel,
         modelProtocol: apiEnvironment.protocol,
         modelSettings: executionSettings.modelSettings,
@@ -184,8 +191,10 @@ async function main(): Promise<void> {
       try {
         const resp = await client.chat.completions.create({
           model: effectiveModel,
+          temperature: runtimeConfiguration.temperature,
+          max_tokens: runtimeConfiguration.maxOutputTokens,
           messages: [
-            { role: 'system', content: 'You are a helpful coding assistant. Respond concisely.' },
+            { role: 'system', content: ['You are a helpful coding assistant. Respond concisely.', projectConfig?.systemPrompt, getActiveProfile(cwd)?.modelPrefs?.systemPrompt].filter(Boolean).join('\n\n') },
             { role: 'user', content: prompt },
           ],
         })
@@ -283,6 +292,7 @@ async function main(): Promise<void> {
     settings.permissions,
     projectConfig?.permissionMode,
   )
+  permissionManager.setMode(resolveProfilePermissionMode(getActiveProfile(cwd), settings.permissions?.mode, permissionManager.getMode()))
   renderer.info(`Permissions: ${permissionManager.formatMode()}`)
   let sessionDir: string
   let resumedHistory: OpenAIMessage[] = []
@@ -333,12 +343,11 @@ async function main(): Promise<void> {
   }
   const skillIndex = formatSkillIndex(skills)
   const modesDir = join(homedir(), '.ovogo', 'modes')
-  const mode = getCurrentMode(modesDir)
-  const verbosityPrompt = getVerbosityPrompt(mode.verbosity)
-  const modePrompt = [mode.systemPrompt, verbosityPrompt].filter(Boolean).join('\n\n')
   const sessionSystemPrompt = (directory: string): string => {
+    const mode = getCurrentMode(modesDir)
+    const modePrompt = [mode.systemPrompt, getVerbosityPrompt(mode.verbosity)].filter(Boolean).join('\n\n')
     const prompt = buildFullSystemPrompt(cwd, [], modePrompt, taskContext, directory, skillIndex, projectCtxSection)
-    return projectConfig?.systemPrompt ? prompt + '\n\n' + projectConfig.systemPrompt : prompt
+    return [prompt, projectConfig?.systemPrompt, getActiveProfile(cwd)?.modelPrefs?.systemPrompt].filter(Boolean).join('\n\n')
   }
   const eventLog = new EventLog(sessionDir)
   renderer.info(`EventLog: ${eventLog.getFilePath()}`)
@@ -391,6 +400,8 @@ async function main(): Promise<void> {
     }))
   }
   const config: EngineConfig = {
+    ...runtimeConfiguration,
+    resolveRuntimeConfiguration,
     model: effectiveModel,
     ...(serviceArgs?.effort ? { effort: serviceArgs.effort } : {}),
     modelProtocol: apiEnvironment.protocol,
@@ -402,19 +413,12 @@ async function main(): Promise<void> {
     executionProfile,
     executionPolicy,
     approvalBroker,
-    permissionMode: projectConfig?.permissionMode ?? 'auto',
     permissionManager,
     hookRunner,
     systemPrompt: sessionSystemPrompt(sessionDir),
     sessionSystemPrompt,
     sessionDir,
     maxContextTokens: projectConfig?.maxContextTokens ?? maxCtxTokens,
-    temperature:
-      projectConfig?.temperature ??
-      (process.env.OVOGO_TEMPERATURE ? parseFloat(process.env.OVOGO_TEMPERATURE) : undefined),
-    maxOutputTokens: process.env.OVOGO_MAX_OUTPUT_TOKENS
-      ? parseInt(process.env.OVOGO_MAX_OUTPUT_TOKENS, 10)
-      : undefined,
     poor:
       projectConfig?.poor ??
       settings.poor ??
@@ -606,7 +610,7 @@ async function main(): Promise<void> {
         engine,
         inkRenderer: inkRendererInstance as unknown as Renderer,
         version: VERSION,
-        model,
+        model: effectiveModel,
         skills: skillsArray,
         resolveSkillInvocation: createSkillRuntime(skills).resolveSkillInvocation,
         onUserPromptSubmit: (prompt, signal) => hookRunner.runUserPromptSubmit(prompt, signal),

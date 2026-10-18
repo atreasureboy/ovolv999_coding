@@ -5,9 +5,13 @@
  * Provides warnings when approaching limits and hard stops when exceeded.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'fs'
+import { randomUUID } from 'node:crypto'
 import { join, resolve } from 'path'
 import { isRecord } from './persistedData.js'
+import { acquirePersistenceLeaseSync, type PersistenceLease } from './persistenceLock.js'
+import type { NormalizedUsage } from './model/types.js'
+import type { UsagePricing } from './modelPricing.js'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -35,6 +39,8 @@ export interface BudgetConfig {
 export interface BudgetUsage {
   /** Current spent amount */
   spent: number
+  reserved?: number
+  conservative?: number
   /** Budget limit */
   limit: number
   /** Usage ratio (0-1+) */
@@ -66,6 +72,8 @@ export interface BudgetStore {
   usage: Record<string, Record<string, number>>
   /** Reset timestamps */
   resets: Record<string, string>
+  reservations?: Record<string, Array<{ name: string; periodKey: string; amount: number; type: BudgetType }>>
+  conservative?: Record<string, Record<string, number>>
 }
 
 // ── Persistence ─────────────────────────────────────────────────────────────
@@ -82,19 +90,37 @@ function emptyStore(): BudgetStore {
   return { budgets: dictionary(), usage: dictionary(), resets: dictionary() }
 }
 
-export function loadBudgetStore(cwd: string): BudgetStore {
+export function loadBudgetStore(cwd: string, strict = false): BudgetStore {
   const path = getBudgetPath(cwd)
   if (!existsSync(path)) {
     return emptyStore()
   }
   try {
     const data: unknown = JSON.parse(readFileSync(path, 'utf8'))
-    if (!isRecord(data)) return emptyStore()
+    if (!isRecord(data)) throw new Error('Invalid budget store')
+    if (strict && (!isRecord(data.budgets) || !isRecord(data.usage) || !isRecord(data.resets) || Object.entries(data.budgets).some(([name, config]) => !isBudgetConfig(config) || config.name !== name) || Object.values(data.usage).some(value => !isRecord(value) || Object.values(value).some(amount => typeof amount !== 'number' || !Number.isFinite(amount) || amount < 0)))) throw new Error('Invalid budget store')
     const budgets = dictionary(Object.entries(isRecord(data.budgets) ? data.budgets : {}).filter(([name, value]) => isBudgetConfig(value) && value.name === name)) as Record<string, BudgetConfig>
     const usage = dictionary(Object.entries(isRecord(data.usage) ? data.usage : {}).filter(([, value]) => isRecord(value)).map(([name, value]) => [name, dictionary(Object.entries(value as Record<string, unknown>).filter(([, amount]) => typeof amount === 'number' && Number.isFinite(amount) && amount >= 0))])) as Record<string, Record<string, number>>
     const resets = dictionary(Object.entries(isRecord(data.resets) ? data.resets : {}).filter(([, value]) => typeof value === 'string')) as Record<string, string>
-    return { budgets, usage, resets }
-  } catch {
+    const reservations = dictionary<Array<{ name: string; periodKey: string; amount: number; type: BudgetType }>>()
+    if (data.reservations !== undefined) {
+      if (!isRecord(data.reservations)) throw new Error('Invalid budget reservations')
+      for (const [id, entries] of Object.entries(data.reservations)) {
+        if (!Array.isArray(entries) || entries.some(entry => !isRecord(entry) || typeof entry.name !== 'string' || typeof entry.periodKey !== 'string' || typeof entry.amount !== 'number' || !Number.isFinite(entry.amount) || entry.amount < 0 || !['tokens', 'cost', 'requests'].includes(String(entry.type)))) throw new Error('Invalid budget reservation')
+        reservations[id] = entries as NonNullable<BudgetStore['reservations']>[string]
+      }
+    }
+    const conservative = dictionary<Record<string, number>>()
+    if (data.conservative !== undefined) {
+      if (!isRecord(data.conservative)) throw new Error('Invalid conservative budget usage')
+      for (const [name, periods] of Object.entries(data.conservative)) {
+        if (!isRecord(periods) || Object.values(periods).some(amount => typeof amount !== 'number' || !Number.isFinite(amount) || amount < 0)) throw new Error('Invalid conservative budget usage')
+        conservative[name] = dictionary(Object.entries(periods)) as Record<string, number>
+      }
+    }
+    return { budgets, usage, resets, reservations, conservative }
+  } catch (error) {
+    if (strict) throw new Error('Project budget persistence is invalid; preserve it for recovery before making model requests', { cause: error })
     return emptyStore()
   }
 }
@@ -108,12 +134,34 @@ function isBudgetConfig(value: unknown): value is BudgetConfig {
     typeof value.warningThreshold === 'number' && Number.isFinite(value.warningThreshold) && value.warningThreshold >= 0 && value.warningThreshold <= 1
 }
 
-export function saveBudgetStore(cwd: string, store: BudgetStore): void {
+function writeStore(cwd: string, store: BudgetStore, lease: PersistenceLease): void {
   const dir = join(resolve(cwd), '.ovolv999')
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true })
   }
-  writeFileSync(getBudgetPath(cwd), JSON.stringify(store, null, 2), 'utf8')
+  const target = getBudgetPath(cwd)
+  const temporary = `${target}.${randomUUID()}.tmp`
+  const fd = openSync(temporary, 'wx', 0o600)
+  try {
+    try { writeFileSync(fd, JSON.stringify(store, null, 2), 'utf8'); fsyncSync(fd) } finally { closeSync(fd) }
+    lease.assertOwned()
+    renameSync(temporary, target)
+  } finally { if (existsSync(temporary)) unlinkSync(temporary) }
+}
+
+function mutateStore<T>(cwd: string, mutate: (store: BudgetStore) => T): T {
+  const lease = acquirePersistenceLeaseSync(getBudgetPath(cwd))
+  try {
+    const store = loadBudgetStore(cwd, true)
+    const result = mutate(store)
+    writeStore(cwd, store, lease)
+    return result
+  } finally { lease.release() }
+}
+
+export function saveBudgetStore(cwd: string, store: BudgetStore): void {
+  const lease = acquirePersistenceLeaseSync(getBudgetPath(cwd))
+  try { writeStore(cwd, store, lease) } finally { lease.release() }
 }
 
 // ── Period Helpers ──────────────────────────────────────────────────────────
@@ -177,7 +225,6 @@ export function setBudget(
   config: Omit<BudgetConfig, 'enabled' | 'enforced' | 'warningThreshold'> &
     Partial<Pick<BudgetConfig, 'enabled' | 'enforced' | 'warningThreshold'>>,
 ): BudgetConfig {
-  const store = loadBudgetStore(cwd)
   const budget: BudgetConfig = {
     name: config.name,
     type: config.type,
@@ -188,19 +235,23 @@ export function setBudget(
     enabled: config.enabled ?? true,
   }
   if (!isBudgetConfig(budget)) throw new Error('Invalid budget configuration')
-  store.budgets[budget.name] = budget
-  saveBudgetStore(cwd, store)
-  return budget
+  return mutateStore(cwd, store => {
+    if (Object.values(store.reservations ?? {}).some(entries => entries.some(entry => entry.name === budget.name))) throw new Error('Cannot replace a budget with pending model reservations')
+    store.budgets[budget.name] = budget
+    return budget
+  })
 }
 
 export function removeBudget(cwd: string, name: string): boolean {
-  const store = loadBudgetStore(cwd)
-  if (!store.budgets[name]) return false
-  delete store.budgets[name]
-  delete store.usage[name]
-  delete store.resets[name]
-  saveBudgetStore(cwd, store)
-  return true
+  return mutateStore(cwd, store => {
+    if (!store.budgets[name]) return false
+    if (Object.values(store.reservations ?? {}).some(entries => entries.some(entry => entry.name === name))) throw new Error('Cannot remove a budget with pending model reservations')
+    delete store.budgets[name]
+    delete store.usage[name]
+    delete store.resets[name]
+    delete store.conservative?.[name]
+    return true
+  })
 }
 
 export function getBudget(cwd: string, name: string): BudgetConfig | null {
@@ -222,23 +273,18 @@ export function recordUsage(
   date = new Date(),
 ): BudgetUsage | null {
   if (!Number.isFinite(amount) || amount < 0) throw new Error('Budget usage amount must be finite and non-negative')
-  const store = loadBudgetStore(cwd)
-  const config = store.budgets[budgetName]
-  if (!config || !config.enabled) return null
-
-  const periodKey = getPeriodKey(config.period, date)
-  if (!store.usage[budgetName]) store.usage[budgetName] = {}
-  const spent = (store.usage[budgetName][periodKey] ?? 0) + amount
-  if (!Number.isFinite(spent)) throw new Error('Budget usage amount exceeds supported range')
-  store.usage[budgetName][periodKey] = spent
-
-  // Track reset
-  if (!store.resets[budgetName]) {
-    store.resets[budgetName] = new Date().toISOString()
-  }
-
-  saveBudgetStore(cwd, store)
-  return getUsage(cwd, budgetName, date)
+  const recorded = mutateStore(cwd, store => {
+    const config = store.budgets[budgetName]
+    if (!config || !config.enabled) return false
+    const periodKey = getPeriodKey(config.period, date)
+    if (!store.usage[budgetName]) store.usage[budgetName] = dictionary()
+    const spent = (store.usage[budgetName][periodKey] ?? 0) + amount
+    if (!Number.isFinite(spent)) throw new Error('Budget usage amount exceeds supported range')
+    store.usage[budgetName][periodKey] = spent
+    store.resets[budgetName] ??= new Date().toISOString()
+    return true
+  })
+  return recorded ? getUsage(cwd, budgetName, date) : null
 }
 
 export function getUsage(
@@ -252,12 +298,15 @@ export function getUsage(
 
   const periodKey = getPeriodKey(config.period, date)
   const spent = store.usage[budgetName]?.[periodKey] ?? 0
+  const reserved = Object.values(store.reservations ?? {}).flat().filter(entry => entry.name === budgetName && entry.periodKey === periodKey).reduce((sum, entry) => sum + entry.amount, 0)
   const limit = config.limit
   const ratio = limit > 0 ? spent / limit : 0
   const remaining = Math.max(0, limit - spent)
 
   return {
     spent,
+    reserved,
+    conservative: store.conservative?.[budgetName]?.[periodKey] ?? 0,
     limit,
     ratio,
     remaining,
@@ -333,12 +382,89 @@ export function checkAllBudgets(
 }
 
 export function resetUsage(cwd: string, budgetName: string): boolean {
-  const store = loadBudgetStore(cwd)
-  if (!store.budgets[budgetName]) return false
-  store.usage[budgetName] = {}
-  store.resets[budgetName] = new Date().toISOString()
-  saveBudgetStore(cwd, store)
-  return true
+  return mutateStore(cwd, store => {
+    if (!store.budgets[budgetName]) return false
+    if (Object.values(store.reservations ?? {}).some(entries => entries.some(entry => entry.name === budgetName))) throw new Error('Cannot reset a budget with pending model reservations; preserve usage for recovery')
+    store.usage[budgetName] = dictionary()
+    delete store.conservative?.[budgetName]
+    store.resets[budgetName] = new Date().toISOString()
+    return true
+  })
+}
+
+export interface ModelBudgetReservation {
+  settle(usage: NormalizedUsage, dispatched: boolean): void
+}
+
+function actualTokenTotal(usage: NormalizedUsage): number | undefined {
+  if (usage.kind !== 'actual' || usage.inputTokens === undefined || usage.outputTokens === undefined) return undefined
+  const counts = [usage.inputTokens, usage.outputTokens, usage.cachedInputTokens ?? 0, usage.cacheWriteTokens ?? 0, usage.reasoningTokens ?? 0]
+  if (counts.some(value => !Number.isSafeInteger(value) || value < 0)) return undefined
+  const total = usage.inputTokens + usage.outputTokens
+  if (!Number.isSafeInteger(total) || (usage.cachedInputTokens ?? 0) + (usage.cacheWriteTokens ?? 0) > usage.inputTokens || (usage.reasoningTokens ?? 0) > usage.outputTokens) return undefined
+  return total
+}
+
+function usageCost(usage: NormalizedUsage, pricing: UsagePricing | null): number | undefined {
+  if (!pricing || usage.kind !== 'actual' || usage.inputTokens === undefined || usage.outputTokens === undefined) return undefined
+  const cached = usage.cachedInputTokens ?? 0
+  const written = usage.cacheWriteTokens ?? 0
+  if ((cached && pricing.cachedInputPer1M === undefined) || (written && pricing.cacheWritePer1M === undefined)) return undefined
+  return ((usage.inputTokens - cached - written) * pricing.inputPer1M + cached * (pricing.cachedInputPer1M ?? 0) + written * (pricing.cacheWritePer1M ?? 0) + usage.outputTokens * pricing.outputPer1M) / 1_000_000
+}
+
+export function reserveModelBudget(cwd: string, requestId: string, contextWindow: number, outputTokens: number, pricing: UsagePricing | null): ModelBudgetReservation {
+  const initial = loadBudgetStore(cwd, true)
+  if (!Object.values(initial.budgets).some(config => config.enabled)) return { settle() {} }
+  const tokenCapacity = contextWindow + outputTokens
+  const rates = pricing ? [pricing.inputPer1M, pricing.outputPer1M, pricing.cachedInputPer1M ?? pricing.inputPer1M, pricing.cacheWritePer1M ?? pricing.inputPer1M] : []
+  if (!Number.isSafeInteger(tokenCapacity) || tokenCapacity < 1 || rates.some(rate => !Number.isFinite(rate) || rate < 0)) throw new Error('Invalid project model budget reservation basis')
+  const costCapacity = pricing ? tokenCapacity * Math.max(...rates) / 1_000_000 : undefined
+  mutateStore(cwd, store => {
+    if (Object.hasOwn(store.reservations ?? {}, requestId)) throw new Error('Duplicate project budget reservation identity')
+    const entries: NonNullable<BudgetStore['reservations']>[string] = []
+    for (const config of Object.values(store.budgets)) {
+      if (!config.enabled) continue
+      if (config.type === 'cost' && costCapacity === undefined && config.enforced) throw new Error(`Cost budget "${config.name}" requires known model pricing before a request can be sent`)
+      const amount = config.type === 'requests' ? 1 : config.type === 'tokens' ? tokenCapacity : costCapacity ?? config.limit
+      const periodKey = getPeriodKey(config.period)
+      const spent = store.usage[config.name]?.[periodKey] ?? 0
+      if (!Number.isFinite(amount) || !Number.isFinite(spent + amount)) throw new Error('Project budget reservation exceeds supported range')
+      if (config.enforced && (spent >= config.limit || spent + amount > config.limit)) throw new Error(`Project ${config.type} budget "${config.name}" cannot admit request: ${spent} spent/reserved + ${amount} required > ${config.limit}; token/cost reservation uses model context capacity ${contextWindow} + output cap ${outputTokens}, including unknown usage`)
+      entries.push({ name: config.name, periodKey, amount, type: config.type })
+    }
+    for (const entry of entries) {
+      store.usage[entry.name] ??= dictionary()
+      store.usage[entry.name][entry.periodKey] = (store.usage[entry.name][entry.periodKey] ?? 0) + entry.amount
+    }
+    store.reservations ??= dictionary()
+    store.reservations[requestId] = entries
+  })
+  let settled = false
+  return {
+    settle(usage, dispatched) {
+      if (settled) return
+      mutateStore(cwd, store => {
+        const entries = store.reservations?.[requestId]
+        if (!entries) throw new Error('Project budget reservation is missing; preserve usage for recovery')
+        const actualTokens = actualTokenTotal(usage)
+        const cost = actualTokens === undefined ? undefined : usageCost(usage, pricing)
+        for (const entry of entries) {
+          const amount = !dispatched ? 0 : entry.type === 'requests' ? 1 : entry.type === 'tokens' ? actualTokens ?? entry.amount : cost ?? entry.amount
+          const spent = (store.usage[entry.name]?.[entry.periodKey] ?? 0) - entry.amount + amount
+          if (!Number.isFinite(spent) || spent < 0) throw new Error('Invalid project budget settlement; preserve reservation for recovery')
+          store.usage[entry.name][entry.periodKey] = spent
+          if (dispatched && (entry.type === 'tokens' && actualTokens === undefined || entry.type === 'cost' && cost === undefined)) {
+            store.conservative ??= dictionary()
+            store.conservative[entry.name] ??= dictionary()
+            store.conservative[entry.name][entry.periodKey] = (store.conservative[entry.name][entry.periodKey] ?? 0) + amount
+          }
+        }
+        delete store.reservations![requestId]
+      })
+      settled = true
+    },
+  }
 }
 
 // ── Snapshots ───────────────────────────────────────────────────────────────
@@ -392,6 +518,8 @@ export function formatBudgetUsage(
     `  ${bar} ${usage.percent}%`,
     `  ${formatAmount(config.type, usage.spent)} / ${formatAmount(config.type, usage.limit)} (${formatAmount(config.type, usage.remaining)} remaining)`,
     `  Status: ${status}`,
+    ...(usage.reserved ? [`  Includes ${formatAmount(config.type, usage.reserved)} reserved pending settlement; interrupted requests remain reserved for recovery.`] : []),
+    ...(usage.conservative ? [`  Includes ${formatAmount(config.type, usage.conservative)} conservatively charged because actual usage or pricing was unavailable.`] : []),
   ].join('\n')
 }
 

@@ -14,9 +14,10 @@ import { runHookOperation } from './hookLifecycle.js'
 import { createHash, randomUUID } from 'crypto'
 import { join, resolve } from 'node:path'
 import { UsageLedger } from './usageLedger.js'
-import { nativeModelAdapter, resolveModelRuntime } from './modelRuntime.js'
+import { getBudgetPath } from './budget.js'
+import { nativeModelAdapter, resolveModelInputBudget, resolveModelRuntime } from './modelRuntime.js'
 import { AdapterError } from './model/common.js'
-import { historyDigest } from './model/state.js'
+import { historyDigest, providerIdentity } from './model/state.js'
 import type { ModelAdapter } from './model/types.js'
 import { usagePricing } from './modelPricing.js'
 import { normalizeModelSettings, normalizeModelProtocol } from '../config/modelSettings.js'
@@ -30,7 +31,6 @@ import {
   CONTEXT_MICROCOMPACT_PCT,
   CONTEXT_WARN_PCT,
   clampMaxOutputTokens,
-  effectiveInputBudget,
   estimateTokens,
   estimateToolDefinitionTokens,
   getCompressionStrategy,
@@ -86,6 +86,13 @@ import type {
   RunTurnOptions,
 } from './types.js'
 import { captureArtifactVersion, createVerificationPlan } from './verification.js'
+
+export type RuntimeConfigurationPatch = Partial<Pick<EngineConfig, 'model' | 'apiKey' | 'baseURL' | 'modelProtocol' | 'temperature' | 'maxOutputTokens' | 'permissionMode' | 'requireToolApproval' | 'systemPrompt' | 'sessionSystemPrompt'>>
+
+function continuationIdentity(model: string, protocol: string, provider: string): string {
+  return JSON.stringify([model, protocol, provider])
+}
+
 function isContextOverflowError(message: string): boolean {
   return (
     message.includes('context_length_exceeded') ||
@@ -133,7 +140,7 @@ export class ExecutionEngine {
     return Math.min(clampMaxOutputTokens(this.config.maxOutputTokens, this.getModelContextWindow()), resolveModelRuntime(this.config).options.capabilities.maxOutputTokens)
   }
   constructor(config: EngineConfig, renderer: EngineObserver, client?: OpenAI) {
-    config = { ...config, cwd: resolve(config.cwd) }
+    config = { ...config, cwd: resolve(config.cwd), budgetRoot: resolve(config.budgetRoot ?? config.cwd) }
     if (config.modelSettings !== undefined) config.modelSettings = normalizeModelSettings(config.modelSettings)
     if (config.modelProtocol !== undefined) config.modelProtocol = normalizeModelProtocol(config.modelProtocol)
     assertExecutionProfile(config.executionProfile)
@@ -317,7 +324,7 @@ export class ExecutionEngine {
     const messageTokens = estimateTokens(messages)
     const toolDefTokens = estimateToolDefinitionTokens(toolDefs)
     const totalTokens = messageTokens + this.systemPromptTokens + toolDefTokens
-    const inputBudget = effectiveInputBudget(maxCtxTokens, this.config.maxOutputTokens)
+    const inputBudget = resolveModelInputBudget(this.config)
     const pct = totalTokens / inputBudget
     const shouldMicroCompact = pct >= CONTEXT_MICROCOMPACT_PCT
     const shouldWarn = pct >= CONTEXT_WARN_PCT
@@ -518,7 +525,7 @@ export class ExecutionEngine {
     ) {
       return { content: `Tool "${toolName}" is not available to this agent.`, isError: true }
     }
-    const commandRisk = toolName === 'Bash' && typeof input.command === 'string'
+    const commandRisk = tool.metadata?.shellCommand && typeof input.command === 'string'
       ? classifyCommandRisk(input.command) : undefined
     const isDangerous =
       (toolName === 'ExitWorktree' && input.action === 'discard') ||
@@ -530,6 +537,8 @@ export class ExecutionEngine {
         ? 'deny'
         : this.config.permissionMode === 'deny' && tool.metadata?.readOnly !== true
           ? 'deny'
+          : this.config.requireToolApproval
+            ? 'ask'
           : this.config.permissionMode === 'ask' &&
               tool.metadata?.readOnly !== true &&
               this.permissionManager.getMode() === 'default' &&
@@ -758,6 +767,8 @@ export class ExecutionEngine {
       workspace: this.activeRun?.workspace,
       verificationExcludedPaths: [
         ...(this.config.verificationExcludedPaths ?? []),
+        getBudgetPath(this.config.budgetRoot ?? this.config.cwd),
+        `${getBudgetPath(this.config.budgetRoot ?? this.config.cwd)}.lock.owners`,
         ...(this.config.sessionDir ? [this.config.sessionDir] : []),
       ],
       signal: turnAbortSignal,
@@ -831,6 +842,7 @@ export class ExecutionEngine {
       if (!resolveModelRuntime(this.config).options.capabilities.structuredOutput) throw new Error('Configured model does not support structured output')
       options = { ...options, responseSchema: structuredClone(options.responseSchema) }
     }
+    if (this.config.sessionSystemPrompt && this.config.sessionDir) this.config.systemPrompt = this.config.sessionSystemPrompt(this.config.sessionDir)
     const run = createRunContext(this.config, options)
     this._turnInFlight = true
     this.turnOptions = options
@@ -853,6 +865,8 @@ export class ExecutionEngine {
       const verificationPlan = createVerificationPlan(this.config.cwd, undefined, [
         ...(this.config.verificationExcludedPaths ?? []),
         ...(this.config.sessionDir ? [this.config.sessionDir] : []),
+        getBudgetPath(this.config.budgetRoot ?? this.config.cwd),
+        `${getBudgetPath(this.config.budgetRoot ?? this.config.cwd)}.lock.owners`,
       ])
       const startingArtifact = await runOperation(
         run,
@@ -1289,12 +1303,29 @@ export class ExecutionEngine {
     return this.client
   }
   setModel(model: string): void {
-    if (model !== this.config.model) {
-      const runtime = resolveModelRuntime(this.config)
-      this.previousModelAdapters.set(this.config.model, nativeModelAdapter(runtime.protocol, runtime.options))
-    }
-    this.config.model = model
-    for (const module of this.modules) module.onModelChange?.(model)
+    this.applyRuntimeConfiguration({ model })
+  }
+  applyRuntimeConfiguration(patch: RuntimeConfigurationPatch): void {
+    if (this._turnInFlight) throw new Error('Cannot change runtime configuration during an active turn')
+    if (this.disposed) throw new Error('ExecutionEngine is disposed')
+    const next = { ...this.config, ...patch }
+    if (typeof next.model !== 'string' || !next.model.trim()) throw new Error('Model must not be empty')
+    if (typeof next.apiKey !== 'string') throw new Error('API key must be a string')
+    if (next.modelProtocol !== undefined) next.modelProtocol = normalizeModelProtocol(next.modelProtocol)
+    if (next.baseURL !== undefined && !['http:', 'https:'].includes(new URL(next.baseURL).protocol)) throw new Error('Model endpoint must use HTTP or HTTPS')
+    if (next.temperature !== undefined && (!Number.isFinite(next.temperature) || next.temperature < 0 || next.temperature > 2)) throw new Error('Temperature must be between 0 and 2')
+    if (next.maxOutputTokens !== undefined && (!Number.isSafeInteger(next.maxOutputTokens) || next.maxOutputTokens <= 0)) throw new Error('Output token limit must be a positive integer')
+    if (next.permissionMode !== undefined && !['auto', 'ask', 'deny'].includes(next.permissionMode)) throw new Error('Invalid permission mode')
+    const before = resolveModelRuntime(this.config)
+    const after = resolveModelRuntime(next)
+    const previousIdentity = continuationIdentity(this.config.model, before.protocol, providerIdentity(before.protocol, before.options))
+    const nextIdentity = continuationIdentity(next.model, after.protocol, providerIdentity(after.protocol, after.options))
+    if (previousIdentity !== nextIdentity) this.previousModelAdapters.set(previousIdentity, nativeModelAdapter(before.protocol, before.options))
+    const modelChanged = next.model !== this.config.model
+    Object.assign(this.config, patch, { modelProtocol: next.modelProtocol })
+    if (Object.hasOwn(patch, 'baseURL')) this.client.baseURL = next.baseURL ?? 'https://api.openai.com/v1'
+    if (Object.hasOwn(patch, 'apiKey')) this.client.apiKey = next.apiKey
+    if (modelChanged) for (const module of this.modules) module.onModelChange?.(next.model)
   }
   inheritModelTransitions(previous: ExecutionEngine): void {
     this.previousModelAdapters = new Map(previous.previousModelAdapters)
@@ -1332,10 +1363,14 @@ export class ExecutionEngine {
   }
   private migrateProviderContinuation(messages: OpenAIMessage[], systemPrompt: string): void {
     const requestMessages: OpenAIMessage[] = [{ role: 'system', source: 'runtime', content: systemPrompt }, ...messages]
+    const runtime = resolveModelRuntime(this.config)
+    const currentIdentity = continuationIdentity(this.config.model, runtime.protocol, providerIdentity(runtime.protocol, runtime.options))
     for (const [index, message] of messages.entries()) {
       const state = message.providerState
-      if (!state || typeof state !== 'object' || !('model' in state) || typeof state.model !== 'string' || state.model === this.config.model) continue
-      const adapter = this.previousModelAdapters.get(state.model)
+      if (!state || typeof state !== 'object' || !('model' in state) || typeof state.model !== 'string' || !('protocol' in state) || typeof state.protocol !== 'string' || !('provider' in state) || typeof state.provider !== 'string') continue
+      const identity = continuationIdentity(state.model, state.protocol, state.provider)
+      if (identity === currentIdentity) continue
+      const adapter = this.previousModelAdapters.get(identity)
       if (!adapter) continue
       const validated = adapter.validateState(state, state.model)
       for (const turn of validated.turns) {

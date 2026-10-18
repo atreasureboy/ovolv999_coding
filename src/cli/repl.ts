@@ -1,5 +1,5 @@
 import { dispatchSlashCommand, listCommands, type SlashCommandContext } from '../commands/index.js'
-import { getProjectSettingsPath, saveProjectSettings } from '../config/settings.js'
+import { persistCliPermissions } from './permissions.js'
 import { ExecutionEngine } from '../core/engine.js'
 import { AgentSessionClient } from '../core/agentSessionClient.js'
 import { bindEngineSession } from '../core/engineSession.js'
@@ -395,10 +395,7 @@ export async function runRepl(
           },
           getSkillsText,
           getSessionsText,
-          persistPermissions: (mode, rules) => {
-            saveProjectSettings(cwd, { permissions: { mode, rules } })
-            return getProjectSettingsPath(cwd)
-          },
+          persistPermissions: (mode, rules) => persistCliPermissions(cwd, mode, rules),
           resolveSkillPrompt: (name, args) => {
             if (!skills.has(name)) return null
             const invocation = skillRuntime.resolveSkillInvocation(name, args, 'user')

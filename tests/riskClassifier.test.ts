@@ -29,6 +29,36 @@
 import { describe, it, expect } from 'vitest'
 import { classifyCommandRisk, checkCommandPermission } from '../src/core/riskClassifier.js'
 
+it.each([
+  'find . -maxdepth 0 -fprint marker.txt',
+  'find . -fprintf marker.txt %p',
+  'find . "-fprint" marker.txt',
+  'find . -fprint0 marker.txt',
+  'rg --pre helper pattern .',
+  'rg --hostname-bin helper pattern .',
+  'fd --exec helper',
+  'fd -x helper',
+  'tree -o marker.txt',
+  'date --set=2026-01-01',
+  'hostname changed-name',
+  'git diff --output=marker.txt',
+  'git -c core.pager=helper log',
+  'git branch --edit-description',
+  'git branch -fnew',
+  'git branch -l new',
+  'git tag -dold',
+  'git tag --list "-dold"',
+  'git config --get --edit',
+  'file -C -m custom-magic',
+  'find . --future-option',
+])('requires review for option-dependent side effects: %s', command => {
+  expect(classifyCommandRisk(command)).toBe('needs_approval')
+})
+
+it.each(['find . -name "*.ts" -type f -print', 'rg -n --hidden pattern src', 'fd --type f --extension ts', 'tree -L 2', 'date -u', 'hostname -f'])('allows recognized read-only options: %s', command => {
+  expect(classifyCommandRisk(command)).toBe('safe')
+})
+
 // ── Dangerous ────────────────────────────────────────────────────────────────
 
 describe('riskClassifier — dangerous commands', () => {

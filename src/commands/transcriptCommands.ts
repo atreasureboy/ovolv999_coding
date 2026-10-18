@@ -54,8 +54,9 @@ export const transcriptCommands: Command[] = [
       }
       filename = filename ?? defaultFilename(format)
       try {
-        const path = exportSessionToFile(ctx.history, ctx.cwd, filename, { format })
-        const result = exportSession(ctx.history, { format })
+        const options = { format, raw: format === 'json' }
+        const path = exportSessionToFile(ctx.history, ctx.cwd, filename, options)
+        const result = exportSession(ctx.history, options)
         return text(
           `✓ Exported ${result.messageCount} messages to: ${path}\n` +
             `Format: ${format} (${result.charCount} chars)`,

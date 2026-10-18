@@ -327,7 +327,7 @@ function worker(directory: string, mode: string, oldId: string) {
   if (!fs.existsSync(runtime)) {
     fs.mkdirSync(runtime)
     fs.writeFileSync(join(runtime, 'package.json'), '{"type":"module"}')
-    for (const name of ['semanticMemory', 'persistenceLock', 'processIdentity', 'persistedData']) {
+    for (const name of ['semanticMemory', 'jsonlAppend', 'persistenceLock', 'processIdentity', 'persistedData']) {
       const source = fs.readFileSync(new URL(`../../src/core/${name}.ts`, import.meta.url), 'utf8')
       fs.writeFileSync(join(runtime, `${name}.js`), transpileModule(source, { compilerOptions: { module: ModuleKind.ESNext, target: 9 } }).outputText)
     }

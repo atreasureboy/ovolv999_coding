@@ -4,6 +4,9 @@
 
 No npm release has been published by this remediation. A package version alone does not identify a candidate: retain its tarball SHA256 and `dist/build-info.json` source commit, source hash, and dirty flag.
 
+- Second-audit repairs unify foreground/background shell approval, apply active profiles and mode prompts to real requests, persist Ink permissions and share model input-budget calculations across the engine and interfaces.
+- Project budgets now reserve and settle actual model requests, retries, auxiliary calls and delegated worktrees. Unknown usage remains conservatively charged; enforced cost budgets require known pricing. See the README for reservation and crash-recovery limits.
+- Bounded native HTTP errors restore context-overflow recovery; large approvals, directory aliases and damaged memory JSONL tails retain usable session state. ACP and exec share ordered cancellable output, and public JSON sharing excludes internal provider state while explicit JSON backups retain it.
 - File-by-file correctness repairs for configuration layering, damaged persisted records, prototype keys, workspace-scoped caches, cron boundaries, and literal parameter substitution.
 - Truthful timeout/cancellation and background-task outcomes; tracked descendants are stopped with birth-identity checks, and unconfirmed resources retain ownership.
 - CLI/Ink history, cancellation, command context, workflow recursion, diagnostics, and exit cleanup fixes.

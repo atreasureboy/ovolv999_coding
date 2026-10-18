@@ -76,6 +76,51 @@ function toolHistory(): OpenAIMessage[] {
   ]
 }
 
+it('applies an explicit provider and protocol change to the existing client without forwarding old native state', async () => {
+  const source = await fixture('responses')
+  const destination = await fixture('chat-completions')
+  const first = await source.engine.runTurn('Keep this visible history', [])
+  const previousClient = source.engine.getModelClient()
+  source.engine.applyRuntimeConfiguration({ baseURL: destination.engine.getConfig().baseURL, modelProtocol: 'chat-completions', apiKey: 'replacement-fixture', temperature: 0.3 })
+  const second = await source.engine.runTurn('Continue at the new endpoint', first.newHistory)
+  expect(second.result.status, second.result.output).toBe('completed')
+  expect(source.requests).toHaveLength(1)
+  expect(destination.requests).toHaveLength(1)
+  expect(destination.requests[0]).toMatchObject({ model: 'model-a', temperature: 0.3 })
+  expect(JSON.stringify(destination.requests[0])).toContain('Keep this visible history')
+  expect(JSON.stringify(destination.requests[0])).not.toContain('opaque-fixture')
+  expect(source.engine.getModelClient()).toBe(previousClient)
+  const compacted = await maybeCompact(previousClient, source.engine.getModel(), compactHistory())
+  expect(compacted.compacted).toBe(true)
+  expect(destination.requests).toHaveLength(2)
+})
+
+it('rejects a tampered history when explicitly switching provider with the same model name', async () => {
+  const source = await fixture('responses')
+  const destination = await fixture('responses')
+  const first = await source.engine.runTurn('Original instruction', [])
+  const history = structuredClone(first.newHistory)
+  history[0].content = 'Tampered instruction'
+  source.engine.applyRuntimeConfiguration({ baseURL: destination.engine.getConfig().baseURL })
+  const next = await source.engine.runTurn('Continue', history)
+  expect(next.result.status).toBe('failed')
+  expect(next.result.output).toMatch(/continuation/i)
+  expect(destination.requests).toHaveLength(0)
+})
+
+it('refreshes session instructions before the next real model request', async () => {
+  const { engine, requests, cwd } = await fixture('chat-completions')
+  let current = 'first-mode-sentinel'
+  engine.getConfig().sessionDir = cwd
+  engine.getConfig().sessionSystemPrompt = () => current
+  const first = await engine.runTurn('First', [])
+  current = 'second-mode-sentinel'
+  await engine.runTurn('Second', first.newHistory)
+  expect(JSON.stringify(requests[0])).toContain('first-mode-sentinel')
+  expect(JSON.stringify(requests[1])).toContain('second-mode-sentinel')
+  expect(JSON.stringify(requests[1])).not.toContain('first-mode-sentinel')
+})
+
 function compactHistory(): OpenAIMessage[] {
   return [...Array.from({ length: 17 }, (_, index): OpenAIMessage => ({ role: index % 2 ? 'assistant' : 'user', content: `history ${index}` })), ...toolHistory(),
     { role: 'user', content: 'Continue the project' }, { role: 'assistant', content: 'Continuing' }]

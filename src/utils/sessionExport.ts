@@ -22,6 +22,7 @@ export type ExportFormat = 'markdown' | 'json' | 'text' | 'transcript'
 
 export interface ExportOptions {
   format: ExportFormat
+  raw?: boolean
   /** Include tool calls and results (default: true for markdown/transcript) */
   includeTools?: boolean
   /** Include reasoning/thinking (default: false) */
@@ -158,8 +159,22 @@ function toMarkdown(messages: OpenAIMessage[], options: ExportOptions): string {
 
 // ── JSON ────────────────────────────────────────────────────────────────────
 
-function toJSON(messages: OpenAIMessage[], _options: ExportOptions): string {
-  return JSON.stringify(messages, null, 2)
+function toJSON(messages: OpenAIMessage[], options: ExportOptions): string {
+  if (options.raw) return JSON.stringify(messages, null, 2)
+  const includeTools = options.includeTools ?? true
+  const maxLength = options.maxCharsPerMessage ?? 0
+  const truncate = (value: string): string => maxLength > 0 && value.length > maxLength ? value.slice(0, maxLength) + '...' : value
+  const visible = messages.filter(message => message.role !== 'system' && (includeTools || message.role !== 'tool')).map(message => ({
+    role: message.role,
+    content: typeof message.content === 'string' ? truncate(message.content) : message.content?.map(part => part.type === 'text'
+      ? { type: part.type, text: truncate(part.text ?? '') }
+      : { type: part.type, image_url: { url: part.image_url?.url ?? '' } }) ?? null,
+    ...(includeTools && message.tool_calls ? { tool_calls: message.tool_calls.map(call => ({ id: call.id, type: call.type, function: { name: call.function.name, arguments: call.function.arguments } })) } : {}),
+    ...(message.tool_call_id ? { tool_call_id: message.tool_call_id } : {}),
+    ...(message.name ? { name: message.name } : {}),
+    ...(options.includeReasoning && 'reasoning' in message && typeof message.reasoning === 'string' ? { reasoning: truncate(message.reasoning) } : {}),
+  }))
+  return JSON.stringify(visible, null, 2)
 }
 
 // ── Plain Text ──────────────────────────────────────────────────────────────

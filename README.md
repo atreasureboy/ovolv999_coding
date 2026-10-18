@@ -432,7 +432,19 @@ ovolv999 exec --jsonl --output-schema result.schema.json "按指定结构返回�
 
 CLI 参数优先；项目模型与运行参数来自工作目录向 Git 根查找的首个 `.ovolv999.json` / `.ovolv999.jsonc`，再回退环境变量及默认值。凭据来自环境或 CLI 装载的 `.env`。
 
-权限、Hooks、任务上下文和 MCP 使用 `~/.ovogo/settings.json` 与项目 `.ovogo/settings.json` 分层设置。项目设置覆盖对应用户设置，权限规则与 Hooks 按层追加。`/profile` 等辅助能力的 `.ovolv999/` 存储有各自接口，不自动改写当前引擎参数。
+权限、Hooks、任务上下文和 MCP 使用 `~/.ovogo/settings.json` 与项目 `.ovogo/settings.json` 分层设置。项目设置覆盖对应用户设置，权限规则与 Hooks 按层追加。readline 和 Ink 中的 `/permissions` 都保存到项目设置。
+
+`/profile` 保存在项目 `.ovolv999/` 中。切换活跃 profile 后，模型、端点、采样参数和权限策略应用于下一次请求，重启后仍生效；无法应用的切换会回滚。显式 `--model` 优先于 profile，profile 优先于项目和环境默认值。`strict` 要求每次工具操作审批，显式拒绝和 plan 限制仍然有效；`/mode` 的提示也会在下一轮刷新。profile 的环境字段用于模型配置解析，不会导出到进程的全局环境。
+
+### 模型预算与分享
+
+`/budget` 的 requests、tokens 和 cost 限额作用于实际模型请求，包括重试、压缩等辅助请求以及独立 worktree 内的子代理。每个已发送的尝试消耗一次请求额度；不同会话共享项目预算，原有 `session` 周期仍通过显式 reset 重置。
+
+严格 tokens 预算在发送前预留“模型上下文容量 + 本次输出上限”；cost 预算按这部分容量及适用的最高已知单价预留。返回可信实际用量后释放未使用部分；缺失或异常用量保留保守计费。因此小于一次容量预留的预算（包括部分内置 token 预设）可能拒绝很短的请求。可以选择 requests 限额，或配置足够的 token/费用额度。未知单价不能绕过强制 cost 限额，配置单价也不等同于供应商最终账单。
+
+预算输出分别显示待结算预留和保守计费。普通取消会结算；进程崩溃留下的预留不会自动退款，且存在未结算预留时不能 reset/remove/replace，应保留记录并对账。跨进程同时争用持久化锁会明确失败，不会越过限额继续发送。
+
+`/share json` 导出可见消息，排除系统提示、内部推理和 provider 续接状态。`/export json` 保留完整备份格式，包含恢复会话所需的内部状态；需要公开分享时使用 `/share`。
 
 ```json
 {

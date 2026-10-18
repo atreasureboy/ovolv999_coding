@@ -12,7 +12,7 @@ import { normalizeOutcome, settleWithin } from './outcome.js'
 import { validateOutputSchema, validateStructuredOutput } from './outputSchema.js'
 import { isWorkspaceQuarantined } from './runContext.js'
 import {
-  claimSessionOwnership, createSessionDir, readSessionSnapshot, releaseSessionOwnership, saveSession,
+  canonicalSessionDirectory, claimSessionOwnership, createSessionDir, readSessionSnapshot, releaseSessionOwnership, saveSession,
 } from './sessionManager.js'
 import type { OpenAIMessage, SteeringInput, TurnResult } from './types.js'
 import { runWithDeadline } from '../ui/turnDeadline.js'
@@ -118,8 +118,7 @@ export class AgentService {
   async register(input: { sessionDir: string; cwd: string; engine?: ExecutionEngine }): Promise<{ threadId: string }> {
     this.assertOpen()
     const cwd = workspace(input.cwd)
-    let sessionDir = resolve(input.sessionDir)
-    try { sessionDir = realpathSync(sessionDir) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+    const sessionDir = canonicalSessionDirectory(input.sessionDir)
     const key = pathKey(sessionDir)
     const existing = this.registrations.get(key)
     if (existing) {
@@ -156,6 +155,9 @@ export class AgentService {
       engine = input.engine ?? await this.options.engineFactory({ sessionDir: input.sessionDir, cwd: input.cwd, threadId: envelope.sessionId })
       this.assertOpen()
       if (!samePath(workspace(engine.getConfig().cwd), input.cwd)) throw new AgentServiceError('workspace_mismatch', 'Configured engine belongs to another workspace')
+      const boundSession = engine.getConfig().sessionDir
+      if (!boundSession || !samePath(canonicalSessionDirectory(boundSession), input.sessionDir)) throw new AgentServiceError('session_mismatch', 'Configured engine must be bound to the registered session')
+      engine.getConfig().sessionDir = input.sessionDir
       engine.getConfig().approvalSessionId = envelope.sessionId
       const saved = store.snapshot()
       const thread: ServiceThread = {
@@ -171,7 +173,11 @@ export class AgentService {
         if (event.type === 'requested') {
           const { status: _status, ...request } = event.request
           void _status
-          thread.store.append({ type: 'approval.requested', turnId: turn.turnId, request })
+          const bounded = eventText(request.preview, 32 * 1024)
+          const preview = bounded.truncated
+            ? `${bounded.text}\n[Durable preview truncated; the approval broker retains the complete input. SHA-256: ${request.inputDigest}]`
+            : bounded.text
+          thread.store.append({ type: 'approval.requested', turnId: turn.turnId, request: { ...request, preview } })
         } else thread.store.append({ type: 'approval.resolved', turnId: turn.turnId, decision: event.decision })
       })
       this.threads.set(thread.threadId, thread)

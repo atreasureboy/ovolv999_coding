@@ -28,6 +28,7 @@ export async function runInkRepl(opts: InkReplOptions): Promise<void> {
       initialHistory: controller.getHistory(),
       getHistory: controller.getHistory,
       getModelHistory: controller.getModelHistory,
+      getContextBudget: controller.getContextBudget,
       onInterrupt: () => { void controller.interrupt().catch(error => opts.store.addError(error instanceof Error ? error.message : String(error))) },
       maxContextTokens: opts.maxContextTokens,
       cwd: opts.cwd,

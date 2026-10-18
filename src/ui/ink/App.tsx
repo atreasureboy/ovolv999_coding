@@ -38,18 +38,7 @@ import {
 } from '../../utils/terminalTitle.js'
 import { loadKeybindings, lookupAction } from '../keybindings.js'
 import type { OpenAIMessage } from '../../core/types.js'
-
-// ── Context calculation (lightweight — avoids importing full compact module) ──
-
-function estimateTokens(messages: OpenAIMessage[]): number {
-  let chars = 0
-  for (const m of messages) {
-    if (typeof m.content === 'string') chars += m.content.length
-    else if (Array.isArray(m.content)) chars += JSON.stringify(m.content).length
-    if (m.tool_calls) chars += JSON.stringify(m.tool_calls).length
-  }
-  return Math.ceil(chars / 4)
-}
+import { estimateTokens } from '../../core/compact.js'
 
 // ── Streaming cursor — blinking block at end of streaming text ──
 
@@ -82,6 +71,7 @@ export interface AppProps {
   initialHistory: OpenAIMessage[]
   getHistory?: () => OpenAIMessage[]
   getModelHistory?: () => OpenAIMessage[]
+  getContextBudget?: () => number
   displayUserViaEvents?: boolean
   onInterrupt?: () => void
   /** Max context tokens (for StatusBar). */
@@ -102,6 +92,7 @@ export function App({
   initialHistory,
   getHistory,
   getModelHistory,
+  getContextBudget,
   displayUserViaEvents = false,
   onInterrupt,
   maxContextTokens,
@@ -267,7 +258,8 @@ export function App({
   // ── Context state for StatusBar ───────────────────────────────────────────
 
   const tokens = estimateTokens(getModelHistory?.() ?? history)
-  const contextPct = maxContextTokens > 0 ? tokens / maxContextTokens : 0
+  const contextBudget = getContextBudget?.() ?? maxContextTokens
+  const contextPct = contextBudget > 0 ? tokens / contextBudget : 0
 
   // ── Render ────────────────────────────────────────────────────────────────
 
@@ -381,7 +373,7 @@ export function App({
         messageCount={history.length}
         contextPct={contextPct}
         tokenCount={tokens}
-        maxTokens={maxContextTokens}
+        maxTokens={contextBudget}
         cost={state.cost}
         apiCalls={state.apiCalls}
         unknownPriceRequests={state.unknownPriceRequests}

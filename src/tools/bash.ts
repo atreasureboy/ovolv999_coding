@@ -148,6 +148,7 @@ export interface BashToolOptions {
 export class BashTool implements Tool {
   name = 'Bash'
   metadata = {
+    shellCommand: true,
     concurrencySafe: false,
     longRunning: true,
     mutatesState: true,

@@ -1,5 +1,5 @@
 import { createServer, type ServerResponse } from 'node:http'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
@@ -7,12 +7,13 @@ import { ExecutionEngine } from '../../src/core/engine.js'
 import type { EngineObserver } from '../../src/core/engine/observer.js'
 import type { AgentEvent } from '../../src/core/agentEvents.js'
 import type { EngineConfig, OpenAIMessage } from '../../src/core/types.js'
-import { readSessionSnapshot, releaseSessionOwnership, saveSession } from '../../src/core/sessionManager.js'
+import { claimSessionOwnership, loadSession, readSessionSnapshot, releaseSessionOwnership, saveSession } from '../../src/core/sessionManager.js'
+import { resolveResumePath } from '../../src/cli/paths.js'
 import { AgentSessionClient } from '../../src/core/agentSessionClient.js'
 import { EventLog } from '../../src/core/eventLog.js'
 import { getSystemPrompt } from '../../src/prompts/system.js'
 import { isWorkspaceQuarantined } from '../../src/core/runContext.js'
-import { ApprovalBroker, type ApprovalRequest } from '../../src/core/approvalBroker.js'
+import { approvalInputDigest, ApprovalBroker, type ApprovalRequest } from '../../src/core/approvalBroker.js'
 import { PermissionManager } from '../../src/core/permissionSystem.js'
 import type { ProviderContinuationState } from '../../src/core/model/types.js'
 
@@ -41,9 +42,9 @@ async function fixture(options: { history?: OpenAIMessage[]; onEvent?: (event: A
   cleanups.push(async () => { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); rmSync(base, { recursive: true, force: true }) })
   const observer = { startSpinner: vi.fn(), stopSpinner: vi.fn(), beginAssistantText: vi.fn(), streamToken: vi.fn(), endAssistantText: vi.fn(), toolStart: vi.fn(), toolResult: vi.fn(), contextWarning: vi.fn(), compactStart: vi.fn(), compactDone: vi.fn(), warn: vi.fn(), error: vi.fn() } satisfies EngineObserver
   const events: AgentEvent[] = []
-  const createClient = () => {
-    const engine = new ExecutionEngine({ cwd, sessionDir, model: 'fixture', apiKey: 'fixture', baseURL: `http://127.0.0.1:${address.port}/v1`, enabledModules: [], maxIterations: 2, permissionMode: 'auto', ...(options.sessionResources ? { systemPrompt: getSystemPrompt(cwd, undefined, sessionDir), sessionSystemPrompt: (directory: string) => getSystemPrompt(cwd, undefined, directory), eventLog: new EventLog(sessionDir) } : { agent: { identity: { systemPrompt: () => 'fixture' }, tools: [] } }), ...options.engineConfig }, observer)
-    const client = new AgentSessionClient({ engine, observer, cwd, sessionDir, history: options.history, finalizationGraceMs: options.finalizationGraceMs, onEvent: async event => { events.push(event); await options.onEvent?.(event) } })
+  const createClient = (directory = sessionDir) => {
+    const engine = new ExecutionEngine({ cwd, sessionDir: directory, model: 'fixture', apiKey: 'fixture', baseURL: `http://127.0.0.1:${address.port}/v1`, enabledModules: [], maxIterations: 2, permissionMode: 'auto', ...(options.sessionResources ? { systemPrompt: getSystemPrompt(cwd, undefined, directory), sessionSystemPrompt: (directory: string) => getSystemPrompt(cwd, undefined, directory), eventLog: new EventLog(directory) } : { agent: { identity: { systemPrompt: () => 'fixture' }, tools: [] } }), ...options.engineConfig }, observer)
+    const client = new AgentSessionClient({ engine, observer, cwd, sessionDir: directory, history: options.history, finalizationGraceMs: options.finalizationGraceMs, onEvent: async event => { events.push(event); await options.onEvent?.(event) } })
     cleanups.push(() => client.dispose().catch(error => { if (!options.expectedDisposalFailure) throw error }))
     return client
   }
@@ -63,6 +64,66 @@ it('delivers durable events once while keeping the canonical transcript after ma
   expect(vi.mocked(observer.streamToken)).not.toHaveBeenCalled()
   expect(events.filter((event): event is Extract<AgentEvent, { type: 'item.delta' }> => event.type === 'item.delta' && event.itemId.startsWith('assistant:')).map(event => event.text).join('')).toBe('ready')
   expect(events.at(-1)?.type).toBe('turn.finished')
+})
+
+it('initializes a resumed junction session after the CLI has already claimed its writer', async () => {
+  const { cwd, sessionDir, createClient } = await fixture()
+  saveSession(sessionDir, [{ role: 'user', content: 'saved fixture history' }])
+  releaseSessionOwnership(sessionDir)
+  const alias = join(cwd, 'sessions', 'session_alias')
+  symlinkSync(sessionDir, alias, process.platform === 'win32' ? 'junction' : 'dir')
+  const resumed = resolveResumePath(cwd, alias)
+  claimSessionOwnership(resumed)
+  cleanups.push(() => { releaseSessionOwnership(resumed); return Promise.resolve() })
+  expect(loadSession(resumed)).toEqual([{ role: 'user', content: 'saved fixture history' }])
+  const client = createClient(resumed)
+  await expect(client.initialize()).resolves.toBeUndefined()
+  const result = (await client.runTurn('continue')).result
+  expect(result.status, JSON.stringify(result)).toBe('completed')
+})
+
+it.each([
+  { mode: 'ask', bytes: 140000 },
+  { mode: 'ask', bytes: 1000 },
+  { mode: 'auto', bytes: 140000 },
+  { mode: 'deny', bytes: 140000 },
+] as const)('keeps $mode approval with $bytes input bytes and the next Read usable', async ({ mode, bytes }) => {
+  const broker = new ApprovalBroker()
+  const reviewed: ApprovalRequest[] = []
+  broker.attachHost({ request: request => {
+    reviewed.push(request)
+    return Promise.resolve({ requestId: request.requestId, inputDigest: request.inputDigest, cwd: request.cwd, action: 'allow', scope: 'once', status: 'decided' })
+  } })
+  let target = ''
+  const content = 'x'.repeat(bytes)
+  const { client, cwd, events } = await fixture({ engineConfig: {
+    permissionMode: mode, approvalBroker: broker, maxIterations: 3,
+    agent: { identity: { systemPrompt: () => 'fixture' }, tools: ['Write', 'Read'] },
+  }, respond: (_request, res, index) => {
+    const name = index === 1 ? 'Write' : index === 3 ? 'Read' : undefined
+    const input = index === 1 ? { file_path: target, content } : { file_path: target }
+    const delta = name ? { tool_calls: [{ index: 0, id: `${name}-${index}`, type: 'function', function: { name, arguments: JSON.stringify(input) } }] } : { content: 'done' }
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+    res.end(`data: ${JSON.stringify({ choices: [{ index: 0, delta, finish_reason: name ? 'tool_calls' : 'stop' }] })}\n\ndata: [DONE]\n\n`)
+  } })
+  target = join(cwd, 'large.txt')
+  await client.runTurn('write the generated content')
+  expect(isWorkspaceQuarantined(cwd)).toBe(false)
+  expect(reviewed).toHaveLength(mode === 'ask' ? 1 : 0)
+  if (mode === 'ask') {
+    expect(JSON.parse(reviewed[0].preview)).toEqual({ file_path: target, content })
+    expect(reviewed[0].inputDigest).toBe(approvalInputDigest({ file_path: target, content }))
+    const durable = events.find((event): event is Extract<AgentEvent, { type: 'approval.requested' }> => event.type === 'approval.requested')!
+    expect(Buffer.byteLength(JSON.stringify(durable))).toBeLessThan(128 * 1024)
+    expect(durable.request.inputDigest).toBe(reviewed[0].inputDigest)
+    if (bytes > 128 * 1024) expect(durable.request.preview).toMatch(/truncated/i)
+  }
+  if (mode === 'deny') expect(existsSync(target)).toBe(false)
+  else expect(readFileSync(target, 'utf8')).toBe(content)
+  const next = await client.runTurn('read the generated file')
+  expect(isWorkspaceQuarantined(cwd)).toBe(false)
+  expect(next.result.output).not.toMatch(/recovery|unfinished operations/i)
+  if (mode !== 'deny') expect(next.result.status, next.result.output).toBe('completed')
 })
 
 it('waits for terminal event delivery and rejects overlapping client mutations', async () => {
