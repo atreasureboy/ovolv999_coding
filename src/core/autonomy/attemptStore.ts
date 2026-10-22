@@ -239,7 +239,7 @@ export class LoopAttemptStore {
     if (attemptId && !value.evidence.path.startsWith(`evidence/${attemptId}-`)) throw recovery('Checkpoint evidence belongs to another attempt')
     if (canonicalWorkspaceIdentity(evidence.workspace) !== this.state.workspace || evidence.definitionHash !== this.state.definitionHash || evidence.artifactVersion !== value.artifactVersion) throw recovery('Checkpoint evidence identity does not match the loop')
     const completed = value.decision.action === 'stop' && value.decision.status === 'completed'
-    if (completed && (value.verificationSource !== 'loop' || evidence.status !== 'passed' || evidence.sufficientForCompletion !== true || evidence.outcomeReason || evidence.unfinishedResources?.length || evidence.commands.some(command => !command.passed || command.cancelled || command.timedOut || command.unfinishedResources?.length) || !value.acceptedAt)) throw recovery('Successful checkpoint lacks complete independent acceptance evidence')
+    if (completed && (value.verificationSource !== 'loop' || evidence.status !== 'passed' || evidence.sufficientForCompletion !== true || evidence.outcomeReason || evidence.unfinishedResources?.length || !evidence.commands.length || evidence.commands.some(command => !command.passed || command.exitCode !== 0 || command.cancelled || command.timedOut || command.unfinishedResources?.length) || !value.acceptedAt)) throw recovery('Successful checkpoint lacks complete independent acceptance evidence')
     if (!completed && value.acceptedAt !== undefined) throw recovery('Non-success checkpoint cannot claim acceptance')
   }
 

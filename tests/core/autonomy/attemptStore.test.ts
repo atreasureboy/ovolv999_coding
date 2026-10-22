@@ -207,6 +207,83 @@ it('rejects a forged success and corruption of referenced evidence on resume', a
   await expect(open({ ...options, mode: 'resume' })).rejects.toMatchObject({ outcomeReason: { code: 'recovery_required', scope: 'session' } })
 })
 
+it.each([1, null])('rejects a passed command with exit code %s during checkpoint and revalidation without changing state', async exitCode => {
+  const options = setup()
+  const store = await open(options)
+  const state = settled(store)
+  const valid = checkpoint(store, options.sessionDir, true)
+  const evidence = store.readEvidence(valid.evidence)
+  evidence.commands[0].exitCode = exitCode
+  const invalid = { ...valid, evidence: store.writeEvidence(state.current!.id, evidence) }
+  const path = join(options.sessionDir, 'loop-controller', 'state.json')
+  const beforeCheckpoint = readFileSync(path, 'utf8')
+  expect(() => store.checkpoint(state.current!.id, state.revision, invalid, () => {})).toThrow()
+  expect(readFileSync(path, 'utf8')).toBe(beforeCheckpoint)
+  expect(store.snapshot()).toEqual(state)
+  const completed = store.checkpoint(state.current!.id, state.revision, valid, () => {})
+  const beforeRevalidation = readFileSync(path, 'utf8')
+  expect(() => store.revalidate(completed.revision, invalid, () => {})).toThrow()
+  expect(readFileSync(path, 'utf8')).toBe(beforeRevalidation)
+  expect(store.snapshot()).toEqual(completed)
+})
+
+it.each([1, null])('rejects a durable completed receipt with command exit code %s on resume and preserves it', async exitCode => {
+  const options = setup()
+  const store = await open(options)
+  const state = settled(store)
+  const value = checkpoint(store, options.sessionDir, true)
+  const completed = store.checkpoint(state.current!.id, state.revision, value, () => {})
+  const evidence = store.readEvidence(value.evidence)
+  evidence.commands[0].exitCode = exitCode
+  completed.current!.checkpoint!.evidence = store.writeEvidence(state.current!.id, evidence)
+  store.close()
+  const path = join(options.sessionDir, 'loop-controller', 'state.json')
+  const corrupted = JSON.stringify(completed)
+  writeFileSync(path, corrupted)
+  await expect(open({ ...options, mode: 'resume' })).rejects.toMatchObject({ outcomeReason: { code: 'recovery_required', scope: 'session' } })
+  expect(readFileSync(path, 'utf8')).toBe(corrupted)
+})
+
+it('rejects forged command-free success during checkpoint, revalidation and resume', async () => {
+  const options = setup()
+  const store = await open(options)
+  const state = settled(store)
+  const value = checkpoint(store, options.sessionDir, true)
+  const evidence = store.readEvidence(value.evidence)
+  evidence.commands = []
+  const invalid = { ...value, evidence: store.writeEvidence(state.current!.id, evidence) }
+  const path = join(options.sessionDir, 'loop-controller', 'state.json')
+  const before = readFileSync(path, 'utf8')
+  expect(() => store.checkpoint(state.current!.id, state.revision, invalid, () => {})).toThrow()
+  expect(readFileSync(path, 'utf8')).toBe(before)
+  const completed = store.checkpoint(state.current!.id, state.revision, value, () => {})
+  const beforeRevalidation = readFileSync(path, 'utf8')
+  expect(() => store.revalidate(completed.revision, invalid, () => {})).toThrow()
+  expect(readFileSync(path, 'utf8')).toBe(beforeRevalidation)
+  store.close()
+  completed.current!.checkpoint = invalid
+  const corrupted = JSON.stringify(completed)
+  writeFileSync(path, corrupted)
+  await expect(open({ ...options, mode: 'resume' })).rejects.toMatchObject({ outcomeReason: { code: 'recovery_required', scope: 'session' } })
+  expect(readFileSync(path, 'utf8')).toBe(corrupted)
+})
+
+it('retains command-free evidence for non-completed outcomes', async () => {
+  const options = setup()
+  const store = await open(options)
+  const state = settled(store)
+  const value = checkpoint(store, options.sessionDir)
+  const evidence = store.readEvidence(value.evidence)
+  evidence.status = 'not_applicable'
+  evidence.commands = []
+  value.evidence = store.writeEvidence(state.current!.id, evidence)
+  store.checkpoint(state.current!.id, state.revision, value, () => {})
+  store.close()
+  const resumed = await open({ ...options, mode: 'resume' })
+  expect(resumed.snapshot().current?.checkpoint?.decision).toEqual({ action: 'continue' })
+  expect(resumed.readEvidence(value.evidence).commands).toEqual([])
+})
+
 it('rejects an oversized terminal without overwriting the dispatched state', async () => {
   const options = setup()
   const store = await open(options)

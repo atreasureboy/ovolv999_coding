@@ -28,7 +28,7 @@ if (phase !== 'prepared') {
   state = store.settle(state.current.id, state.revision, { threadId: 'thread-1', turnId: 'turn-1', finishedSequence: 5, historyRevision: 2, status: 'completed', reason: 'stop_sequence', unfinishedResources: [] })
 }
 if (phase === 'before-checkpoint-rename') {
-  const evidence = store.writeEvidence(state.current.id, { status: 'passed', sufficientForCompletion: true, workspace: root, definitionHash: 'definition-1', artifactVersion: 'artifact-1', commands: [], output: 'passed', truncated: false })
+  const evidence = store.writeEvidence(state.current.id, { status: 'passed', sufficientForCompletion: true, workspace: root, definitionHash: 'definition-1', artifactVersion: 'artifact-1', commands: [{ kind: 'task_acceptance', command: 'check', passed: true, exitCode: 0, output: 'passed' }], output: 'passed', truncated: false })
   store.checkpoint(state.current.id, state.revision, { artifactVersion: 'artifact-1', evidence, verificationSource: 'loop', stagnation: { count: 0 }, decision: { action: 'stop', status: 'completed', detail: 'passed' }, acceptedAt: new Date().toISOString() }, () => {})
 }
 process.send({ phase })
