@@ -62,6 +62,7 @@ export async function acceptRunResult({
         () =>
           captureArtifactVersion(config.cwd, verificationPlan.excludedPaths, {
             signal: run.controller.signal,
+            artifactPolicy: verificationPlan.artifactPolicy,
           }),
         60000,
         config.cancellationGraceMs ?? 2000,
@@ -190,6 +191,7 @@ export async function acceptRunResult({
       () =>
         captureArtifactVersion(config.cwd, verificationPlan.excludedPaths, {
           signal: run.controller.signal,
+          artifactPolicy: verificationPlan.artifactPolicy,
         }),
       60000,
       config.cancellationGraceMs ?? 2000,

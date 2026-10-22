@@ -95,6 +95,8 @@ export class UsageLedger {
     this.pricing = options.pricing ?? usagePricing
   }
 
+  getRoot(): string | undefined { return this.root }
+
   private read(path: string, pending = false): UsageRecord {
     const stat = lstatSync(path)
     if (!stat.isFile() || stat.isSymbolicLink() || stat.size > maximumReceiptBytes) throw new Error('Usage receipt exceeds supported size or is not a regular file; preserve for recovery')

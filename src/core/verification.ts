@@ -2,16 +2,20 @@ import { currentExecutionPolicy, isManagedChild, spawnManaged, type ExecutionPro
 import { buildChildEnvironment, resolveManagedExecutionPolicy, type ExecutionPolicy } from './executionPolicy.js'
 import { createHash } from 'crypto'
 import { execFile } from 'child_process'
-import { accessSync, constants, existsSync, readFileSync, createReadStream, statSync } from 'fs'
-import { lstat, opendir, readlink } from 'fs/promises'
-import { delimiter, extname, join, relative, resolve, sep } from 'path'
+import { accessSync, constants, existsSync, readFileSync, statSync } from 'fs'
+import { delimiter, extname, join, resolve, sep } from 'path'
 import type { VerificationCommandResult, VerificationEvidence } from './outcome.js'
 import { quarantineWorkspace } from './runContext.js'
+import { captureArtifactVersion } from './artifactInventory.js'
+import { createLoopArtifactPolicy, type LoopArtifactPolicy } from './artifactPolicy.js'
+import { canonicalWorkspaceIdentity } from './workspaceLease.js'
+export { captureArtifactVersion, type ArtifactScanOptions } from './artifactInventory.js'
 
 export type VerificationKind = 'compile' | 'lint' | 'unit' | 'integration' | 'task_acceptance'
 export interface VerificationCheck { kind: VerificationKind; scope: string }
 
 export interface VerificationPlan {
+  artifactPolicy?: LoopArtifactPolicy
   checks: readonly VerificationCheck[]
   workspace: string
   commands: readonly string[]
@@ -45,8 +49,8 @@ export function detectVerifyCommands(cwd: string): string[] {
   return has('tsconfig.json') ? ['npx tsc --noEmit 2>&1'] : []
 }
 
-function definitionHash(cwd: string, commands: readonly string[], excludedPaths: readonly string[], checks: readonly VerificationCheck[]): string {
-  const hash = createHash('sha256').update(JSON.stringify({ commands, excludedPaths, checks }))
+function definitionHash(cwd: string, commands: readonly string[], excludedPaths: readonly string[], checks: readonly VerificationCheck[], artifactPolicy?: LoopArtifactPolicy): string {
+  const hash = createHash('sha256').update(JSON.stringify({ commands, excludedPaths, checks, ...(artifactPolicy ? { artifactPolicy } : {}) }))
   for (const name of ['package.json', 'pyproject.toml', 'setup.py', 'requirements.txt', 'go.mod', 'Cargo.toml', 'tsconfig.json']) {
     hash.update(name)
     if (existsSync(join(cwd, name))) hash.update(readFileSync(join(cwd, name)))
@@ -54,107 +58,13 @@ function definitionHash(cwd: string, commands: readonly string[], excludedPaths:
   return hash.digest('hex')
 }
 
-export function createVerificationPlan(cwd: string, commands: readonly string[] = detectVerifyCommands(cwd), runtimePaths: readonly string[] = [], kinds?: readonly VerificationCheck[]): VerificationPlan {
-  const workspace = resolve(cwd)
-  const excludedPaths = [...new Set(runtimePaths.map(path => resolve(path)).filter(path => path.startsWith(workspace + sep)))].sort()
+export function createVerificationPlan(cwd: string, commands: readonly string[] = detectVerifyCommands(cwd), runtimePaths: readonly string[] = [], kinds?: readonly VerificationCheck[], artifactPolicy?: LoopArtifactPolicy): VerificationPlan {
+  const policy = artifactPolicy ? createLoopArtifactPolicy(artifactPolicy) : undefined
+  const workspace = policy?.workspace ?? resolve(cwd)
+  if (policy && createLoopArtifactPolicy({ ...policy, workspace: cwd }).workspace !== policy.workspace) throw new Error('Artifact policy workspace mismatch')
+  const excludedPaths = policy ? [] : [...new Set(runtimePaths.map(path => resolve(path)).filter(path => path.startsWith(workspace + sep)))].sort()
   const checks = commands.map((command, index) => Object.freeze<VerificationCheck>(kinds?.[index] ?? { kind: /(?:compileall|cargo check|go vet|tsc|typecheck|run build)/.test(command) ? 'compile' : /lint/.test(command) ? 'lint' : /test|pytest|vitest/.test(command) ? 'unit' : 'task_acceptance', scope: 'workspace' }))
-  return Object.freeze({ checks: Object.freeze(checks), workspace, commands: Object.freeze([...commands]), excludedPaths: Object.freeze(excludedPaths), definitionHash: definitionHash(cwd, commands, excludedPaths, checks) })
-}
-
-const excludedDirectories = new Set(['.git', 'node_modules', 'dist', 'build', 'coverage', '.artifacts', '.loop', '.ovogo', '__pycache__', '.pytest_cache', 'target'])
-const excludedFiles = new Set(['ovogo_progress.json', 'agent_events.ndjson'])
-
-export interface ArtifactScanOptions {
-  signal?: AbortSignal
-  maxFiles?: number
-  maxBytes?: number
-  timeoutMs?: number
-  concurrency?: number
-  onMetrics?: (metrics: { files: number; bytes: number; durationMs: number }) => void
-}
-
-export async function captureArtifactVersion(cwd: string, excludedPaths: readonly string[] = [], options: ArtifactScanOptions = {}): Promise<string> {
-  const started = Date.now()
-  const budget = { maxFiles: options.maxFiles ?? 100_000, maxBytes: options.maxBytes ?? 2 * 1024 ** 3, timeoutMs: options.timeoutMs ?? 30_000, concurrency: options.concurrency ?? 4 }
-  for (const value of Object.values(budget)) if (!Number.isSafeInteger(value) || value < 1) throw new Error('Invalid artifact scan budget')
-  const timeout = new AbortController()
-  const signal = options.signal ? AbortSignal.any([options.signal, timeout.signal]) : timeout.signal
-  const timer = setTimeout(() => timeout.abort(new Error('Artifact scan time budget exceeded')), budget.timeoutMs)
-  let bytes = 0
-  let filesRead = 0
-  let visited = 0
-  try {
-    signal.throwIfAborted()
-    const hash = createHash('sha256').update(resolve(cwd))
-    if (!existsSync(cwd)) return hash.update('missing-workspace').digest('hex')
-    const inventory = await new Promise<Array<{ name: string; tracked: boolean }> | undefined>((resolveInventory, reject) => {
-      execFile('git', ['ls-files', '-t', '-z', '--cached', '--others', '--exclude-standard'], { cwd, signal, encoding: 'utf8', timeout: Math.min(5000, budget.timeoutMs), maxBuffer: 16 * 1024 * 1024, windowsHide: true }, (error, stdout) => {
-        if (signal.aborted) reject(signal.reason instanceof Error ? signal.reason : new Error('Artifact scan cancelled'))
-        else if (error && !/not a git repository/i.test(String((error as Error & { stderr?: string }).stderr ?? error.message)) && (error as NodeJS.ErrnoException).code !== 'ENOENT') reject(new Error(error.message, { cause: error }))
-        else resolveInventory(error ? undefined : stdout.split('\0').filter(Boolean).map(entry => ({ name: entry.slice(2), tracked: entry[0] !== '?' })))
-      })
-    })
-    const excluded = (path: string): boolean => excludedPaths.some(entry => path === resolve(entry) || path.startsWith(resolve(entry) + sep))
-    const names = new Set<string>()
-    const add = (name: string): void => {
-      names.add(name.replaceAll('\\', '/'))
-      if (names.size > budget.maxFiles) throw new Error('Artifact file budget exceeded')
-    }
-    for (const file of inventory ?? []) if (file.tracked || !file.name.split(/[\\/]/).some(part => excludedDirectories.has(part) || excludedFiles.has(part))) add(file.name)
-    async function collect(dir: string): Promise<void> {
-      signal.throwIfAborted()
-      for await (const entry of await opendir(dir)) {
-        signal.throwIfAborted()
-        if (++visited > budget.maxFiles * 2) throw new Error('Artifact traversal budget exceeded')
-        if (excludedDirectories.has(entry.name) || excludedFiles.has(entry.name)) continue
-        const path = join(dir, entry.name)
-        if (excluded(path)) continue
-        if (entry.isDirectory()) await collect(path)
-        else add(relative(cwd, path))
-      }
-    }
-    await collect(cwd)
-    const ordered = [...names].sort()
-    const digests: string[] = Array.from({ length: ordered.length }, () => '')
-    let cursor = 0
-    await Promise.all(Array.from({ length: Math.min(budget.concurrency, ordered.length) }, async () => {
-      for (;;) {
-        const index = cursor++
-        if (index >= ordered.length) return
-        signal.throwIfAborted()
-        const name = ordered[index]
-        const path = resolve(cwd, name)
-        if (excluded(path)) { digests[index] = ''; continue }
-        const fileHash = createHash('sha256').update(name).update('\0')
-        try {
-          const before = await lstat(path)
-          fileHash.update(String(before.mode))
-          if (before.isSymbolicLink()) fileHash.update(await readlink(path))
-          else if (before.isFile()) {
-            if (bytes + before.size > budget.maxBytes) throw new Error('Artifact byte budget exceeded')
-            filesRead++
-            for await (const chunk of createReadStream(path, { signal, highWaterMark: 64 * 1024 })) {
-              bytes += (chunk as Buffer).length
-              if (bytes > budget.maxBytes) throw new Error('Artifact byte budget exceeded')
-              fileHash.update(chunk as Buffer)
-            }
-            const after = await lstat(path)
-            if (before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ino !== after.ino) throw new Error('Artifact changed during hashing; scan invalidated')
-          }
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-          fileHash.update('deleted')
-        }
-        digests[index] = fileHash.digest('hex')
-      }
-    }))
-    signal.throwIfAborted()
-    return hash.update(digests.join('\0')).digest('hex')
-  } finally {
-    clearTimeout(timer)
-    timeout.abort()
-    options.onMetrics?.({ files: filesRead, bytes, durationMs: Date.now() - started })
-  }
+  return Object.freeze({ ...(policy ? { artifactPolicy: policy } : {}), checks: Object.freeze(checks), workspace, commands: Object.freeze([...commands]), excludedPaths: Object.freeze(excludedPaths), definitionHash: definitionHash(cwd, commands, excludedPaths, checks, policy) })
 }
 
 export function runVerificationCommand(command: string, cwd: string, signal?: AbortSignal, timeoutMs = 60_000, profile?: ExecutionProfile, policy?: ExecutionPolicy): Promise<VerificationCommandResult> {
@@ -258,13 +168,14 @@ async function executeCommand(command: string, cwd: string, signal: AbortSignal 
 export async function executeVerification(options: { cwd: string; plan?: VerificationPlan; signal?: AbortSignal; runId?: string; artifactVersion?: string; timeoutMs?: number; executionProfile?: ExecutionProfile; executionPolicy?: ExecutionPolicy }): Promise<VerificationEvidence> {
   const { cwd, signal, runId, timeoutMs } = options
   const plan = options.plan ?? createVerificationPlan(cwd)
-  const artifactVersion = options.artifactVersion ?? await captureArtifactVersion(cwd, plan.excludedPaths, { signal })
-  const evidence: VerificationEvidence = { status: 'not_run', workspace: resolve(cwd), artifactVersion, definitionHash: plan.definitionHash, runId, commands: [], output: '', sufficientForCompletion: plan.checks.some(check => ['unit', 'integration', 'task_acceptance'].includes(check.kind)) }
-  if (plan.workspace !== resolve(cwd) || definitionHash(cwd, plan.commands, plan.excludedPaths, plan.checks) !== plan.definitionHash) {
+  const workspace = plan.artifactPolicy ? canonicalWorkspaceIdentity(cwd) : resolve(cwd)
+  const artifactVersion = options.artifactVersion ?? await captureArtifactVersion(cwd, plan.excludedPaths, { signal, artifactPolicy: plan.artifactPolicy })
+  const evidence: VerificationEvidence = { status: 'not_run', workspace, artifactVersion, definitionHash: plan.definitionHash, runId, commands: [], output: '', sufficientForCompletion: plan.checks.some(check => ['unit', 'integration', 'task_acceptance'].includes(check.kind)) }
+  if (plan.workspace !== workspace || definitionHash(cwd, plan.commands, plan.excludedPaths, plan.checks, plan.artifactPolicy) !== plan.definitionHash) {
     return { ...evidence, status: 'failed', outcomeReason: { code: 'acceptance_invalidated' }, output: 'Frozen verification definition or workspace changed during execution.' }
   }
   if (signal?.aborted) return { ...evidence, output: 'Verification cancelled.' }
-  if (artifactVersion !== await captureArtifactVersion(cwd, plan.excludedPaths, { signal })) return { ...evidence, status: 'failed', outcomeReason: { code: 'acceptance_invalidated' }, output: 'Artifact changed before verification began.' }
+  if (artifactVersion !== await captureArtifactVersion(cwd, plan.excludedPaths, { signal, artifactPolicy: plan.artifactPolicy })) return { ...evidence, status: 'failed', outcomeReason: { code: 'acceptance_invalidated' }, output: 'Artifact changed before verification began.' }
   if (!plan.commands.length) return { ...evidence, status: 'not_applicable', output: 'No executable project verification checks were discovered.' }
   for (const [index, command] of plan.commands.entries()) {
     let result: VerificationCommandResult
@@ -278,7 +189,7 @@ export async function executeVerification(options: { cwd: string; plan?: Verific
   evidence.unfinishedResources = evidence.commands.flatMap(command => command.unfinishedResources ?? [])
   if (evidence.unfinishedResources.length) return { ...evidence, outcomeReason: { code: 'recovery_required', scope: 'resources' } }
   if (signal?.aborted || evidence.commands.some(command => command.cancelled || command.timedOut || command.exitCode === null || command.exitCode === 127 || command.exitCode === 9009)) return { ...evidence, status: 'failed', outcomeReason: { code: 'verification_unavailable' }, output: evidence.output + '\nVerification did not complete executable acceptance.' }
-  if (artifactVersion !== await captureArtifactVersion(cwd, plan.excludedPaths, { signal }) || definitionHash(cwd, plan.commands, plan.excludedPaths, plan.checks) !== plan.definitionHash) {
+  if (artifactVersion !== await captureArtifactVersion(cwd, plan.excludedPaths, { signal, artifactPolicy: plan.artifactPolicy }) || definitionHash(cwd, plan.commands, plan.excludedPaths, plan.checks, plan.artifactPolicy) !== plan.definitionHash) {
     evidence.status = 'failed'
     evidence.outcomeReason = { code: 'acceptance_invalidated' }
     evidence.output += '\nArtifact or acceptance definition changed during verification; evidence is stale.'

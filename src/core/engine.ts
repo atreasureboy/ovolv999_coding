@@ -14,6 +14,7 @@ import { runHookOperation } from './hookLifecycle.js'
 import { createHash, randomUUID } from 'crypto'
 import { join, resolve } from 'node:path'
 import { UsageLedger } from './usageLedger.js'
+import { createLoopArtifactPolicy } from './artifactPolicy.js'
 import { getBudgetPath } from './budget.js'
 import { nativeModelAdapter, resolveModelInputBudget, resolveModelRuntime } from './modelRuntime.js'
 import { AdapterError } from './model/common.js'
@@ -175,6 +176,7 @@ export class ExecutionEngine {
           }
         : undefined,
     })
+    if (this.config.artifactPolicy) this.config.artifactPolicy = createLoopArtifactPolicy(this.config.artifactPolicy)
     config = this.config
     this.renderer = renderer
     this.client =
@@ -875,16 +877,17 @@ export class ExecutionEngine {
       const planMode = this.isPlanMode()
       const verificationPlan = createVerificationPlan(this.config.cwd, undefined, [
         ...(this.config.verificationExcludedPaths ?? []),
-        ...(this.config.sessionDir ? [this.config.sessionDir] : []),
+        ...(!this.config.artifactPolicy && this.config.sessionDir ? [this.config.sessionDir] : []),
         getBudgetPath(this.config.budgetRoot ?? this.config.cwd),
         `${getBudgetPath(this.config.budgetRoot ?? this.config.cwd)}.lock.owners`,
-      ])
+      ], undefined, this.config.artifactPolicy)
       const startingArtifact = await runOperation(
         run,
         'artifact:snapshot',
         () =>
           captureArtifactVersion(this.config.cwd, verificationPlan.excludedPaths, {
             signal: run.controller.signal,
+            artifactPolicy: verificationPlan.artifactPolicy,
           }),
         60000,
         this.config.cancellationGraceMs ?? 2000,

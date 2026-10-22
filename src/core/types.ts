@@ -1,3 +1,4 @@
+import type { LoopArtifactPolicy } from './artifactPolicy.js'
 import type { ModelGatewayPolicy } from './providerAdmission.js'
 import type { EffortLevel } from './effort.js'
 import type { ExecutionProfile } from './executionBackend.js'
@@ -287,6 +288,7 @@ export interface IHookRunner {
 }
 
 export interface EngineConfig {
+  artifactPolicy?: LoopArtifactPolicy
   requireToolApproval?: boolean
   resolveRuntimeConfiguration?: () => Partial<Pick<EngineConfig, 'model' | 'apiKey' | 'baseURL' | 'modelProtocol' | 'temperature' | 'maxOutputTokens' | 'permissionMode' | 'requireToolApproval'>>
   modelProtocol?: ModelProtocol

@@ -6,6 +6,20 @@ import { describe, expect, it } from 'vitest'
 import { captureArtifactVersion, createVerificationPlan, executeVerification } from '../src/core/verification.js'
 
 describe('verification evidence', () => {
+  it.each(['runtime', 'report'])('uses the loop policy for every verification scan when writing %s', async kind => {
+    const cwd = mkdtempSync(join(tmpdir(), 'ovogo-loop-evidence-'))
+    const sessionDir = join(cwd, '.ovogo', 'sessions', 'current')
+    mkdirSync(sessionDir, { recursive: true })
+    mkdirSync(join(cwd, '.loop'))
+    const policy = { mode: 'loop' as const, workspace: cwd, loopDir: join(cwd, '.loop'), sessionDir, budgetPath: join(cwd, 'budgets.json'), runtimeRoot: join(cwd, 'runtime') }
+    writeFileSync(join(cwd, 'check.cjs'), kind === 'runtime'
+      ? "const fs=require('fs');fs.writeFileSync('.loop/STATE.md','changed');fs.writeFileSync('budgets.json','updated');fs.writeFileSync('.ovogo/sessions/current/history.json','updated')"
+      : "require('fs').writeFileSync('.ovogo/sessions/current/report.md','user report')")
+    const plan = createVerificationPlan(cwd, ['node check.cjs'], [sessionDir], undefined, policy)
+    const evidence = await executeVerification({ cwd, plan })
+    expect(evidence.status).toBe(kind === 'runtime' ? 'passed' : 'failed')
+    if (kind === 'report') expect(evidence.outcomeReason).toEqual({ code: 'acceptance_invalidated' })
+  })
   it.skipIf(process.platform !== 'win32').each([
     { command: 'node.exe', pathExt: '.CMD' },
     { command: 'artex_explicit_batch.cmd', pathExt: '.EXE' },
