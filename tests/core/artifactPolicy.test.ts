@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { createServer } from 'node:http'
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -300,4 +300,79 @@ it('accepts a frozen verification plan through a workspace junction alias', asyn
   const evidence = await executeVerification({ cwd: alias, plan })
   expect(evidence.status, evidence.output).toBe('passed')
   expect(evidence.workspace).toBe(canonicalWorkspaceIdentity(cwd))
+})
+
+it.skipIf(process.platform !== 'win32').each([false, true])('ignores actual Windows case-variant managed files without hiding user reports (git=%s)', async git => {
+  const { cwd, policy, write, scan } = fixture(git)
+  if (git) {
+    renameSync(join(policy.loopDir, 'STATE.md'), join(policy.loopDir, 'rename-state.tmp'))
+    renameSync(join(policy.loopDir, 'rename-state.tmp'), join(policy.loopDir, 'state.md'))
+    execFileSync('git', ['-c', 'core.ignorecase=false', 'add', '-A'], { cwd, stdio: 'ignore' })
+    expect(execFileSync('git', ['ls-files'], { cwd, encoding: 'utf8' })).toContain('.loop/state.md')
+  }
+  const before = await scan()
+  const id = randomUUID().toUpperCase()
+  const session = '.ovogo/sessions/current/'
+  const paths = [
+    '.loop/state.md', '.loop/done.FLAG', '.loop/outcome.JSON', '.loop/parked.flag',
+    ...[
+      'HISTORY.JSON', `HISTORY.JSON.TMP.123.1700000000000.${'A'.repeat(16)}`,
+      `AGENT-MODEL-WINDOW.JSON.TMP-${id}`, `AGENT-RESULTS/${id}.JSON.TMP-${id}`,
+      'AGENT-EVENTS/MANIFEST.JSON', `AGENT-EVENTS/SNAPSHOT-0000000000000001.JSON.TMP-${id}`,
+      'AGENT-EVENTS/SEGMENT-0000000000000001.JSONL', 'EVENTS.NDJSON.1', 'AGENT_EVENTS.NDJSON',
+      'LOOP-CONTROLLER/STATE.JSON', `FILE-HISTORY/${'A'.repeat(32)}/V1700000000000_1.META.JSON`,
+      'TOOL-RESULTS/RESULT_1700000000000_ABC123.TXT', 'TASK-OUTPUTS/TASK_ABCD1234.LOG.1', 'AGENT-LOGS/AGENT-0.LOG',
+      '.BG_LOGS/1700000000000_NODE_ABC1.LOG', '.SHELL_LOGS/SHELL_1234.LOG',
+    ].map(name => session + name),
+    `custom-usage/${'A'.repeat(64)}/${'B'.repeat(64)}.PENDING.JSON.${id}.TMP`,
+    `budget-root/.ovolv999/BUDGETS.JSON.${id}.TMP`, `.ovolv999/WORKTREES.JSON.${id}.TMP`,
+    'OVOGO_PROGRESS.JSON', '.BG_LOGS/1700000000000_NODE_FOLLOW.LOG', '.SHELL_LOGS/SHELL_65535.LOG',
+  ]
+  for (const path of paths) write(path, 'first runtime write')
+  expect(await scan()).toBe(before)
+  for (const path of paths) write(path, 'later runtime write')
+  expect(await scan()).toBe(before)
+  write(session + 'AGENT-EVENTS/REPORT.JSON', 'user report')
+  expect(await scan()).not.toBe(before)
+})
+
+it.skipIf(process.platform !== 'win32')('compares Windows ticket filenames without folding encoded owner identities', async () => {
+  const { cwd, policy, write, scan } = fixture()
+  const before = await scan()
+  const target = join(policy.sessionDir, 'WRITER')
+  const guard = acquirePersistenceLeaseSync(target)
+  try {
+    const owner = readdirSync(target + '.LOCK.OWNERS')[0]
+    const directory = join(target + '.LOCK.OWNERS', owner)
+    renameSync(join(directory, 'ticket'), join(directory, 'rename-ticket.tmp'))
+    renameSync(join(directory, 'rename-ticket.tmp'), join(directory, 'TICKET'))
+    guard.assertOwned()
+    expect(await scan()).toBe(before)
+    expect(isLoopRuntimeArtifact(join(directory, 'TICKET.TMP'), createLoopArtifactPolicy(policy))).toBe(true)
+    const corruptedIdentity = Buffer.from(JSON.stringify({ owner: guard.owner, token: guard.token })).toString('base64url').toLowerCase()
+    const malformed = `.ovogo/sessions/current/AGENT-EVENTS/WRITER.LOCK.OWNERS/${corruptedIdentity}/TICKET`
+    write(malformed, '1')
+    expect(isLoopRuntimeArtifact(join(cwd, malformed), createLoopArtifactPolicy(policy))).toBe(false)
+    expect(await scan()).not.toBe(before)
+  } finally { guard.release() }
+})
+
+it.skipIf(process.platform !== 'win32')('validates Windows case-variant run records and their temporary and ticket paths', async () => {
+  const { cwd, policy, write, scan } = fixture()
+  const before = await scan()
+  const run = new RunStore(policy.runtimeRoot, { workspace: cwd, runId: 'Case_Run-1' })
+  const uppercase = join(policy.runtimeRoot, 'runs', 'CASE_RUN-1.JSON')
+  renameSync(run.path, run.path + '.rename')
+  renameSync(run.path + '.rename', uppercase)
+  const temporary = `runtime/RUNS/CASE_RUN-1.JSON.${randomUUID().toUpperCase()}.TMP`
+  write(temporary, 'in-progress record')
+  const guard = acquirePersistenceLeaseSync(uppercase)
+  try {
+    expect(RunStore.inspect(uppercase).runId).toBe('Case_Run-1')
+    expect(await scan()).toBe(before)
+    expect(isLoopRuntimeArtifact(uppercase, createLoopArtifactPolicy(policy))).toBe(true)
+    expect(isLoopRuntimeArtifact(join(cwd, temporary), createLoopArtifactPolicy(policy))).toBe(true)
+  } finally { guard.release() }
+  write('runtime/RUNS/CASE_RUN-1.JSON', '{broken')
+  expect(await scan()).not.toBe(before)
 })

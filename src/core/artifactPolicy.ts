@@ -27,6 +27,7 @@ const events = new RegExp(`^agent-events/(?:manifest\\.json|snapshot\\.json|snap
 const fileHistory = new RegExp(`^file-history/(?:index\\.json${sessionTemp}|[a-f0-9]{32}/v[0-9]+_[0-9]+(?:\\.meta\\.json${sessionTemp})?)$`)
 const usage = new RegExp(`^[a-f0-9]{64}/[a-f0-9]{64}(?:\\.pending)?\\.json(?:\\.${uuid}\\.tmp)?$`)
 const tokenPattern = new RegExp(`^${uuid}$`)
+const runName = new RegExp('^([a-zA-Z0-9][\\w-]{0,127}\\.json)(?:$|\\.)', process.platform === 'win32' ? 'i' : '')
 const policies = new WeakSet<object>()
 
 function identity(path: string): string {
@@ -58,7 +59,7 @@ function mainManifest(workspace: string): string | undefined {
         if (!pointer) return undefined
         const gitDir = realpathSync(resolve(directory, pointer))
         const commonDir = realpathSync(resolve(gitDir, metadata(join(gitDir, 'commondir'))))
-        if (basename(commonDir) !== '.git' || !lstatSync(commonDir).isDirectory()) return undefined
+        if (pathKey(basename(commonDir)) !== '.git' || !lstatSync(commonDir).isDirectory()) return undefined
         return identity(join(dirname(commonDir), '.ovolv999', 'worktrees.json'))
       } catch { return undefined }
     }
@@ -92,12 +93,17 @@ function pathKey(path: string): string {
   return process.platform === 'win32' ? path.toLowerCase() : path
 }
 
+function managedName(path: string, root: string): string | undefined {
+  const name = within(path, root)
+  return name === undefined ? undefined : pathKey(name)
+}
+
 function lockArtifact(path: string, target: string): boolean {
   if (pathKey(path) === pathKey(target + '.lock')) return true
   const name = within(path, target + '.lock.owners')
   if (!name) return false
   const parts = name.split('/')
-  if (parts.length !== 2 || !['ticket', 'ticket.tmp'].includes(parts[1]) || !/^[A-Za-z0-9_-]+$/.test(parts[0])) return false
+  if (parts.length !== 2 || !['ticket', 'ticket.tmp'].includes(pathKey(parts[1])) || !/^[A-Za-z0-9_-]+$/.test(parts[0])) return false
   try {
     const decoded = Buffer.from(parts[0], 'base64url')
     if (decoded.toString('base64url') !== parts[0]) return false
@@ -110,7 +116,7 @@ function lockArtifact(path: string, target: string): boolean {
 }
 
 function durableArtifact(path: string, target: string): boolean {
-  return pathKey(path) === pathKey(target) || durableTemp.test(path.slice(target.length)) && pathKey(path).startsWith(pathKey(target)) || lockArtifact(path, target)
+  return pathKey(path) === pathKey(target) || durableTemp.test(pathKey(path.slice(target.length))) && pathKey(path).startsWith(pathKey(target)) || lockArtifact(path, target)
 }
 
 function defaultLog(name: string | undefined): boolean {
@@ -122,7 +128,7 @@ function defaultLog(name: string | undefined): boolean {
 
 function runArtifact(path: string, policy: LoopArtifactPolicy): boolean {
   const name = within(path, join(policy.runtimeRoot, 'runs'))
-  const recordName = name?.match(/^([a-zA-Z0-9][\w-]{0,127}\.json)(?:$|\.)/)?.[1]
+  const recordName = name?.match(runName)?.[1]
   if (!recordName) return false
   const recordPath = join(policy.runtimeRoot, 'runs', recordName)
   if (!durableArtifact(path, recordPath)) return false
@@ -144,11 +150,11 @@ export function isLoopRuntimeArtifact(path: string, policy: LoopArtifactPolicy):
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false
     try { canonical = canonicalSessionDirectory(path) } catch { return false }
   }
-  const session = within(canonical, policy.sessionDir)
+  const session = managedName(canonical, policy.sessionDir)
   if (session === 'loop-controller' || session?.startsWith('loop-controller/')) return true
   if (directory) return false
   const loop = within(canonical, policy.loopDir)
-  if (loop !== undefined && ['STATE.md', 'DONE.flag', 'OUTCOME.json', 'PARKED.flag'].includes(loop)) return true
+  if (loop !== undefined && ['STATE.md', 'DONE.flag', 'OUTCOME.json', 'PARKED.flag'].some(name => pathKey(name) === pathKey(loop))) return true
   if (session !== undefined && (
     history.test(session) || modelWindow.test(session) || results.test(session) || events.test(session) || fileHistory.test(session)
     || ['events.ndjson', 'events.ndjson.1', 'agent_events.ndjson'].includes(session)
@@ -157,9 +163,9 @@ export function isLoopRuntimeArtifact(path: string, policy: LoopArtifactPolicy):
     || /^agent-logs\/agent-(?:0|[1-9][0-9]*)\.log$/.test(session)
   )) return true
   if (lockArtifact(canonical, join(policy.sessionDir, 'writer')) || lockArtifact(canonical, join(policy.sessionDir, 'agent-events', 'writer'))) return true
-  const receipt = policy.usageRoot === undefined ? undefined : within(canonical, policy.usageRoot)
+  const receipt = policy.usageRoot === undefined ? undefined : managedName(canonical, policy.usageRoot)
   if (receipt !== undefined && usage.test(receipt)) return true
-  const workspace = within(canonical, policy.workspace)
+  const workspace = managedName(canonical, policy.workspace)
   if (workspace === 'ovogo_progress.json' || defaultLog(workspace) || defaultLog(session)) return true
   if (durableArtifact(canonical, policy.budgetPath)) return true
   const lease = join(policy.runtimeRoot, 'workspaces', createHash('sha256').update(policy.workspace).digest('hex') + '.json')

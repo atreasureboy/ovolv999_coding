@@ -102,7 +102,7 @@ function validRunOwner(value: unknown): value is ProcessIdentity {
 
 function validRunMetadata(value: Record<string, unknown>, path: string): boolean {
   return value.schemaVersion === 1
-    && identity(value.runId) && basename(path) === value.runId + '.json'
+    && identity(value.runId) && (process.platform === 'win32' ? basename(path).toLowerCase() === (value.runId + '.json').toLowerCase() : basename(path) === value.runId + '.json')
     && (value.parentRunId === undefined || identity(value.parentRunId))
     && text(value.workspace, 32768) && text(value.epoch, 128)
     && Number.isSafeInteger(value.revision) && Number(value.revision) >= 0
