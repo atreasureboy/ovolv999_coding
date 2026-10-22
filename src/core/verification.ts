@@ -170,7 +170,9 @@ function bareCommandAvailable(command: string, cwd: string, profile?: ExecutionP
   const env = buildChildEnvironment(resolveManagedExecutionPolicy(profile, policy ?? currentExecutionPolicy(cwd), cwd), process.env)
   const environment = (key: string): string | undefined => Object.entries(env).find(([name]) => process.platform === 'win32' ? name.toUpperCase() === key : name === key)?.[1]
   const executableExtensions = process.platform === 'win32' ? (environment('PATHEXT') ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean).map(extension => extension.toLowerCase()) : []
-  const extensions = process.platform === 'win32' ? executableExtensions.includes(extname(command).toLowerCase()) ? [''] : executableExtensions : ['']
+  const explicitExtension = extname(command).toLowerCase()
+  const explicitExecutable = ['.com', '.exe', '.bat', '.cmd'].includes(explicitExtension) || executableExtensions.includes(explicitExtension)
+  const extensions = process.platform === 'win32' ? explicitExecutable ? [''] : executableExtensions : ['']
   const directories = [...(process.platform === 'win32' ? [cwd] : []), ...(environment('PATH') ?? '').split(delimiter)]
   return directories.some(directory => extensions.some(extension => {
     try {

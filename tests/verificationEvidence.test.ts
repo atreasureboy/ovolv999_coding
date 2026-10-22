@@ -6,6 +6,25 @@ import { describe, expect, it } from 'vitest'
 import { captureArtifactVersion, createVerificationPlan, executeVerification } from '../src/core/verification.js'
 
 describe('verification evidence', () => {
+  it.skipIf(process.platform !== 'win32').each([
+    { command: 'node.exe', pathExt: '.CMD' },
+    { command: 'artex_explicit_batch.cmd', pathExt: '.EXE' },
+  ])('runs explicit $command independently of PATHEXT $pathExt', async ({ command, pathExt }) => {
+    const cwd = mkdtempSync(join(tmpdir(), 'ovogo-evidence-'))
+    writeFileSync(join(cwd, 'artex_explicit_batch.cmd'), '@exit /b 0\r\n')
+    const previousPathExt = process.env.PATHEXT
+    process.env.PATHEXT = pathExt
+    try {
+      const evidence = await executeVerification({ cwd, plan: createVerificationPlan(cwd, [command]) })
+      expect(evidence.status).toBe('passed')
+      expect(evidence.commands[0].exitCode).toBe(0)
+      expect(evidence.outcomeReason).toBeUndefined()
+    } finally {
+      if (previousPathExt === undefined) delete process.env.PATHEXT
+      else process.env.PATHEXT = previousPathExt
+    }
+  })
+
   it('rejects a plain file that the platform cannot execute as verification unavailable', async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'ovogo-evidence-'))
     const executable = 'artex_plain_probe'
