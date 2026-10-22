@@ -24,7 +24,7 @@ import { tmuxLayout } from '../ui/tmuxLayout.js'
 import { appendFileSync } from 'fs'
 import { join, resolve } from 'path'
 import { createVerificationPlan, captureArtifactVersion, executeVerification } from '../core/verification.js'
-import { normalizeOutcome, settleWithin } from '../core/outcome.js'
+import { normalizeOutcome, OutcomeError, outcomeReasonStatus, selectOutcomeReason, settleWithin } from '../core/outcome.js'
 import type { VerificationEvidence } from '../core/outcome.js'
 import { getWorktreeManager } from './worktree.js'
 import { randomUUID } from 'crypto'
@@ -241,7 +241,7 @@ Failed or unavailable verification prevents acceptance of code changes.
       }
     }
     const workspace = workspaceIdentity(taskContext.cwd)
-    if (isWorkspaceQuarantined(workspace)) return { content: 'Workspace is blocked by unfinished child resources.', isError: true, status: 'blocked' }
+    if (isWorkspaceQuarantined(workspace)) return { content: 'Workspace is blocked by unfinished child resources.', isError: true, status: 'blocked', outcomeReason: { code: 'recovery_required', scope: 'resources' } }
     const queueKey = `${workspace}:${this.parentConfig.initialAgentDepth ?? 0}`
     const previous = workspaceQueues.get(queueKey) ?? Promise.resolve()
     let release!: () => void
@@ -251,11 +251,11 @@ Failed or unavailable verification prevents acceptance of code changes.
     try {
       await previous
       if (taskContext.signal?.aborted) return { content: 'Cancelled before child execution.', isError: true, status: 'cancelled' }
-      if (isWorkspaceQuarantined(workspace)) return { content: 'Workspace is blocked by unfinished child resources.', isError: true, status: 'blocked' }
+      if (isWorkspaceQuarantined(workspace)) return { content: 'Workspace is blocked by unfinished child resources.', isError: true, status: 'blocked', outcomeReason: { code: 'recovery_required', scope: 'resources' } }
       return await withWorkspaceAccess(taskContext.cwd, taskContext.runFamilyId, true, taskContext.signal ?? new AbortController().signal,
         () => this.runAgentTask(description, prompt, agentConfig, agentLabel, verify, taskContext, worktreeName, context.cwd))
     } catch (error) {
-      return { content: (error as Error).message, isError: true, status: taskContext.signal?.aborted ? 'cancelled' : 'failed' }
+      return { content: (error as Error).message, isError: true, status: taskContext.signal?.aborted ? 'cancelled' : error instanceof OutcomeError ? outcomeReasonStatus(error.outcomeReason) : 'failed', ...(error instanceof OutcomeError ? { outcomeReason: error.outcomeReason } : {}) }
     } finally {
       release()
       if (workspaceQueues.get(queueKey) === queued) workspaceQueues.delete(queueKey)
@@ -461,7 +461,7 @@ Failed or unavailable verification prevents acceptance of code changes.
             verification = await executeVerification({ cwd: context.cwd, plan, signal: context.signal, runId: context.runId, artifactVersion })
           }
           if (context.signal?.aborted) status = 'cancelled'
-          else if (verification.status === 'failed') status = 'failed'
+          else if (verification.status === 'failed') status = verification.outcomeReason ? outcomeReasonStatus(verification.outcomeReason) : 'failed'
           else if (changed && verification.status !== 'passed') status = 'blocked'
         }
         if (status === 'completed' && verification.status === 'passed' && worktreeName && artifact) {
@@ -471,6 +471,7 @@ Failed or unavailable verification prevents acceptance of code changes.
         response = {
           content: '[' + agentLabel + '] "' + description + '" (' + status + '):\n\n' + (result.output || 'No text output.') + verifySection,
           isError: status !== 'completed', status, verification,
+          outcomeReason: selectOutcomeReason(result.outcomeReason, verification.outcomeReason),
         }
         const summary = result.output.split('\n').filter(line => line.trim()).slice(0, 8).join('\n')
         if (summary) mainRenderer.agentSummary(agentLabel, description, summary)
@@ -479,6 +480,7 @@ Failed or unavailable verification prevents acceptance of code changes.
       response = {
         content: '[' + agentLabel + '] "' + description + '" error: ' + (error as Error).message,
         isError: true, status: context.signal?.aborted ? 'cancelled' : 'failed',
+        ...(error instanceof OutcomeError ? { outcomeReason: error.outcomeReason } : {}),
       }
     } finally {
       clearInterval(heartbeatTimer)
@@ -487,7 +489,7 @@ Failed or unavailable verification prevents acceptance of code changes.
         await settleWithin(disposal, 3000)
       } catch (error) {
         quarantineWorkspace(context.cwd, disposal)
-        response = { ...response, isError: true, status: 'blocked', content: (response?.content ?? '') + '\nChild cleanup failed: ' + (error as Error).message }
+        response = { ...response, isError: true, status: 'blocked', outcomeReason: { code: 'recovery_required', scope: 'resources' }, content: (response?.content ?? '') + '\nChild cleanup failed: ' + (error as Error).message }
       }
       if (abortListener) context.signal?.removeEventListener('abort', abortListener)
       if (paneSlot) {
@@ -498,7 +500,7 @@ Failed or unavailable verification prevents acceptance of code changes.
     if (response.verification?.status === 'passed' && response.status === 'completed') {
       try {
         if (response.verification.artifactVersion !== await captureArtifactVersion(context.cwd, verificationExcludedPaths)) {
-          response = { ...response, isError: true, status: 'failed', verification: { ...response.verification, status: 'failed', output: `${response.verification.output}\nArtifact changed during child cleanup.` } }
+          response = { ...response, isError: true, status: 'blocked', outcomeReason: { code: 'acceptance_invalidated' }, verification: { ...response.verification, status: 'failed', outcomeReason: { code: 'acceptance_invalidated' }, output: `${response.verification.output}\nArtifact changed during child cleanup.` } }
         }
       } catch (error) {
         response = { ...response, isError: true, status: 'blocked', content: `${response.content}\nCannot recheck final artifact: ${(error as Error).message}` }

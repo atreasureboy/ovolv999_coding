@@ -5,6 +5,7 @@ import { acquirePersistenceLease } from './persistenceLock.js'
 import { inspectProcessIdentity, type ProcessIdentity } from './processIdentity.js'
 import { durableWrite, runtimeStateRoot } from './runtimeState.js'
 import { RunStore, operationNeedsRecovery } from './runStore.js'
+import { OutcomeError } from './outcome.js'
 
 const runInspectionCache = new Map<string, { fingerprint: string; workspace: string; pending: boolean }>()
 
@@ -65,7 +66,7 @@ async function assertOperationsReconciled(cwd: string, root: string, recovery: b
     for (const [operationId, operation] of operations) unresolved.push(`${record.runId}/${operationId} (${operation.name}; receipt=${operation.receipt?.status ?? 'absent'}; effects=${operation.receipt?.effects ?? 'unknown'})`)
   }
   if (unresolved.length) {
-    const error = new Error(`Workspace needs operation reconciliation before reuse: ${unresolved.join(', ')}. Use --recover-operation for each exact operation; physical-stop confirmation does not resolve unknown effects`)
+    const error = new OutcomeError(`Workspace needs operation reconciliation before reuse: ${unresolved.join(', ')}. Use --recover-operation for each exact operation; physical-stop confirmation does not resolve unknown effects`, { code: 'recovery_required', scope: 'operation' })
     error.name = 'WorkspaceUnavailableError'
     throw error
   }
@@ -90,7 +91,7 @@ export async function acquireWorkspaceLease(cwd: string, options: { signal?: Abo
   try {
     const prior = readWorkspaceLease(cwd, options.stateRoot)
     if (prior && prior.state !== 'released') {
-      const error = new Error(`Workspace needs recovery; previous epoch ${prior.epoch}, owner ${prior.owner.pid}. Confirm physical resources stopped before explicit reconciliation: ${path}`)
+      const error = new OutcomeError(`Workspace needs recovery; previous epoch ${prior.epoch}, owner ${prior.owner.pid}. Confirm physical resources stopped before explicit reconciliation: ${path}`, { code: 'recovery_required', scope: 'workspace' })
       error.name = 'WorkspaceUnavailableError'
       throw error
     }

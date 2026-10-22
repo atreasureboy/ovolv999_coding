@@ -7,6 +7,7 @@ import { ExecutionEngine, type EngineObserver } from '../../../src/core/engine.j
 import { globalModuleRegistry } from '../../../src/core/moduleRegistry.js'
 import * as verification from '../../../src/core/verification.js'
 import type { EngineConfig } from '../../../src/core/types.js'
+import { OperationTimeoutError } from '../../../src/core/runContext.js'
 
 const directories: string[] = []
 const engines: ExecutionEngine[] = []
@@ -66,8 +67,10 @@ describe('engine timeout outcomes', () => {
     await vi.advanceTimersByTimeAsync(130_001)
     const { result } = await pending
     expect(signal.aborted).toBe(true)
-    expect(String(signal.reason)).toMatch(/^timeout:/)
+    expect(signal.reason).toBeInstanceOf(OperationTimeoutError)
+    expect(signal.reason.message).toBe('timeout:model:stream')
     expect(result).toMatchObject({ status: 'failed', reason: 'error', verification: { status: 'not_run' } })
+    expect(result.outcomeReason?.code).not.toBe('acceptance_failed')
     expect(result.unfinishedResources).toEqual([])
   })
 
@@ -88,7 +91,8 @@ describe('engine timeout outcomes', () => {
     const signal = await started.promise
     await vi.advanceTimersByTimeAsync(60_001)
     const { result } = await pending
-    expect(String(signal.reason)).toBe('timeout:boot:' + name)
+    expect(signal.reason).toBeInstanceOf(OperationTimeoutError)
+    expect(signal.reason.message).toBe('timeout:boot:' + name)
     expect(result.status).toBe('failed')
     expect(result.unfinishedResources).toEqual([])
   })
@@ -109,8 +113,10 @@ describe('engine timeout outcomes', () => {
     const signal = await started.promise
     await vi.advanceTimersByTimeAsync(300_001)
     const { result } = await pending
-    expect(String(signal.reason)).toBe('timeout:verification')
+    expect(signal.reason).toBeInstanceOf(OperationTimeoutError)
+    expect(signal.reason.message).toBe('timeout:verification')
     expect(result).toMatchObject({ status: 'failed', reason: 'error', verification: { status: 'failed' } })
+    expect(result.outcomeReason).toEqual({ code: 'verification_unavailable' })
     expect(result.unfinishedResources).toEqual([])
   })
 

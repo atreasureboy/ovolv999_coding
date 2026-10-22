@@ -45,6 +45,18 @@ function setup(overrides: Partial<EngineConfig> = {}, targets = ['approved-targe
 }
 
 describe('engine approval wiring', () => {
+  it('classifies an explicit human denial from the real broker decision', async () => {
+    const broker = new ApprovalBroker()
+    let requestId = ''
+    broker.attachHost({ request: async request => {
+      requestId = request.requestId
+      return { requestId, inputDigest: request.inputDigest, cwd: request.cwd, action: 'deny', scope: 'once', status: 'decided' }
+    } })
+    const { engine, execute } = setup({ approvalBroker: broker })
+    const { result } = await engine.runTurn('deny', [])
+    expect(execute).not.toHaveBeenCalled()
+    expect(result).toMatchObject({ status: 'failed', outcomeReason: { code: 'permission_denied', source: 'approval', requestId } })
+  })
   it('rejects a legacy approval after the reviewed input changes', async () => {
     const { engine, execute } = setup({ requestPermission: (_tool, input) => {
       input.target = 'unreviewed-target'
@@ -53,6 +65,7 @@ describe('engine approval wiring', () => {
     const turn = await engine.runTurn('request approval', [])
     expect(execute).not.toHaveBeenCalled()
     expect(turn.result.status).toBe('blocked')
+    expect(turn.result.outcomeReason).toEqual({ code: 'approval_stale' })
   })
 
   it('rejects a legacy approval after the Engine workspace changes', async () => {
@@ -94,6 +107,7 @@ describe('engine approval wiring', () => {
     const turn = await engine.runTurn('request approval without a host', [])
     expect(execute.mock.calls).toHaveLength(0)
     expect(turn.result.status).toBe('needs_input')
+    expect(turn.result.outcomeReason).toMatchObject({ code: 'approval_required', requestId: expect.any(String) })
     expect(broker.pendingSnapshot()).toMatchObject([{ runId: turn.result.runId, tool: 'ApprovalProbe', status: 'needs_input' }])
   })
 

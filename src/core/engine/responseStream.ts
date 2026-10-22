@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { OperationTimeoutError } from '../runContext.js'
 import type OpenAI from 'openai'
 import type { TokenUsage } from '../costTracker.js'
 import { ThinkingTagFilter } from '../thinkingTagFilter.js'
@@ -42,7 +43,7 @@ export async function consumeModelStream(
   const watchdog = setInterval(() => {
     if (Date.now() - lastChunkTime > STREAM_TIMEOUT_MS) {
       if (turnController) {
-        turnController.abort('timeout:model:stream')
+        turnController.abort(new OperationTimeoutError('model:stream'))
       }
     }
   }, 10000)

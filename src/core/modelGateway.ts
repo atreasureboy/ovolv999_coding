@@ -13,6 +13,7 @@ import { usagePricing } from './modelPricing.js'
 import { AdapterError } from './model/common.js'
 import type { ModelRequestOptions } from './modelRequestPolicy.js'
 import { reserveModelBudget, type ModelBudgetReservation } from './budget.js'
+import { OutcomeError } from './outcome.js'
 
 const anonymousClients = new WeakMap<object, string>()
 
@@ -106,7 +107,7 @@ export function createModelGateway(client: OpenAI, config: EngineConfig, current
       return wire
     })
     const estimated = estimateTokens(messages) + estimateToolDefinitionTokens(params.tools)
-    if (estimated + maxTokens > window) throw new Error(`Context budget exceeded before request: estimated ${estimated} input + ${maxTokens} reserved output > ${window}`)
+    if (estimated + maxTokens > window) throw new OutcomeError(`Context budget exceeded before request: estimated ${estimated} input + ${maxTokens} reserved output > ${window}`, { code: 'budget_denied', kind: 'context' })
     const controller = new AbortController()
     const signal = controller.signal
     const onParentAbort = () => controller.abort(parentSignal?.reason)
@@ -138,11 +139,11 @@ export function createModelGateway(client: OpenAI, config: EngineConfig, current
           if (settled) return
           settled = true
           reservation.settle(usage)
-          try { projectReservation.settle(usage, dispatched) } catch (error) { settlementError = new Error('Project model budget settlement failed; preserve reserved usage for recovery', { cause: error }) }
+          try { projectReservation.settle(usage, dispatched) } catch (error) { settlementError = new OutcomeError('Project model budget settlement failed; preserve reserved usage for recovery', { code: 'recovery_required', scope: 'budget' }, { cause: error }) }
           try {
             ledger.recordUsage({ ...usage, ...identity, durationMs: Date.now() - startedAt })
             emit(phase, { attempt, usage: usage.kind, input_tokens: usage.inputTokens, output_tokens: usage.outputTokens })
-          } catch (error) { settlementError ??= new Error('Model usage settlement failed; preserve pending usage for recovery', { cause: error }) }
+          } catch (error) { settlementError ??= new OutcomeError('Model usage settlement failed; preserve pending usage for recovery', { code: 'recovery_required', scope: 'budget' }, { cause: error }) }
         }
         try {
           ledger.beginUsage({ ...identity, kind: 'unknown' })

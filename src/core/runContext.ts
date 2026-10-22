@@ -7,6 +7,14 @@ import { acquireWorkspaceLease } from './workspaceLease.js'
 import { createProcessScope } from './executionBackend.js'
 import { RunStore } from './runStore.js'
 import { runtimeStateRoot } from './runtimeState.js'
+import { OutcomeError, type OutcomeReason } from './outcome.js'
+
+export class OperationTimeoutError extends Error {
+  constructor(readonly operation: string) {
+    super(`timeout:${operation}`)
+    this.name = 'OperationTimeoutError'
+  }
+}
 
 export interface RunContext {
   runId: string
@@ -19,6 +27,8 @@ export interface RunContext {
   pending: Map<string, Promise<unknown>>
   toolFailures: Map<string, ToolResult>
   mutationAttempted: boolean
+  stopReason?: OutcomeReason
+  interrupted?: boolean
   result?: TurnResult
   store?: RunStore
   detachParent: () => void
@@ -101,7 +111,7 @@ export async function runOperation<T>(run: RunContext, name: string, operation: 
         }
         run.controller.signal.addEventListener('abort', onAbort, { once: true })
         if (run.controller.signal.aborted) onAbort()
-        timeout = setTimeout(() => run.controller.abort(`timeout:${name}`), timeoutMs)
+        timeout = setTimeout(() => run.controller.abort(new OperationTimeoutError(name)), timeoutMs)
       }),
     ])
   } finally {
@@ -144,7 +154,7 @@ export async function withWorkspaceAccess<T>(cwd: string, familyId: string, writ
       if (isWorkspaceQuarantined(cwd)) {
         gate.waiters.delete(attempt)
         signal.removeEventListener('abort', onAbort)
-        const error = new Error('Workspace is quarantined by unfinished operations')
+        const error = new OutcomeError('Workspace is quarantined by unfinished operations', { code: 'recovery_required', scope: 'resources' })
         error.name = 'WorkspaceUnavailableError'
         reject(error)
         return
@@ -187,7 +197,7 @@ export async function withWorkspaceAccess<T>(cwd: string, familyId: string, writ
     const owned = await durable.ready
     signal.throwIfAborted()
     if (isWorkspaceQuarantined(cwd)) {
-      const error = new Error('Workspace is quarantined by unfinished operations')
+      const error = new OutcomeError('Workspace is quarantined by unfinished operations', { code: 'recovery_required', scope: 'resources' })
       error.name = 'WorkspaceUnavailableError'
       throw error
     }

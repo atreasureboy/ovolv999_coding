@@ -4,6 +4,7 @@ import { resolveManagedExecutionPolicy } from '../executionPolicy.js'
 import type { PermissionManager } from '../permissionSystem.js'
 import type { RunContext } from '../runContext.js'
 import type { EngineConfig, ToolContext, ToolResult } from '../types.js'
+import type { OutcomeReason } from '../outcome.js'
 
 export interface OperationApprovalState {
   config: EngineConfig
@@ -44,13 +45,13 @@ export async function requestOperationApproval(
   input: Record<string, unknown>,
   riskLevel: 'safe' | 'needs-approval' | 'dangerous',
   context: Pick<ToolContext, 'cwd' | 'runId' | 'signal'>,
-): Promise<{ approved: boolean; feedback?: string; status?: ToolResult['status'] }> {
+): Promise<{ approved: boolean; feedback?: string; status?: ToolResult['status']; outcomeReason?: OutcomeReason }> {
   const inputDigest = approvalInputDigest(input)
   const sessionId = sessionIdentity(state.config)
   const cwd = context.cwd
   const reviewedPolicy = policyDigest(state)
   context.signal?.throwIfAborted()
-  let result: { approved: boolean; feedback?: string; status?: ToolResult['status'] }
+  let result: { approved: boolean; feedback?: string; status?: ToolResult['status']; outcomeReason?: OutcomeReason }
   if (state.config.approvalBroker) {
     const decision = await state.config.approvalBroker.request({
       requestId: randomUUID(),
@@ -69,6 +70,13 @@ export async function requestOperationApproval(
       approved: decision.action === 'allow' && decision.status === 'decided',
       feedback: decision.feedback,
       ...(decision.status === 'needs_input'
+        ? { outcomeReason: { code: 'approval_required', requestId: decision.requestId } as const }
+        : decision.status === 'stale'
+          ? { outcomeReason: { code: 'approval_stale', requestId: decision.requestId } as const }
+          : decision.status === 'decided' && decision.action === 'deny'
+            ? { outcomeReason: { code: 'permission_denied', source: 'approval', requestId: decision.requestId } as const }
+            : {}),
+      ...(decision.status === 'needs_input'
         ? { status: 'needs_input' as const }
         : decision.status === 'cancelled'
           ? { status: 'cancelled' as const }
@@ -79,7 +87,7 @@ export async function requestOperationApproval(
   } else if (state.config.requestPermission) {
     result = await state.config.requestPermission(tool, input, riskLevel)
   } else {
-    return { approved: false, feedback: 'No approval channel is available.', status: 'needs_input' }
+    return { approved: false, feedback: 'No approval channel is available.', status: 'needs_input', outcomeReason: { code: 'approval_required' } }
   }
   context.signal?.throwIfAborted()
   if (
@@ -94,7 +102,10 @@ export async function requestOperationApproval(
       feedback:
         'Input, session, workspace, or execution policy changed during approval. Request approval again.',
       status: 'blocked',
+      outcomeReason: { code: 'approval_stale' },
     }
   }
+  if (!result.approved && !result.outcomeReason && result.status !== 'cancelled') result.outcomeReason = result.status === 'needs_input'
+    ? { code: 'approval_required' } : result.status === 'blocked' ? { code: 'approval_stale' } : { code: 'permission_denied', source: 'approval' }
   return result
 }

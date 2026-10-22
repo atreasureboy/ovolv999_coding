@@ -68,6 +68,23 @@ async function fixture(protocol: ModelProtocol = 'chat-completions', handler?: (
 }
 
 const params = { model: 'fixture-model', messages: [{ role: 'user' as const, content: 'hi' }], max_tokens: 100 }
+it('classifies preflight context rejection without dispatching a model request', async () => {
+  const f = await fixture()
+  await expect(f.client().chat.completions.create({ ...params, messages: [{ role: 'user', content: 'z'.repeat(200000) }] })).rejects.toMatchObject({ outcomeReason: { code: 'budget_denied', kind: 'context' } })
+  expect(f.requests).toEqual([])
+})
+
+it('preserves the recovery classification when project budget settlement fails', async () => {
+  const f = await fixture('chat-completions', response => {
+    writeFileSync(getBudgetPath(f.cwd), '{broken')
+    response.writeHead(200, { 'Content-Type': 'application/json' })
+    response.end(JSON.stringify({ choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: 'done' } }], usage: { prompt_tokens: 10, completion_tokens: 5 } }))
+    return true
+  })
+  setBudget(f.cwd, { name: 'cap', type: 'requests', period: 'daily', limit: 1 })
+  await expect(f.client().chat.completions.create(params)).rejects.toMatchObject({ outcomeReason: { code: 'recovery_required', scope: 'budget' } })
+  expect(f.requests).toHaveLength(1)
+})
 const history: OpenAIMessage[] = Array.from({ length: 24 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user', content: `history ${index}` }))
 
 it.each(['chat-completions', 'responses', 'anthropic'] as const)('automatically counts and blocks real %s engine calls at the request cap', async protocol => {
@@ -77,7 +94,9 @@ it.each(['chat-completions', 'responses', 'anthropic'] as const)('automatically 
   expect(first.result.status, first.result.output).toBe('completed')
   expect(getUsage(f.cwd, 'cap')?.spent).toBe(1)
   const second = await f.engine.runTurn('Second', first.newHistory)
-  expect(second.result.status).toBe('failed')
+  expect(second.result.status).toBe('limit_reached')
+  expect(second.result.outcomeReason).toEqual({ code: 'budget_denied', kind: 'requests' })
+  expect(getUsage(f.cwd, 'cap')?.spent).toBe(1)
   expect(second.result.output).toMatch(/budget/i)
   expect(f.requests).toHaveLength(1)
 })
@@ -277,6 +296,7 @@ it('rejects unknown model prices before dispatch under an enforced cost budget',
   const f = await fixture()
   setBudget(f.cwd, { name: 'cost', type: 'cost', period: 'daily', limit: 1 })
   await expect(f.client().chat.completions.create(params)).rejects.toThrow(/price|pricing/i)
+  await expect(f.client().chat.completions.create(params)).rejects.toMatchObject({ outcomeReason: { code: 'budget_denied', kind: 'pricing' } })
   expect(f.requests).toHaveLength(0)
 })
 
@@ -285,6 +305,7 @@ it('fails closed on damaged budget persistence', async () => {
   setBudget(f.cwd, { name: 'cap', type: 'requests', period: 'daily', limit: 1 })
   writeFileSync(getBudgetPath(f.cwd), '{broken')
   await expect(f.client().chat.completions.create(params)).rejects.toThrow(/budget/i)
+  expect((await f.engine.runTurn('blocked', [])).result).toMatchObject({ status: 'blocked', outcomeReason: { code: 'recovery_required', scope: 'budget' } })
   expect(f.requests).toHaveLength(0)
 })
 

@@ -5,6 +5,7 @@ import { isDeepStrictEqual } from 'node:util'
 import { acquirePersistenceLeaseSync, type PersistenceLease } from './persistenceLock.js'
 import { inspectProcessIdentitySync, type ProcessIdentity } from './processIdentity.js'
 import type { AgentEvent, AgentEventInput, AgentThreadSnapshot } from './agentEvents.js'
+import { isOutcomeReason } from './outcome.js'
 
 export interface AgentEventStoreOptions {
   sessionDir: string
@@ -152,6 +153,8 @@ function validateEvent(value: unknown, threadId: string, cwd: string): asserts v
     if (value.type === 'item.completed') {
       if (typeof value.status !== 'string' || (!outcomeStatuses.has(value.status) && value.status !== 'partial')) throw new Error('Invalid item terminal status')
       if (typeof value.result !== 'string' && (!record(value.result) || typeof value.result.content !== 'string' || typeof value.result.isError !== 'boolean')) throw new Error('Invalid item result')
+      if (record(value.result)) validateOutcomeReasons(value.result)
+      if (record(value.verification)) validateOutcomeReasons(value.verification)
       if (value.truncated !== undefined && typeof value.truncated !== 'boolean') throw new Error('Invalid item truncation flag')
       if (value.artifact !== undefined && typeof value.artifact !== 'string') throw new Error('Invalid item artifact')
     }
@@ -161,6 +164,7 @@ function validateEvent(value: unknown, threadId: string, cwd: string): asserts v
     if (typeof value.status !== 'string' || !outcomeStatuses.has(value.status) || !integer(value.historyRevision) || !record(value.result) || typeof value.result.output !== 'string' || typeof value.result.stopped !== 'boolean' || !['max_iterations', 'stop_sequence', 'error', 'interrupted'].includes(String(value.result.reason))) throw new Error('Invalid turn terminal')
     if (value.result.runId !== undefined && value.result.runId !== value.turnId) throw new Error('Turn result identity mismatch')
     if (value.result.status !== undefined && value.result.status !== value.status) throw new Error('Turn result status mismatch')
+    validateOutcomeReasons(value.result)
     if (value.truncated !== undefined && typeof value.truncated !== 'boolean') throw new Error('Invalid turn truncation flag')
     if (value.artifact !== undefined && typeof value.artifact !== 'string') throw new Error('Invalid turn artifact')
   } else if (value.type === 'approval.requested') {
@@ -173,6 +177,11 @@ function validateEvent(value: unknown, threadId: string, cwd: string): asserts v
   } else if (value.type === 'error') {
     if (typeof value.code !== 'string' || !value.code || typeof value.message !== 'string') throw new Error('Invalid error event')
   } else throw new Error('Unknown event type')
+}
+
+function validateOutcomeReasons(value: Record<string, unknown>): void {
+  if (value.outcomeReason !== undefined && !isOutcomeReason(value.outcomeReason)) throw new Error('Invalid outcome reason')
+  if (record(value.verification)) validateOutcomeReasons(value.verification)
 }
 
 function applyEvent(state: AgentThreadSnapshot, event: AgentEvent): void {
@@ -214,6 +223,7 @@ function applyEvent(state: AgentThreadSnapshot, event: AgentEvent): void {
       if (event.artifact !== undefined) state.lastTurn.artifact = event.artifact
       state.activeTurn = null
       state.historyRevision = event.historyRevision
+      if (event.result.outcomeReason?.code === 'recovery_required') state.recovery = 'recovery_required'
     } else if (event.type === 'approval.requested') {
       if (state.pendingApprovals.some(request => request.requestId === event.request.requestId)) throw new Error('Approval request is already pending')
       state.pendingApprovals.push({ ...event.request, status: 'needs_input' })

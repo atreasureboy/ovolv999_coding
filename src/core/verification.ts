@@ -1,10 +1,10 @@
-import { isManagedChild, spawnManaged, type ExecutionProfile } from './executionBackend.js'
-import type { ExecutionPolicy } from './executionPolicy.js'
+import { currentExecutionPolicy, isManagedChild, spawnManaged, type ExecutionProfile } from './executionBackend.js'
+import { buildChildEnvironment, resolveManagedExecutionPolicy, type ExecutionPolicy } from './executionPolicy.js'
 import { createHash } from 'crypto'
 import { execFile } from 'child_process'
-import { existsSync, readFileSync, createReadStream } from 'fs'
+import { existsSync, readFileSync, createReadStream, statSync } from 'fs'
 import { lstat, opendir, readlink } from 'fs/promises'
-import { join, relative, resolve, sep } from 'path'
+import { delimiter, join, relative, resolve, sep } from 'path'
 import type { VerificationCommandResult, VerificationEvidence } from './outcome.js'
 import { quarantineWorkspace } from './runContext.js'
 
@@ -158,7 +158,22 @@ export async function captureArtifactVersion(cwd: string, excludedPaths: readonl
 }
 
 export function runVerificationCommand(command: string, cwd: string, signal?: AbortSignal, timeoutMs = 60_000, profile?: ExecutionProfile, policy?: ExecutionPolicy): Promise<VerificationCommandResult> {
+  if (/^[A-Za-z0-9_.-]+$/.test(command) && !bareCommandAvailable(command, cwd, profile, policy)) return Promise.resolve({ command, passed: false, exitCode: null, output: 'Verification executable is unavailable in the reviewed child PATH.' })
   return executeCommand(command, cwd, signal, timeoutMs, undefined, profile, policy)
+}
+
+function bareCommandAvailable(command: string, cwd: string, profile?: ExecutionProfile, policy?: ExecutionPolicy): boolean {
+  const builtins = process.platform === 'win32'
+    ? ['assoc', 'break', 'call', 'cd', 'chdir', 'cls', 'color', 'copy', 'date', 'del', 'dir', 'echo', 'endlocal', 'erase', 'exit', 'for', 'ftype', 'goto', 'if', 'md', 'mkdir', 'mklink', 'move', 'path', 'pause', 'popd', 'prompt', 'pushd', 'rd', 'rem', 'ren', 'rename', 'rmdir', 'set', 'setlocal', 'shift', 'start', 'time', 'title', 'type', 'ver', 'verify', 'vol']
+    : ['alias', 'bg', 'break', 'cd', 'command', 'continue', 'echo', 'eval', 'exec', 'exit', 'export', 'false', 'fc', 'fg', 'getopts', 'hash', 'jobs', 'kill', 'pwd', 'read', 'readonly', 'return', 'set', 'shift', 'times', 'trap', 'true', 'type', 'ulimit', 'umask', 'unalias', 'unset', 'wait']
+  if (builtins.includes(process.platform === 'win32' ? command.toLowerCase() : command)) return true
+  const env = buildChildEnvironment(resolveManagedExecutionPolicy(profile, policy ?? currentExecutionPolicy(cwd), cwd), process.env)
+  const environment = (key: string): string | undefined => Object.entries(env).find(([name]) => process.platform === 'win32' ? name.toUpperCase() === key : name === key)?.[1]
+  const extensions = process.platform === 'win32' ? ['', ...(environment('PATHEXT') ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean)] : ['']
+  const directories = [...(process.platform === 'win32' ? [cwd] : []), ...(environment('PATH') ?? '').split(delimiter)]
+  return directories.some(directory => extensions.some(extension => {
+    try { return statSync(resolve(cwd, directory, command + extension)).isFile() } catch { return false }
+  }))
 }
 
 export function runFileVerificationCommand(executable: string, args: readonly string[], cwd: string, signal?: AbortSignal, timeoutMs = 60_000, policy?: ExecutionPolicy): Promise<VerificationCommandResult> {
@@ -238,23 +253,28 @@ export async function executeVerification(options: { cwd: string; plan?: Verific
   const artifactVersion = options.artifactVersion ?? await captureArtifactVersion(cwd, plan.excludedPaths, { signal })
   const evidence: VerificationEvidence = { status: 'not_run', workspace: resolve(cwd), artifactVersion, definitionHash: plan.definitionHash, runId, commands: [], output: '', sufficientForCompletion: plan.checks.some(check => ['unit', 'integration', 'task_acceptance'].includes(check.kind)) }
   if (plan.workspace !== resolve(cwd) || definitionHash(cwd, plan.commands, plan.excludedPaths, plan.checks) !== plan.definitionHash) {
-    return { ...evidence, status: 'failed', output: 'Frozen verification definition or workspace changed during execution.' }
+    return { ...evidence, status: 'failed', outcomeReason: { code: 'acceptance_invalidated' }, output: 'Frozen verification definition or workspace changed during execution.' }
   }
   if (signal?.aborted) return { ...evidence, output: 'Verification cancelled.' }
-  if (artifactVersion !== await captureArtifactVersion(cwd, plan.excludedPaths, { signal })) return { ...evidence, status: 'failed', output: 'Artifact changed before verification began.' }
+  if (artifactVersion !== await captureArtifactVersion(cwd, plan.excludedPaths, { signal })) return { ...evidence, status: 'failed', outcomeReason: { code: 'acceptance_invalidated' }, output: 'Artifact changed before verification began.' }
   if (!plan.commands.length) return { ...evidence, status: 'not_applicable', output: 'No executable project verification checks were discovered.' }
   for (const [index, command] of plan.commands.entries()) {
-    const result = await runVerificationCommand(command, cwd, signal, timeoutMs, options.executionProfile, options.executionPolicy)
+    let result: VerificationCommandResult
+    try { result = await runVerificationCommand(command, cwd, signal, timeoutMs, options.executionProfile, options.executionPolicy) }
+    catch (error) { return { ...evidence, status: 'failed', outcomeReason: { code: 'verification_unavailable' }, output: String(error) } }
     evidence.commands.push({ ...result, ...plan.checks[index] })
     if (result.cancelled || result.timedOut) break
   }
   evidence.status = evidence.commands.length === plan.commands.length && evidence.commands.every(command => command.passed) ? 'passed' : 'failed'
   evidence.output = evidence.commands.map(command => `${command.passed ? 'PASS' : 'FAILED'} ${command.command}\n${command.output}`).join('\n\n')
   evidence.unfinishedResources = evidence.commands.flatMap(command => command.unfinishedResources ?? [])
-  if (signal?.aborted) return { ...evidence, status: 'failed', output: evidence.output + '\nVerification cancelled; acceptance was not completed.' }
+  if (evidence.unfinishedResources.length) return { ...evidence, outcomeReason: { code: 'recovery_required', scope: 'resources' } }
+  if (signal?.aborted || evidence.commands.some(command => command.cancelled || command.timedOut || command.exitCode === null || command.exitCode === 127 || command.exitCode === 9009)) return { ...evidence, status: 'failed', outcomeReason: { code: 'verification_unavailable' }, output: evidence.output + '\nVerification did not complete executable acceptance.' }
   if (artifactVersion !== await captureArtifactVersion(cwd, plan.excludedPaths, { signal }) || definitionHash(cwd, plan.commands, plan.excludedPaths, plan.checks) !== plan.definitionHash) {
     evidence.status = 'failed'
+    evidence.outcomeReason = { code: 'acceptance_invalidated' }
     evidence.output += '\nArtifact or acceptance definition changed during verification; evidence is stale.'
   }
+  if (!evidence.outcomeReason && evidence.commands.length === plan.commands.length && evidence.commands.some(command => command.exitCode !== null && command.exitCode !== 0)) evidence.outcomeReason = { code: 'acceptance_failed' }
   return evidence
 }

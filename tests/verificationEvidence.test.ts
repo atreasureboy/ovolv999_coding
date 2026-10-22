@@ -6,6 +6,33 @@ import { describe, expect, it } from 'vitest'
 import { captureArtifactVersion, createVerificationPlan, executeVerification } from '../src/core/verification.js'
 
 describe('verification evidence', () => {
+  it.each(['node', process.platform === 'win32' ? 'echo' : 'true'])('keeps an available bare executable or shell builtin runnable: %s', async command => {
+    const cwd = mkdtempSync(join(tmpdir(), 'ovogo-evidence-'))
+    const evidence = await executeVerification({ cwd, plan: createVerificationPlan(cwd, [command]) })
+    expect(evidence.status).toBe('passed')
+    expect(evidence.commands[0].exitCode).toBe(0)
+    expect(evidence.outcomeReason).toBeUndefined()
+  })
+  it('marks only stable completed nonzero checks as repairable acceptance failures', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'ovogo-evidence-'))
+    const evidence = await executeVerification({ cwd, plan: createVerificationPlan(cwd, ['node -e "process.exit(7)"', 'node -e "process.exit(0)"']) })
+    expect(evidence.commands.map(command => command.exitCode)).toEqual([7, 0])
+    expect(evidence.outcomeReason).toEqual({ code: 'acceptance_failed' })
+  })
+
+  it('classifies an unavailable executable separately from failed acceptance', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'ovogo-evidence-'))
+    const evidence = await executeVerification({ cwd, plan: createVerificationPlan(cwd, ['artex-missing-executable-13579']) })
+    expect(evidence.status).toBe('failed')
+    expect(evidence.outcomeReason).toEqual({ code: 'verification_unavailable' })
+  })
+
+  it('never marks a timed out check as a repairable acceptance failure', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'ovogo-evidence-'))
+    const evidence = await executeVerification({ cwd, timeoutMs: 25, plan: createVerificationPlan(cwd, ['node -e "setInterval(() => {}, 1000)"']) })
+    expect(evidence.commands[0].timedOut).toBe(true)
+    expect(evidence.outcomeReason).toEqual({ code: 'verification_unavailable' })
+  })
   it('excludes the explicit runtime session while retaining adjacent native artifacts', async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'ovogo-session-evidence-'))
     const sessionDir = join(cwd, 'sessions', 'session_current')
@@ -80,6 +107,7 @@ describe('verification evidence', () => {
     const evidence = await executeVerification({ cwd, plan: createVerificationPlan(cwd, ['node check.cjs']) })
     expect(evidence.commands[0].passed).toBe(true)
     expect(evidence.status).toBe('failed')
+    expect(evidence.outcomeReason).toEqual({ code: 'acceptance_invalidated' })
   })
 
   it('refuses changed acceptance scripts before executing them', async () => {
@@ -91,6 +119,7 @@ describe('verification evidence', () => {
     const evidence = await executeVerification({ cwd, plan })
     expect(evidence.status).toBe('failed')
     expect(evidence.commands).toEqual([])
+    expect(evidence.outcomeReason).toEqual({ code: 'acceptance_invalidated' })
     expect(existsSync(join(cwd, 'ran.txt'))).toBe(false)
   })
 

@@ -12,6 +12,7 @@ import type { EngineConfig, Tool, ToolContext } from '../src/core/types.js'
 import type { Renderer } from '../src/ui/renderer.js'
 import { RunStore } from '../src/core/runStore.js'
 import { runtimeStateRoot } from '../src/core/runtimeState.js'
+import { isOutcomeReason, normalizeOutcome, OutcomeError } from '../src/core/outcome.js'
 
 const dirs: string[] = []
 const engines: ExecutionEngine[] = []
@@ -46,6 +47,80 @@ function tool(name: string, execute: Tool['execute'], safe = false): Tool {
 }
 
 describe('engine behavioral contract', () => {
+  it('rejects error instances, inherited reasons and hidden parameters as structured stop facts', () => {
+    expect(isOutcomeReason(Object.assign(new Error('secret'), { code: 'acceptance_failed' }))).toBe(false)
+    expect(isOutcomeReason(Object.create({ code: 'acceptance_failed' }))).toBe(false)
+    expect(isOutcomeReason({ code: 'acceptance_failed', [Symbol('secret')]: 'secret' })).toBe(false)
+    expect(isOutcomeReason({ code: 'permission_denied', source: { toString: () => 'policy' } })).toBe(false)
+    expect(isOutcomeReason({ code: 'approval_required', requestId: 'x'.repeat(256) })).toBe(true)
+    expect(() => new OutcomeError('bad', { code: 'future' } as never)).toThrow(/outcome reason/)
+  })
+
+  it.each([
+    [{ code: 'permission_denied', source: 'policy' }, 'failed'],
+    [{ code: 'approval_required' }, 'needs_input'],
+    [{ code: 'approval_stale' }, 'blocked'],
+    [{ code: 'budget_denied', kind: 'tokens' }, 'limit_reached'],
+    [{ code: 'budget_denied', kind: 'cost' }, 'limit_reached'],
+    [{ code: 'budget_denied', kind: 'pricing' }, 'blocked'],
+    [{ code: 'recovery_required', scope: 'workspace' }, 'blocked'],
+    [{ code: 'acceptance_invalidated' }, 'blocked'],
+    [{ code: 'turn_deadline' }, 'limit_reached'],
+    [{ code: 'steering_pending' }, 'interrupted'],
+  ] as const)('maps host reason %j ahead of an ordinary failure', (outcomeReason, status) => {
+    expect(normalizeOutcome({ reason: 'error', status: 'failed', output: 'failed', outcomeReason })).toBe(status)
+    expect(normalizeOutcome({ reason: 'error', status: 'cancelled', output: 'cancelled', outcomeReason })).toBe('cancelled')
+    expect(normalizeOutcome({ reason: 'interrupted', status: 'interrupted', output: 'paused', outcomeReason })).toBe('interrupted')
+  })
+  it('preserves policy denial after the same tool input later succeeds', async () => {
+    const permissionManager = new PermissionManager()
+    permissionManager.addRule({ toolName: 'Probe', ruleContent: '*', behavior: 'deny', source: 'user' })
+    const { engine } = setup([{ calls: [{ name: 'Probe' }, { name: 'Unlock' }] }, { calls: [{ name: 'Probe' }] }], {
+      permissionManager, extraTools: [
+        tool('Probe', async () => ({ content: 'done', isError: false }), true),
+        tool('Unlock', async () => { permissionManager.removeRule(0); return { content: 'unlocked', isError: false } }),
+      ],
+    })
+    const { result, newHistory } = await engine.runTurn('probe', [])
+    expect(newHistory.filter(message => message.role === 'tool').at(-1)?.content).toBe('done')
+    expect(result.status).toBe('failed')
+    expect(result.outcomeReason).toEqual({ code: 'permission_denied', source: 'policy' })
+  })
+
+  it('keeps pending approval ahead of an ordinary sibling failure', async () => {
+    const permissionManager = new PermissionManager()
+    permissionManager.addRule({ toolName: 'NeedsApproval', ruleContent: '*', behavior: 'ask', source: 'user' })
+    const { engine } = setup([{ calls: [{ name: 'Broken' }, { name: 'NeedsApproval' }] }], {
+      permissionManager, extraTools: [
+        tool('Broken', async () => { throw new Error('ordinary failure') }, true),
+        tool('NeedsApproval', async () => ({ content: 'unsafe', isError: false }), true),
+      ],
+    })
+    const { result } = await engine.runTurn('both', [])
+    expect(result.status).toBe('needs_input')
+    expect(result.outcomeReason).toEqual({ code: 'approval_required' })
+  })
+
+  it('does not infer repairable acceptance failure from arbitrary error text', async () => {
+    const { engine } = setup([{ calls: [{ name: 'UnknownError' }] }], { extraTools: [tool('UnknownError', async () => { throw new Error('acceptance_failed 验收失败') }, true)] })
+    const { result } = await engine.runTurn('run', [])
+    expect(result.status).toBe('failed')
+    expect(result.outcomeReason).toBeUndefined()
+  })
+
+  it('retains child approval denial alongside a successful read-only sibling', async () => {
+    let executed = false
+    const { engine } = setup([{ calls: [{ name: 'Sibling' }, { name: 'Agent', input: { description: 'denied', prompt: 'denied' } }] }], {
+      extraTools: [tool('Sibling', async () => { executed = true; return { content: 'read', isError: false } }, true)],
+      agentFactory: cfg => setup([{ calls: [{ name: 'ChildProbe' }] }], {
+        ...cfg, permissionMode: 'ask', requireToolApproval: true, requestPermission: async () => ({ approved: false }),
+        agent: { identity: { systemPrompt: () => 'child fixture' }, tools: ['ChildProbe'] },
+        extraTools: [tool('ChildProbe', async () => ({ content: 'unsafe', isError: false }), true)],
+      }).engine,
+    })
+    expect((await engine.runTurn('delegate', [])).result).toMatchObject({ status: 'failed', outcomeReason: { code: 'permission_denied', source: 'approval' } })
+    expect(executed).toBe(true)
+  })
   it('rejects duplicate provider call IDs before executing any tool', async () => {
     const execute = vi.fn(() => Promise.resolve({ content: 'read', isError: false }))
     const { engine } = setup([{ calls: [{ name: 'Inspect', id: 'duplicate' }, { name: 'Inspect', id: 'duplicate' }] }], { extraTools: [tool('Inspect', execute, true)] })
@@ -233,6 +308,7 @@ describe('engine behavioral contract', () => {
     engine.abort()
     const cancelled = await running
     expect(cancelled.result.status).toBe('cancelled')
+    expect(cancelled.result.outcomeReason).toEqual({ code: 'recovery_required', scope: 'resources' })
     expect(cancelled.newHistory.filter(m => m.role === 'tool')).toHaveLength(1)
     expect((await engine.runTurn('next', [])).result.status).toBe('blocked')
     release()
@@ -245,7 +321,7 @@ describe('engine behavioral contract', () => {
     const name = `oversize-${Date.now()}`
     globalModuleRegistry.register(name, () => ({ name, boot: () => ({}), onIteration: () => Promise.resolve({ injectMessage: 'z'.repeat(100_000) }) }))
     const { engine, requests } = setup([], { enabledModules: [name], maxContextTokens: 8192 })
-    expect((await engine.runTurn('small question', [])).result.status).toBe('failed')
+    expect((await engine.runTurn('small question', [])).result).toMatchObject({ status: 'limit_reached', outcomeReason: { code: 'budget_denied', kind: 'context' } })
     expect(requests).toHaveLength(0)
   })
 
@@ -288,6 +364,7 @@ describe('engine behavioral contract', () => {
     const { result } = await engine.runTurn('explain', [])
     expect(result.status).toBe('blocked')
     expect(result.verification?.status).toBe('failed')
+    expect(result.outcomeReason).toEqual({ code: 'acceptance_invalidated' })
     expect(RunStore.inspect(join(runtimeStateRoot(), 'runs', result.runId + '.json')).status).toBe('blocked')
   })
 
@@ -304,6 +381,7 @@ describe('engine behavioral contract', () => {
     const { result, newHistory } = await engine.runTurn('implement', [])
     expect(result.status).toBe('failed')
     expect(result.reason).toBe('error')
+    expect(result.outcomeReason).toEqual({ code: 'acceptance_failed' })
     expect(newHistory.some(m => m.role === 'tool' && JSON.stringify(m.content).includes('FAILED'))).toBe(true)
   })
 
@@ -321,12 +399,13 @@ describe('engine behavioral contract', () => {
     engines.splice(engines.indexOf(engine), 1)
   })
 
-  it('does not erase a failed sibling Agent when another child succeeds', async () => {
+  it('blocks a second mutating sibling after a failed child leaves unknown effects', async () => {
     let child = 0
     const { engine } = setup([{ calls: [{ name: 'Agent', input: { description: 'first', prompt: 'first' } }, { name: 'Agent', input: { description: 'second', prompt: 'second' } }] }], {
       agentFactory: () => ({ runTurn: () => Promise.resolve({ result: { reason: child++ === 0 ? 'error' : 'stop_sequence', output: 'child result' } }), abort: () => {} }),
     })
-    expect((await engine.runTurn('two independent tasks', [])).result.status).toBe('failed')
+    expect((await engine.runTurn('two independent tasks', [])).result).toMatchObject({ status: 'blocked', outcomeReason: { code: 'recovery_required', scope: 'operation' } })
+    expect(child).toBe(1)
   })
 
   it('settles tool calls from an incomplete stream without executing them', async () => {

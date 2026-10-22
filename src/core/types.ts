@@ -20,7 +20,7 @@ import type { PermissionManager } from './permissionSystem.js'
 import type { McpServerConfig } from './mcpClient.js'
 import type { McpRegistryEntry } from './mcpRegistry.js'
 import type { FileReadState } from './fileState.js'
-import type { OutcomeStatus, VerificationEvidence } from './outcome.js'
+import type { OutcomeReason, OutcomeStatus, VerificationEvidence } from './outcome.js'
 
 // OpenAI-compatible tool call format
 export interface ToolCall {
@@ -43,7 +43,7 @@ export interface ToolCall {
  * in tests that don't model background work.
  */
 export interface ChildEngineLike {
-  runTurn: (msg: string, history: never[]) => Promise<{ result: { output: string; reason: string; status?: OutcomeStatus; verification?: VerificationEvidence } }>
+  runTurn: (msg: string, history: never[]) => Promise<{ result: { output: string; reason: string; status?: OutcomeStatus; outcomeReason?: OutcomeReason; verification?: VerificationEvidence } }>
   abort: () => void
   /**
    * Tear down engine-owned side effects (background tasks, transient
@@ -96,6 +96,7 @@ export interface ToolDefinition {
 }
 
 export interface ToolResult {
+  outcomeReason?: OutcomeReason
   content: string
   isError: boolean
   status?: OutcomeStatus
@@ -432,6 +433,7 @@ export interface RunTurnOptions {
 }
 
 export interface TurnResult {
+  outcomeReason?: OutcomeReason
   stopped: boolean
   status?: OutcomeStatus
   verification?: VerificationEvidence

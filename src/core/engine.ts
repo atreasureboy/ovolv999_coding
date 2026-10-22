@@ -53,7 +53,7 @@ import { enforceAggregateToolResultBudget, truncateToolResult } from './engine/t
 import { FileHistory } from './fileHistory.js'
 import type { AgentModule, ModuleBootContext, ModuleBootResult } from './module.js'
 import { globalModuleRegistry } from './moduleRegistry.js'
-import { settleWithin } from './outcome.js'
+import { OutcomeError, outcomeReasonStatus, selectOutcomeReason, settleWithin, type OutcomeReason } from './outcome.js'
 import { PermissionManager, checkRules } from './permissionSystem.js'
 import {
   checkTokenBudget,
@@ -65,6 +65,7 @@ import {
 import { classifyCommandRisk } from './riskClassifier.js'
 import {
   createRunContext,
+  OperationTimeoutError,
   initializeRunStore,
   isWorkspaceQuarantined,
   quarantineRun,
@@ -282,6 +283,7 @@ export class ExecutionEngine {
     }
     this.softAbortRequested = false
     this.softAbortOwner = null
+    if (this.activeRun) this.activeRun.interrupted = true
     return true
   }
   private buildSystemPrompt(planMode: boolean, moduleSections: string[] = [], instructionSection = ''): string {
@@ -549,6 +551,8 @@ export class ExecutionEngine {
       return {
         content: `Permission denied for ${toolName}. Current mode: ${this.permissionManager.formatMode()}`,
         isError: true,
+        status: 'failed',
+        outcomeReason: { code: 'permission_denied', source: 'policy' },
       }
     }
     let permissionApproved = permission === 'allow'
@@ -566,6 +570,7 @@ export class ExecutionEngine {
               : `Permission denied by user for ${toolName}.`,
             isError: true,
             ...(permResult.status ? { status: permResult.status } : {}),
+            outcomeReason: permResult.outcomeReason,
           }
         }
       } else {
@@ -573,6 +578,7 @@ export class ExecutionEngine {
           content: `Approval required for ${toolName}; no approval channel is available.`,
           isError: true,
           status: 'needs_input',
+          outcomeReason: { code: 'approval_required' },
         }
       }
     }
@@ -587,7 +593,7 @@ export class ExecutionEngine {
       tool.execute(input, { ...recording.context, permissionApproved,
         ...(permissionApproved ? { permissionApproval: { tool: toolName, inputDigest: approvalInputDigest(input), cwd: context.cwd } } : {}),
       }),
-    ).catch(error => ({ content: (error as Error).message ?? String(error), isError: true, status: context.signal?.aborted ? 'cancelled' as const : 'failed' as const }))
+    ).catch(error => ({ content: (error as Error).message ?? String(error), isError: true, status: context.signal?.aborted ? 'cancelled' as const : error instanceof OutcomeError ? outcomeReasonStatus(error.outcomeReason) : 'failed' as const, ...(error instanceof OutcomeError ? { outcomeReason: error.outcomeReason } : {}) }))
     if (operationId && run?.store) {
       if (processScope.pending.size) {
         const receipt = Promise.all([...processScope.pending]).then(() =>
@@ -619,7 +625,7 @@ export class ExecutionEngine {
     input: Record<string, unknown>,
     riskLevel: 'safe' | 'needs-approval' | 'dangerous',
     context: Pick<ToolContext, 'cwd' | 'runId' | 'signal'>,
-  ): Promise<{ approved: boolean; feedback?: string; status?: ToolResult['status'] }> {
+  ): Promise<{ approved: boolean; feedback?: string; status?: ToolResult['status']; outcomeReason?: OutcomeReason }> {
     return requestOperationApproval({ config: this.config, permissions: this.permissionManager, getRun: () => this.activeRun }, tool, input, riskLevel, context)
   }
   private async scheduleToolCalls(
@@ -648,6 +654,7 @@ export class ExecutionEngine {
       const failureKey = tc.name === 'Agent' ? tc.id : tc.name + ':' + JSON.stringify(call.input)
       if (result.isError) run.toolFailures.set(failureKey, result)
       else run.toolFailures.delete(failureKey)
+      if (result.outcomeReason && !['acceptance_failed', 'verification_unavailable'].includes(result.outcomeReason.code)) run.stopReason = selectOutcomeReason(run.stopReason, result.outcomeReason)
       if (!signal.aborted) await runHookOperation(run, this.config, 'PostToolCall', signal =>
         this.config.hookRunner?.runPostToolCall(tc.name, result.content, result.isError, signal),
       ).catch(error => { this.renderer.warn('Post-tool hook failed: ' + String(error)) })
@@ -656,6 +663,7 @@ export class ExecutionEngine {
         content: result.content.slice(0, 500),
         isError: result.isError,
         status: result.status,
+        outcomeReason: result.outcomeReason,
         run_id: run.runId,
       })
       this.appendMessages(messages, {
@@ -686,7 +694,7 @@ export class ExecutionEngine {
             ) ?? []
             signal.throwIfAborted()
             const denial = hooks.find(hook => hook.decision?.action === 'deny')?.decision
-            if (denial) return { content: 'Hook denied ' + tc.name + ': ' + (denial.reason ?? 'policy denied the operation'), isError: true, status: 'blocked' }
+            if (denial) return { content: 'Hook denied ' + tc.name + ': ' + (denial.reason ?? 'policy denied the operation'), isError: true, status: 'failed', outcomeReason: { code: 'permission_denied', source: 'hook' } as const }
             let effectiveInput = input
             for (const hook of hooks) {
               if (hook.decision?.updatedInput) effectiveInput = hook.decision.updatedInput
@@ -707,8 +715,10 @@ export class ExecutionEngine {
         return {
           content: (error as Error).message ?? String(error),
           isError: true,
+          ...(error instanceof OutcomeError ? { outcomeReason: error.outcomeReason } : {}),
           status: signal.aborted
             ? 'cancelled'
+            : error instanceof OutcomeError ? outcomeReasonStatus(error.outcomeReason)
             : (error as Error).name === 'WorkspaceUnavailableError'
               ? 'blocked'
               : 'failed',
@@ -825,6 +835,7 @@ export class ExecutionEngine {
           stopped: true,
           reason: 'error',
           status: 'blocked',
+          outcomeReason: { code: 'recovery_required', scope: 'resources' },
           output:
             'Workspace has unfinished operations from a previous run; wait for resource settlement.',
           verification: {
@@ -1226,7 +1237,7 @@ export class ExecutionEngine {
           this.config.hookRunner?.runOnError?.(err as Error, { turnNumber: errorIteration, lastToolName }, signal),
         ).catch(error => { this.renderer.warn('Error hook failed: ' + String(error)) })
         this.renderer.error(`Engine error: ${errMsg}`)
-        result = { stopped: true, reason: 'error', output: finalOutput || `[Error: ${errMsg}]` }
+        result = { stopped: true, reason: 'error', output: finalOutput || `[Error: ${errMsg}]`, ...(err instanceof OutcomeError ? { outcomeReason: err.outcomeReason } : {}) }
       } finally {
         if (this.softAbortRequested && this.softAbortOwner === turnAbortController) {
           this.softAbortRequested = false
@@ -1256,14 +1267,15 @@ export class ExecutionEngine {
       }
       const status =
         turnAbortController.signal.aborted &&
-        !String(turnAbortController.signal.reason).startsWith('timeout:')
+        !(turnAbortController.signal.reason instanceof OperationTimeoutError)
           ? 'cancelled'
-          : 'failed'
+          : error instanceof OutcomeError ? outcomeReasonStatus(error.outcomeReason) : run.pending.size ? 'blocked' : 'failed'
       return {
         result: {
           stopped: true,
           reason: 'error',
           status,
+          outcomeReason: run.pending.size ? { code: 'recovery_required', scope: 'resources' } : error instanceof OutcomeError ? error.outcomeReason : run.stopReason,
           runId: run.runId,
           output: String(error),
           verification: {

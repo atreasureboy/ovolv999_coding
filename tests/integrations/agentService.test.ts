@@ -75,6 +75,30 @@ function toolResponse(res: ServerResponse, name: string, input: Record<string, u
   res.end('data: [DONE]\n\n')
 }
 
+it('persists structured denial across a real service restart', async () => {
+  const permissions = new PermissionManager()
+  permissions.addRule({ toolName: 'DeniedProbe', ruleContent: '*', behavior: 'deny', source: 'user' })
+  const probe: Tool = { name: 'DeniedProbe', metadata: { readOnly: true }, definition: { type: 'function', function: { name: 'DeniedProbe', description: 'denied probe', parameters: { type: 'object', properties: {} } } }, execute: async () => ({ content: 'unsafe', isError: false }) }
+  const { cwd, service, createService } = await fixture((_request, res, index) => index === 1
+    ? toolResponse(res, 'DeniedProbe', {}) : response(res, 'denied output '.repeat(10000)),
+  { permissionManager: permissions, extraTools: [probe], agent: { identity: { systemPrompt: () => 'fixture' }, tools: ['DeniedProbe'] } })
+  const started = await service.start({ cwd, text: 'write' })
+  const original = await service.wait(started.threadId, started.turnId)
+  expect(original.result.outcomeReason).toEqual({ code: 'permission_denied', source: 'policy' })
+  expect((await service.snapshot(started.threadId)).lastTurn?.truncated).toBe(true)
+  const sessionDir = join(cwd, 'sessions', readdirSync(join(cwd, 'sessions'))[0])
+  await service.release(started.threadId)
+  const reopened = createService()
+  await reopened.register({ cwd, sessionDir })
+  expect((await reopened.snapshot(started.threadId)).lastTurn?.result?.outcomeReason).toEqual(original.result.outcomeReason)
+})
+
+it('classifies the service turn deadline after cooperative cancellation', async () => {
+  const { cwd, service } = await fixture(() => {}, {}, { deadlineMs: 200, finalizationGraceMs: 1000 })
+  const started = await service.start({ cwd, text: 'wait' })
+  expect((await service.wait(started.threadId, started.turnId)).result).toMatchObject({ status: 'limit_reached', outcomeReason: { code: 'turn_deadline' } })
+})
+
 it('rejects registering an engine that is already bound to another session', async () => {
   const { cwd, service } = await fixture()
   const bound = join(cwd, 'sessions', 'session_bound')
@@ -428,7 +452,7 @@ it('does not publish completed when durable history saving conflicts', async () 
   writeFileSync(join(sessionDir, 'history.json'), JSON.stringify({ ...envelope, revision: 10 }))
   response(held!)
   const outcome = await service.wait(threadId, started.turnId)
-  expect(outcome.result.status).toBe('failed')
+  expect(outcome.result).toMatchObject({ status: 'blocked', outcomeReason: { code: 'recovery_required', scope: 'session' } })
   expect((await service.snapshot(threadId)).lastTurn?.status).not.toBe('completed')
   expect(readSessionSnapshot(sessionDir).revision).toBe(10)
   await service.release(threadId)
@@ -491,7 +515,7 @@ it('retains repeated prompt text as separate canonical turns', async () => {
   expect(outcome.newHistory).toHaveLength(4)
 })
 
-it('retains acknowledged steering that arrives during the final model response', async () => {
+it.each([false, true])('retains acknowledged steering that arrives during the final model response (failure: %s)', async failed => {
   let held: ServerResponse | undefined
   let observed!: () => void
   const barrier = new Promise<void>(resolve => { observed = resolve })
@@ -499,9 +523,11 @@ it('retains acknowledged steering that arrives during the final model response',
   const started = await service.start({ cwd, text: 'same text' })
   await barrier
   await service.steer(started.threadId, started.turnId, 'same text')
-  response(held!)
+  if (failed) { held!.writeHead(400, { 'Content-Type': 'application/json' }); held!.end('{"error":{"message":"ordinary failure"}}') }
+  else response(held!)
   const outcome = await service.wait(started.threadId, started.turnId)
   expect(outcome.result.status).toBe('interrupted')
+  expect(outcome.result.outcomeReason).toEqual({ code: 'steering_pending' })
   expect(outcome.newHistory.filter(message => message.role === 'user' && message.content === 'same text')).toHaveLength(2)
   expect((await service.snapshot(started.threadId)).items.some(item => item.expectedTurnId === started.turnId && item.status === 'partial')).toBe(true)
   expect(requests).toHaveLength(1)
@@ -556,6 +582,7 @@ it('persists needs_input approval when the approval host disconnects without exe
   broker.disconnectHost()
   const outcome = await service.wait(started.threadId, started.turnId)
   expect(outcome.result.status).toBe('needs_input')
+  expect(outcome.result.outcomeReason).toMatchObject({ code: 'approval_required' })
   expect(existsSync(target)).toBe(false)
   expect((await service.snapshot(started.threadId)).pendingApprovals).toMatchObject([{ runId: started.turnId, tool: 'Write', status: 'needs_input' }])
   await expect(service.start({ threadId: started.threadId, cwd, text: 'must not bypass approval' })).rejects.toThrow(/recovery/)
@@ -620,7 +647,8 @@ it('blocks another turn while a deadline-cancelled real tool remains physically 
   await barrier
   const outcome = await service.wait(started.threadId, started.turnId)
   expect(outcome.result.status).toBe('blocked')
-  await expect(service.start({ threadId: started.threadId, cwd, text: 'must wait' })).rejects.toThrow(/unfinished|active|quarantined/)
+  expect(outcome.result.outcomeReason).toEqual({ code: 'recovery_required', scope: 'resources' })
+  await expect(service.start({ threadId: started.threadId, cwd, text: 'must wait' })).rejects.toThrow(/unfinished|active|quarantined|recovery/)
   expect(requests).toHaveLength(1)
   release()
   await vi.waitFor(() => expect(outcome.result.unfinishedResources?.length ?? 1).toBeGreaterThan(0))

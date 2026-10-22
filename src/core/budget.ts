@@ -12,6 +12,7 @@ import { isRecord } from './persistedData.js'
 import { acquirePersistenceLeaseSync, type PersistenceLease } from './persistenceLock.js'
 import type { NormalizedUsage } from './model/types.js'
 import type { UsagePricing } from './modelPricing.js'
+import { OutcomeError } from './outcome.js'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -120,7 +121,7 @@ export function loadBudgetStore(cwd: string, strict = false): BudgetStore {
     }
     return { budgets, usage, resets, reservations, conservative }
   } catch (error) {
-    if (strict) throw new Error('Project budget persistence is invalid; preserve it for recovery before making model requests', { cause: error })
+    if (strict) throw new OutcomeError('Project budget persistence is invalid; preserve it for recovery before making model requests', { code: 'recovery_required', scope: 'budget' }, { cause: error })
     return emptyStore()
   }
 }
@@ -425,12 +426,12 @@ export function reserveModelBudget(cwd: string, requestId: string, contextWindow
     const entries: NonNullable<BudgetStore['reservations']>[string] = []
     for (const config of Object.values(store.budgets)) {
       if (!config.enabled) continue
-      if (config.type === 'cost' && costCapacity === undefined && config.enforced) throw new Error(`Cost budget "${config.name}" requires known model pricing before a request can be sent`)
+      if (config.type === 'cost' && costCapacity === undefined && config.enforced) throw new OutcomeError(`Cost budget "${config.name}" requires known model pricing before a request can be sent`, { code: 'budget_denied', kind: 'pricing' })
       const amount = config.type === 'requests' ? 1 : config.type === 'tokens' ? tokenCapacity : costCapacity ?? config.limit
       const periodKey = getPeriodKey(config.period)
       const spent = store.usage[config.name]?.[periodKey] ?? 0
       if (!Number.isFinite(amount) || !Number.isFinite(spent + amount)) throw new Error('Project budget reservation exceeds supported range')
-      if (config.enforced && (spent >= config.limit || spent + amount > config.limit)) throw new Error(`Project ${config.type} budget "${config.name}" cannot admit request: ${spent} spent/reserved + ${amount} required > ${config.limit}; token/cost reservation uses model context capacity ${contextWindow} + output cap ${outputTokens}, including unknown usage`)
+      if (config.enforced && (spent >= config.limit || spent + amount > config.limit)) throw new OutcomeError(`Project ${config.type} budget "${config.name}" cannot admit request: ${spent} spent/reserved + ${amount} required > ${config.limit}; token/cost reservation uses model context capacity ${contextWindow} + output cap ${outputTokens}, including unknown usage`, { code: 'budget_denied', kind: config.type })
       entries.push({ name: config.name, periodKey, amount, type: config.type })
     }
     for (const entry of entries) {

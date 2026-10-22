@@ -8,7 +8,7 @@ import type { ExecutionEngine } from './engine.js'
 import { eventText, TurnEvents } from './engine/events.js'
 import { settleHistory } from './messageGroups.js'
 import { resolveModelRuntime } from './modelRuntime.js'
-import { normalizeOutcome, settleWithin } from './outcome.js'
+import { normalizeOutcome, OutcomeError, outcomeReasonStatus, selectOutcomeReason, settleWithin } from './outcome.js'
 import { validateOutputSchema, validateStructuredOutput } from './outputSchema.js'
 import { isWorkspaceQuarantined } from './runContext.js'
 import {
@@ -98,7 +98,7 @@ function samePath(left: string, right: string): boolean {
 }
 
 function failure(turnId: string, error: unknown, status: TurnResult['status'] = 'failed'): TurnResult {
-  return { stopped: true, reason: 'error', status, runId: turnId, output: error instanceof Error ? error.message : String(error) }
+  return { stopped: true, reason: 'error', status: error instanceof OutcomeError ? outcomeReasonStatus(error.outcomeReason) : status, ...(error instanceof OutcomeError ? { outcomeReason: error.outcomeReason } : {}), runId: turnId, output: error instanceof Error ? error.message : String(error) }
 }
 
 export class AgentService {
@@ -385,6 +385,7 @@ export class AgentService {
           else result = failure(turn.turnId, settled.reason, deadline.didExpire ? 'limit_reached' : 'failed')
         } catch (finalizationError) {
           result = failure(turn.turnId, finalizationError, 'blocked')
+          result.outcomeReason = { code: 'recovery_required', scope: 'resources' }
           thread.recoveryRequired = true
         }
         result ??= failure(turn.turnId, error, deadline.didExpire ? 'limit_reached' : 'failed')
@@ -398,16 +399,20 @@ export class AgentService {
         thread.modelWindow = prepareModelWindow(outcome.newHistory)
       }
       result ??= failure(turn.turnId, 'Engine ended without a result')
-      if (result.status === 'needs_input') thread.recoveryRequired = true
-      if (deadline.didExpire && result.status !== 'blocked') result = { ...result, status: 'limit_reached', reason: 'max_iterations' }
-      if (isWorkspaceQuarantined(thread.cwd)) result = { ...result, status: 'blocked', reason: 'error' }
+      if (deadline.didExpire) {
+        const outcomeReason = selectOutcomeReason(result.outcomeReason, result.unfinishedResources?.length ? { code: 'recovery_required', scope: 'resources' } : { code: 'turn_deadline' })!
+        result = { ...result, status: outcomeReasonStatus(outcomeReason), reason: 'max_iterations', outcomeReason }
+      }
+      if (isWorkspaceQuarantined(thread.cwd)) result = { ...result, status: result.status === 'cancelled' || result.status === 'interrupted' ? result.status : 'blocked', reason: 'error', outcomeReason: { code: 'recovery_required', scope: 'resources' } }
       if (turn.steering.length) {
         for (const steering of turn.steering) {
           canonical.push({ role: 'user', content: steering.text, source: 'runtime' })
           this.completeSteering(thread, turn, steering, 'partial')
         }
         turn.steering.length = 0
-        if (result.status === 'completed') result = { ...result, status: 'interrupted', reason: 'interrupted', output: result.output + '\nSteering was retained but was not consumed by this turn.' }
+        const outcomeReason = selectOutcomeReason(result.outcomeReason, { code: 'steering_pending' })!
+        result = { ...result, outcomeReason, status: normalizeOutcome({ ...result, outcomeReason }), output: result.output + '\nSteering was retained but was not consumed by this turn.' }
+        if (result.status === 'interrupted') result.reason = 'interrupted'
         thread.modelWindow = prepareModelWindow(canonical, true)
       }
       if (input.responseSchema && result.status === 'completed') {
@@ -423,9 +428,12 @@ export class AgentService {
         await saveModelWindow(thread.sessionDir, thread.revision, thread.modelWindow)
       } catch (error) {
         result = failure(turn.turnId, error)
+        result.status = 'blocked'
+        result.outcomeReason = { code: 'recovery_required', scope: 'session' }
         thread.recoveryRequired = true
         thread.store.append({ type: 'error', turnId: turn.turnId, code: 'history_persistence_failed', message: result.output.slice(0, 4096) })
       }
+      if (result.status === 'needs_input' || result.outcomeReason?.code === 'recovery_required') thread.recoveryRequired = true
       const terminal = await saveTurnResult(thread.sessionDir, turn.turnId, result)
       thread.store.append({ type: 'turn.finished', turnId: turn.turnId, status: result.status ?? 'failed', ...terminal, historyRevision: thread.revision })
       turn.finalized = true

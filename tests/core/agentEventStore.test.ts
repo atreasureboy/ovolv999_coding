@@ -49,7 +49,7 @@ function worker(dir: string, mode = 'hold') {
   const runtime = join(dir, 'runtime')
   mkdirSync(runtime, { recursive: true })
   writeFileSync(join(runtime, 'package.json'), '{"type":"module"}')
-  for (const name of ['agentEventStore', 'agentEvents', 'persistenceLock', 'processIdentity']) {
+  for (const name of ['agentEventStore', 'agentEvents', 'persistenceLock', 'processIdentity', 'outcome']) {
     const path = new URL(`../../src/core/${name}.ts`, import.meta.url)
     writeFileSync(join(runtime, `${name}.js`), transpileModule(readFileSync(path, 'utf8'), { compilerOptions: { module: ModuleKind.ESNext, target: ScriptTarget.ES2022 } }).outputText)
   }
@@ -79,6 +79,30 @@ afterEach(async () => {
   for (const store of stores.splice(0)) store.close()
   await Promise.all(children.splice(0).map(kill))
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+})
+
+it.each([
+  { code: 'future_reason' },
+  { code: 'budget_denied', kind: 'future_kind' },
+  { code: 'permission_denied', source: 'future_source' },
+  { code: 'approval_required', requestId: 'x'.repeat(257) },
+  { code: 'approval_required', requestId: { token: 'secret' } },
+  { code: 'acceptance_failed', error: 'secret' },
+])('rejects untrusted structured outcome reasons %j', async outcomeReason => {
+  const store = await open(directory())
+  start(store)
+  expect(() => store.append({ type: 'turn.finished', turnId, status: 'failed', result: { stopped: true, reason: 'error', output: 'failed', outcomeReason } as never, historyRevision: 1 })).toThrow(/outcome reason/i)
+})
+
+it('persists recovery reasons through reopening without allowing another turn', async () => {
+  const dir = directory()
+  const store = await open(dir)
+  start(store)
+  store.append({ type: 'turn.finished', turnId, status: 'blocked', result: { stopped: true, reason: 'error', output: 'recover', status: 'blocked', outcomeReason: { code: 'recovery_required', scope: 'resources' } }, historyRevision: 1 })
+  store.close()
+  const reopened = await open(dir)
+  expect(reopened.snapshot()).toMatchObject({ recovery: 'recovery_required', lastTurn: { result: { outcomeReason: { code: 'recovery_required', scope: 'resources' } } } })
+  expect(() => start(reopened, 'next', 1)).toThrow(/recovery/)
 })
 
 it('reopens consecutive durable events after killing the real writer and rejects a second live writer', async () => {

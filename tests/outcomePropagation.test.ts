@@ -1,7 +1,7 @@
 import { mkdtempSync, writeFileSync, mkdirSync, existsSync, readFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ExecutionEngine } from '../src/core/engine.js'
 import { runSingleTask } from '../bin/ovogogogo.js'
 import { runLoop } from '../src/core/loopEngine.js'
@@ -40,22 +40,25 @@ function fixture() {
 }
 
 describe('actual command failure propagation', () => {
-  it('propagates a failing project command through Agent, parent Engine, and CLI', async () => {
+  it('blocks stale command evidence through Agent, parent Engine, and CLI', async () => {
     const { cwd, renderer, engine } = fixture()
+    const turn = vi.spyOn(engine, 'runTurn')
     try {
       const status = await runSingleTask(engine, renderer, 'make the change', cwd, [], undefined)
       expect(existsSync(join(cwd, 'check-ran.txt'))).toBe(true)
-      expect(status).toBe('failed')
-      expect(process.exitCode).toBe(1)
-      expect(JSON.parse(readFileSync(join(cwd, 'ovogo_progress.json'), 'utf8')).current_step).toBe('failed')
+      expect(status).toBe('blocked')
+      expect((await turn.mock.results[0].value).result.outcomeReason).toEqual({ code: 'acceptance_invalidated' })
+      expect(process.exitCode).toBe(2)
+      expect(JSON.parse(readFileSync(join(cwd, 'ovogo_progress.json'), 'utf8')).current_step).toBe('blocked')
     } finally {
       await engine.dispose()
       renderer.destroy()
     }
   })
 
-  it('propagates the same failure into Loop despite a stale DONE marker', async () => {
+  it('blocks stale command evidence in Loop despite a stale DONE marker', async () => {
     const { cwd, renderer, engine } = fixture()
+    const turn = vi.spyOn(engine, 'runTurn')
     const loopDir = join(cwd, '.loop')
     mkdirSync(loopDir)
     writeFileSync(join(loopDir, 'GOAL.md'), 'make the change')
@@ -64,7 +67,10 @@ describe('actual command failure propagation', () => {
     try {
       const result = await runLoop(engine, renderer, { cwd, loopDir, maxIters: 1 })
       expect(existsSync(join(cwd, 'check-ran.txt'))).toBe(true)
-      expect(result.status).toBe('failed')
+      expect(result.status).toBe('blocked')
+      expect((await turn.mock.results[0].value).result.outcomeReason).toEqual({ code: 'acceptance_invalidated' })
+      expect(readFileSync(join(loopDir, 'DONE.flag'), 'utf8')).toBe('old accepted run')
+      expect(JSON.parse(readFileSync(join(loopDir, 'OUTCOME.json'), 'utf8')).status).toBe('blocked')
     } finally {
       await engine.dispose()
       renderer.destroy()
