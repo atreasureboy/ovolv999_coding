@@ -12,7 +12,7 @@ const size = (value: unknown): number => Buffer.byteLength(JSON.stringify(value)
 const failed = (command: VerificationCommandResult): boolean => !command.passed || command.exitCode !== 0 || Boolean(command.cancelled || command.timedOut)
 
 function redact(value: string, knownSecrets: readonly string[]): string {
-  let result = value.replace(/\b(token|password|passwd|api[_-]?key|secret)(["']?\s*[:=]\s*)(?:"(?:\\[\s\S]|[^"\\])*(?:"|$)|'(?:\\[\s\S]|[^'\\])*(?:'|$)|[^\s,;}\]]+)/gi, '$1$2[REDACTED]')
+  let result = value.replace(/(token|password|passwd|api[_-]?key|secret)(["']?\s*[:=]\s*)(?:"(?:\\[\s\S]|[^"\\])*(?:"|$)|'(?:\\[\s\S]|[^'\\])*(?:'|$)|[^\s,;}\]]+)/gi, '$1$2[REDACTED]')
   for (const secret of [...new Set(knownSecrets)].filter(Boolean).sort((a, b) => b.length - a.length)) result = result.split(secret).join('[REDACTED]')
   const matches = scanForSecrets(result)
   for (let index = matches.length - 1; index >= 0; index--) {

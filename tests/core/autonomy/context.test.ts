@@ -128,6 +128,8 @@ it('preserves stop receipts ahead of ordinary failure output when evidence must 
 const quotedCredentials = [
   'password="abcdefghijklmnop secret-tail" token="qrstuvwxyzabcdef another-tail"',
   String.raw`password="abcdefghijklmnop \"escaped-password\" secret-tail" token='qrstuvwxyzabcdef \'escaped-token\' another-tail'`,
+  'access_token="abcdefghijklmnop secret-tail" MY_API_KEY="qrstuvwxyzabcdef another-tail"',
+  String.raw`access_token="abcdefghijklmnop \"escaped-password\" secret-tail" MY_API_KEY='qrstuvwxyzabcdef \'escaped-token\' another-tail'`,
 ]
 
 it.each(quotedCredentials)('redacts full unknown quoted credentials before evidence cuts: %s', credentials => {
