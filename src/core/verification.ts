@@ -2,9 +2,9 @@ import { currentExecutionPolicy, isManagedChild, spawnManaged, type ExecutionPro
 import { buildChildEnvironment, resolveManagedExecutionPolicy, type ExecutionPolicy } from './executionPolicy.js'
 import { createHash } from 'crypto'
 import { execFile } from 'child_process'
-import { existsSync, readFileSync, createReadStream, statSync } from 'fs'
+import { accessSync, constants, existsSync, readFileSync, createReadStream, statSync } from 'fs'
 import { lstat, opendir, readlink } from 'fs/promises'
-import { delimiter, join, relative, resolve, sep } from 'path'
+import { delimiter, extname, join, relative, resolve, sep } from 'path'
 import type { VerificationCommandResult, VerificationEvidence } from './outcome.js'
 import { quarantineWorkspace } from './runContext.js'
 
@@ -169,10 +169,16 @@ function bareCommandAvailable(command: string, cwd: string, profile?: ExecutionP
   if (builtins.includes(process.platform === 'win32' ? command.toLowerCase() : command)) return true
   const env = buildChildEnvironment(resolveManagedExecutionPolicy(profile, policy ?? currentExecutionPolicy(cwd), cwd), process.env)
   const environment = (key: string): string | undefined => Object.entries(env).find(([name]) => process.platform === 'win32' ? name.toUpperCase() === key : name === key)?.[1]
-  const extensions = process.platform === 'win32' ? ['', ...(environment('PATHEXT') ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean)] : ['']
+  const executableExtensions = process.platform === 'win32' ? (environment('PATHEXT') ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean).map(extension => extension.toLowerCase()) : []
+  const extensions = process.platform === 'win32' ? executableExtensions.includes(extname(command).toLowerCase()) ? [''] : executableExtensions : ['']
   const directories = [...(process.platform === 'win32' ? [cwd] : []), ...(environment('PATH') ?? '').split(delimiter)]
   return directories.some(directory => extensions.some(extension => {
-    try { return statSync(resolve(cwd, directory, command + extension)).isFile() } catch { return false }
+    try {
+      const executable = resolve(cwd, directory, command + extension)
+      if (!statSync(executable).isFile()) return false
+      if (process.platform !== 'win32') accessSync(executable, constants.X_OK)
+      return true
+    } catch { return false }
   }))
 }
 

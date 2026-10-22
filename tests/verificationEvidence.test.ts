@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync, existsSync, mkdirSync } from 'fs'
+import { chmodSync, mkdtempSync, writeFileSync, existsSync, mkdirSync } from 'fs'
 import { execFileSync } from 'child_process'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -6,6 +6,30 @@ import { describe, expect, it } from 'vitest'
 import { captureArtifactVersion, createVerificationPlan, executeVerification } from '../src/core/verification.js'
 
 describe('verification evidence', () => {
+  it('rejects a plain file that the platform cannot execute as verification unavailable', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'ovogo-evidence-'))
+    const executable = 'artex_plain_probe'
+    writeFileSync(join(cwd, executable), 'plain text, not an executable')
+    chmodSync(join(cwd, executable), 0o600)
+    const previousPath = process.env.PATH
+    if (process.platform !== 'win32') process.env.PATH = cwd
+    try {
+      const evidence = await executeVerification({ cwd, plan: createVerificationPlan(cwd, [executable]) })
+      expect(evidence.outcomeReason).toEqual({ code: 'verification_unavailable' })
+      expect(evidence.commands[0].exitCode).toBeNull()
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH
+      else process.env.PATH = previousPath
+    }
+  })
+
+  it.skipIf(process.platform !== 'win32')('keeps a valid bare batch command executable', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'ovogo-evidence-'))
+    writeFileSync(join(cwd, 'artex_batch_probe.cmd'), '@exit /b 0\r\n')
+    const evidence = await executeVerification({ cwd, plan: createVerificationPlan(cwd, ['artex_batch_probe']) })
+    expect(evidence.status).toBe('passed')
+    expect(evidence.commands[0].exitCode).toBe(0)
+  })
   it.each(['node', process.platform === 'win32' ? 'echo' : 'true'])('keeps an available bare executable or shell builtin runnable: %s', async command => {
     const cwd = mkdtempSync(join(tmpdir(), 'ovogo-evidence-'))
     const evidence = await executeVerification({ cwd, plan: createVerificationPlan(cwd, [command]) })

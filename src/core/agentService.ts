@@ -48,6 +48,7 @@ interface ServiceTurn {
   finalized: boolean
   physicalSettled: boolean
   settled: boolean
+  cancellationOrigin?: 'user' | 'deadline'
   steering: SteeringInput[]
   steeringCount: number
   steeringBytes: number
@@ -248,6 +249,7 @@ export class AgentService {
     const thread = this.thread(threadId)
     const turn = this.activeTurn(thread, turnId)
     turn.accepting = false
+    turn.cancellationOrigin ??= 'user'
     thread.engine.abort()
     await Promise.resolve()
   }
@@ -372,7 +374,7 @@ export class AgentService {
         turn.steering.length = 0
         return pending
       },
-    }), { deadlineMs: this.options.deadlineMs ?? AGENT_TURN_DEADLINE_MS, onDeadline: () => { turn.accepting = false; thread.engine.abort() } })
+    }), { deadlineMs: this.options.deadlineMs ?? AGENT_TURN_DEADLINE_MS, onDeadline: () => { turn.accepting = false; turn.cancellationOrigin ??= 'deadline'; thread.engine.abort() } })
     void deadline.taskSettled.then(() => { turn.physicalSettled = true })
     let result: TurnResult
     let canonical = history
@@ -399,7 +401,9 @@ export class AgentService {
         thread.modelWindow = prepareModelWindow(outcome.newHistory)
       }
       result ??= failure(turn.turnId, 'Engine ended without a result')
-      if (deadline.didExpire) {
+      const controlStatus = result.status === 'interrupted' ? 'interrupted' : turn.cancellationOrigin === 'user' ? 'cancelled' : undefined
+      if (controlStatus) result = { ...result, status: controlStatus, reason: controlStatus === 'interrupted' ? 'interrupted' : 'error' }
+      if (deadline.didExpire && !controlStatus) {
         const outcomeReason = selectOutcomeReason(result.outcomeReason, result.unfinishedResources?.length ? { code: 'recovery_required', scope: 'resources' } : { code: 'turn_deadline' })!
         result = { ...result, status: outcomeReasonStatus(outcomeReason), reason: 'max_iterations', outcomeReason }
       }
@@ -433,6 +437,7 @@ export class AgentService {
         thread.recoveryRequired = true
         thread.store.append({ type: 'error', turnId: turn.turnId, code: 'history_persistence_failed', message: result.output.slice(0, 4096) })
       }
+      if (controlStatus) result = { ...result, status: controlStatus, reason: controlStatus === 'interrupted' ? 'interrupted' : 'error' }
       if (result.status === 'needs_input' || result.outcomeReason?.code === 'recovery_required') thread.recoveryRequired = true
       const terminal = await saveTurnResult(thread.sessionDir, turn.turnId, result)
       thread.store.append({ type: 'turn.finished', turnId: turn.turnId, status: result.status ?? 'failed', ...terminal, historyRevision: thread.revision })

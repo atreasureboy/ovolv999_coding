@@ -10,6 +10,7 @@ import { readSessionSnapshot, releaseSessionOwnership, saveSession } from '../..
 import { AgentEventStore } from '../../src/core/agentEventStore.js'
 import { ApprovalBroker } from '../../src/core/approvalBroker.js'
 import { PermissionManager } from '../../src/core/permissionSystem.js'
+import { globalModuleRegistry } from '../../src/core/moduleRegistry.js'
 import { prepareModelWindow, readModelWindow, saveTurnResult } from '../../src/core/agentSession.js'
 import { randomUUID } from 'node:crypto'
 import type { EngineConfig, OpenAIMessage, Tool } from '../../src/core/types.js'
@@ -97,6 +98,36 @@ it('classifies the service turn deadline after cooperative cancellation', async 
   const { cwd, service } = await fixture(() => {}, {}, { deadlineMs: 200, finalizationGraceMs: 1000 })
   const started = await service.start({ cwd, text: 'wait' })
   expect((await service.wait(started.threadId, started.turnId)).result).toMatchObject({ status: 'limit_reached', outcomeReason: { code: 'turn_deadline' } })
+})
+
+it.each([false, true])('preserves explicit cancellation when real engine cleanup crosses the deadline (unsettled: %s)', async unsettled => {
+  let observed!: () => void
+  let release!: () => void
+  const barrier = new Promise<void>(resolve => { observed = resolve })
+  const name = 'slow-cancel-' + randomUUID()
+  globalModuleRegistry.register(name, () => ({
+    name,
+    boot: context => new Promise(resolve => {
+      if (!context.abortSignal) throw new Error('Missing cancellation signal')
+      release = () => resolve({})
+      context.abortSignal.addEventListener('abort', () => { if (!unsettled) setTimeout(release, 1150) }, { once: true })
+      observed()
+    }),
+  }))
+  const { cwd, requests, service } = await fixture(undefined, { enabledModules: [name], cancellationGraceMs: 1500 }, { deadlineMs: 1000, finalizationGraceMs: 2000 })
+  const started = await service.start({ cwd, text: 'wait for cancellation cleanup' })
+  try {
+    await barrier
+    await service.interrupt(started.threadId, started.turnId)
+    const { result } = await service.wait(started.threadId, started.turnId)
+    expect(result.status).toBe('cancelled')
+    expect(result.outcomeReason).toEqual(unsettled ? { code: 'recovery_required', scope: 'resources' } : undefined)
+    expect((await service.snapshot(started.threadId)).lastTurn?.result?.status).toBe('cancelled')
+    expect(requests).toEqual([])
+  } finally {
+    release?.()
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
 })
 
 it('rejects registering an engine that is already bound to another session', async () => {
