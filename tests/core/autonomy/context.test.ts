@@ -124,3 +124,35 @@ it('preserves stop receipts ahead of ordinary failure output when evidence must 
   expect(result.commands.some(command => command.cancelled)).toBe(true)
   expect(result.truncated).toBe(true)
 })
+
+const quotedCredentials = [
+  'password="abcdefghijklmnop secret-tail" token="qrstuvwxyzabcdef another-tail"',
+  String.raw`password="abcdefghijklmnop \"escaped-password\" secret-tail" token='qrstuvwxyzabcdef \'escaped-token\' another-tail'`,
+]
+
+it.each(quotedCredentials)('redacts full unknown quoted credentials before evidence cuts: %s', credentials => {
+  const raw = evidence('x'.repeat(8060) + ' ' + credentials + ' NONSECRET DIAGNOSTIC ' + 'z'.repeat(2000))
+  const result = sanitizeLoopEvidence(raw, [])
+  const serialized = JSON.stringify(result)
+  for (const fragment of ['abcdefghijklmnop', 'qrstuvwxyzabcdef', 'secret-tail', 'another-tail', 'escaped-password', 'escaped-token']) expect(serialized).not.toContain(fragment)
+  expect(result.commands[0].output).toContain('NONSECRET DIAGNOSTIC')
+  expect(Buffer.byteLength(result.commands[0].output)).toBeLessThanOrEqual(8192)
+  expect(result.failureFingerprint).toBe(fingerprintFailure(raw))
+  expect(result.truncated).toBe(true)
+})
+
+it.each(quotedCredentials)('redacts full unknown quoted credentials in feedback and task text near cuts: %s', credentials => {
+  const input = context({ ...evidence('x'.repeat(8060) + ' ' + credentials + ' NONSECRET DIAGNOSTIC ' + 'z'.repeat(2000)), truncated: false })
+  input.goal = 'g'.repeat(3900) + ' ' + credentials + ' NONSECRET GOAL ' + 'z'.repeat(1000)
+  input.acceptance = credentials
+  input.stateNote = 'n'.repeat(800) + ' ' + credentials + ' NONSECRET NOTE ' + 'z'.repeat(1000)
+  const result = buildLoopContext(input)
+  const serialized = JSON.stringify({ messages: result.messages, prompt: result.prompt })
+  for (const fragment of ['abcdefghijklmnop', 'qrstuvwxyzabcdef', 'secret-tail', 'another-tail', 'escaped-password', 'escaped-token']) expect(serialized).not.toContain(fragment)
+  expect(serialized).toContain('NONSECRET DIAGNOSTIC')
+  expect(serialized).toContain('NONSECRET GOAL')
+  expect(serialized).toContain('NONSECRET NOTE')
+  expect(serialized).toContain(reference.path)
+  expect(Buffer.byteLength(serialized)).toBeLessThanOrEqual(32768)
+  expect(result.truncated).toBe(true)
+})
