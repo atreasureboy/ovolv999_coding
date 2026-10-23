@@ -68,7 +68,7 @@ export class FrozenLoop {
     config.artifactPolicy = policy
     this.plan = createVerificationPlan(cwd, [...commands, ...detectVerifyCommands(cwd)], [], undefined, policy)
     config.frozenVerificationPlan = this.plan
-    this.goalHash = createHash('sha256').update(this.goal).update(this.acceptance).digest('hex')
+    this.goalHash = createHash('sha256').update(JSON.stringify([this.goal, this.acceptance])).digest('hex')
     this.knownSecrets.add(config.apiKey)
   }
 

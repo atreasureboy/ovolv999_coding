@@ -12,6 +12,7 @@ import * as verification from '../../src/core/verification.js'
 import type { ServerResponse } from 'node:http'
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { once } from 'node:events'
+import { createHash } from 'node:crypto'
 import type { Tool } from '../../src/core/types.js'
 import { FrozenLoop } from '../../src/core/autonomy/loopController.js'
 import { AgentTool } from '../../src/tools/agent.js'
@@ -423,4 +424,50 @@ it.each(['GOAL.md', 'ACCEPTANCE.md', '../package.json'])('preserves task identit
   expect(resumed.iterations).toBe(1)
   expect(f.requests).toHaveLength(1)
   expect(readFileSync(join(f.sessionDir, 'loop-controller', 'state.json'), 'utf8')).toBe(ledger)
+})
+
+it.each(['completed', 'continue'] as const)('rejects a goal/acceptance boundary transfer when resuming a %s checkpoint', async decision => {
+  const f = await setup({ check: decision === 'continue' ? 'process.exit(1)' : 'process.exit(0)' })
+  writeFileSync(join(f.loopDir, 'GOAL.md'), 'Ship the reviewed change\n')
+  writeFileSync(join(f.loopDir, 'ACCEPTANCE.md'), 'Must preserve authentication\n- [ ] A1: check `node check.cjs`')
+  const read = LoopAttemptStore.prototype.readEvidence
+  const pause = vi.spyOn(LoopAttemptStore.prototype, 'readEvidence').mockImplementation(function (this: LoopAttemptStore, reference) {
+    if (this.snapshot().current?.checkpoint?.decision.action === 'continue') throw new Error('simulated pause at a complete continue checkpoint')
+    return read.call(this, reference)
+  })
+  const first = await runLoop(f.client, f.renderer, { ...f.config, maxIters: 2 })
+  pause.mockRestore()
+  expect(state(f.sessionDir).current?.checkpoint?.decision).toMatchObject(decision === 'completed' ? { action: 'stop', status: 'completed' } : { action: 'continue' })
+  const ledgerPath = join(f.sessionDir, 'loop-controller', 'state.json')
+  const ledger = readFileSync(ledgerPath, 'utf8')
+  const submissions = f.requests.length
+  await f.client.dispose()
+  writeFileSync(join(f.loopDir, 'GOAL.md'), 'Ship the reviewed change\nMust preserve authentication\n')
+  writeFileSync(join(f.loopDir, 'ACCEPTANCE.md'), '- [ ] A1: check `node check.cjs`')
+  const resumed = await runLoop(f.createClient(), f.renderer, { ...f.config, maxIters: 2, resume: true })
+  expect(resumed.status).toBe('blocked')
+  expect(resumed.outcomeReason?.code).toBe('acceptance_invalidated')
+  expect(resumed.runId).toBe(first.runId)
+  expect(resumed.iterations).toBe(1)
+  expect(f.requests).toHaveLength(submissions)
+  expect(readFileSync(ledgerPath, 'utf8')).toBe(ledger)
+})
+
+it('fails closed when resuming a saved task with the former unframed goal identity', async () => {
+  const f = await setup()
+  const first = await runLoop(f.client, f.renderer, f.config)
+  await f.client.dispose()
+  const ledgerPath = join(f.sessionDir, 'loop-controller', 'state.json')
+  const saved = state(f.sessionDir)
+  saved.goalHash = createHash('sha256').update(readFileSync(join(f.loopDir, 'GOAL.md'))).update(readFileSync(join(f.loopDir, 'ACCEPTANCE.md'))).digest('hex')
+  writeFileSync(ledgerPath, JSON.stringify(saved))
+  const ledger = readFileSync(ledgerPath, 'utf8')
+  const submissions = f.requests.length
+  const resumed = await runLoop(f.createClient(), f.renderer, { ...f.config, resume: true })
+  expect(resumed.status).toBe('blocked')
+  expect(resumed.outcomeReason?.code).toBe('acceptance_invalidated')
+  expect(resumed.runId).toBe(first.runId)
+  expect(resumed.iterations).toBe(1)
+  expect(f.requests).toHaveLength(submissions)
+  expect(readFileSync(ledgerPath, 'utf8')).toBe(ledger)
 })
