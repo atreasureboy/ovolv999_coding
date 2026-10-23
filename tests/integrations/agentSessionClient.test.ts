@@ -20,6 +20,20 @@ import type { ProviderContinuationState } from '../../src/core/model/types.js'
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.unstubAllEnvs() })
 
+it.each(['turn.started', 'turn.finished'] as const)('delivers the durable lifecycle before rendering and recovers from a throwing %s callback', async target => {
+  const delivered: string[] = []
+  const { client } = await fixture({ onEvent: event => { delivered.push(`render:${event.type}`) } })
+  await expect(client.runTurn('first', undefined, undefined, { onEvent: event => {
+    delivered.push(`lifecycle:${event.type}`)
+    if (event.type === target) throw new Error('lifecycle persistence failed')
+  } })).rejects.toThrow('lifecycle persistence failed')
+  expect(delivered).toContain(`lifecycle:${target}`)
+  expect(delivered).not.toContain(`render:${target}`)
+  expect(client.activeTurnId).toBeUndefined()
+  const snapshot = await client.snapshot()
+  expect(snapshot.activeTurn).toBeNull()
+})
+
 async function fixture(options: { history?: OpenAIMessage[]; onEvent?: (event: AgentEvent) => void | Promise<void>; sessionResources?: boolean; finalizationGraceMs?: number; expectedDisposalFailure?: boolean; engineConfig?: Partial<EngineConfig>; respond?: (request: Record<string, unknown>, response: ServerResponse, index: number) => void } = {}) {
   const base = mkdtempSync(join(tmpdir(), 'ovo-session-client-'))
   const cwd = join(base, 'workspace'), sessionDir = join(cwd, 'sessions', 'session_first')

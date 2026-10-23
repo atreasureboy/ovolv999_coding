@@ -322,9 +322,12 @@ Failed or unavailable verification prevents acceptance of code changes.
       ? Renderer.forFile(paneSlot.logFile)
       : (parentRenderer as Renderer)
     const runtimePaths = [...(parentConfig.verificationExcludedPaths ?? []), ...(context.verificationExcludedPaths ?? []), ...[parentConfig.sessionDir, context.sessionDir].filter((path): path is string => Boolean(path))]
+    const artifactPolicy = parentConfig.artifactPolicy && workspaceIdentity(context.cwd) === workspaceIdentity(parentConfig.artifactPolicy.workspace) ? parentConfig.artifactPolicy : undefined
 
     const childConfig: EngineConfig = {
       ...parentConfig,
+      frozenVerificationPlan: undefined,
+      artifactPolicy,
       agent: agentConfig,
       cwd: context.cwd,
       parentRunId: context.runId,
@@ -442,12 +445,12 @@ Failed or unavailable verification prevents acceptance of code changes.
       if (context.signal?.aborted) {
         response = { content: '[' + agentLabel + '] Cancelled (parent task aborted)', isError: true, status: 'cancelled' }
       } else {
-        const plan = createVerificationPlan(context.cwd, undefined, runtimePaths)
+        const plan = createVerificationPlan(context.cwd, undefined, runtimePaths, undefined, artifactPolicy)
         verificationExcludedPaths = plan.excludedPaths
-        const before = await captureArtifactVersion(context.cwd, verificationExcludedPaths)
+        const before = await captureArtifactVersion(context.cwd, verificationExcludedPaths, { artifactPolicy })
         context.signal?.throwIfAborted()
         const { result } = await awaitChild(childEngine.runTurn(delegatedPrompt, []), context.cwd, context.signal, parentConfig.cancellationGraceMs ?? 2000)
-        const artifactVersion = await captureArtifactVersion(context.cwd, verificationExcludedPaths)
+        const artifactVersion = await captureArtifactVersion(context.cwd, verificationExcludedPaths, { artifactPolicy })
         const changed = before !== artifactVersion
         let status = context.signal?.aborted ? 'cancelled' as const : normalizeOutcome(result)
         let verification: VerificationEvidence = result.verification ?? {
@@ -499,7 +502,7 @@ Failed or unavailable verification prevents acceptance of code changes.
     response ??= { content: 'Child execution did not produce a terminal result.', isError: true, status: 'failed' }
     if (response.verification?.status === 'passed' && response.status === 'completed') {
       try {
-        if (response.verification.artifactVersion !== await captureArtifactVersion(context.cwd, verificationExcludedPaths)) {
+        if (response.verification.artifactVersion !== await captureArtifactVersion(context.cwd, verificationExcludedPaths, { artifactPolicy })) {
           response = { ...response, isError: true, status: 'blocked', outcomeReason: { code: 'acceptance_invalidated' }, verification: { ...response.verification, status: 'failed', outcomeReason: { code: 'acceptance_invalidated' }, output: `${response.verification.output}\nArtifact changed during child cleanup.` } }
         }
       } catch (error) {

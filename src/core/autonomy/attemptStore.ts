@@ -4,7 +4,7 @@ import { isAbsolute, join, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { acquirePersistenceLease, type PersistenceLease } from '../persistenceLock.js'
 import { canonicalWorkspaceIdentity } from '../workspaceLease.js'
-import { OutcomeError } from '../outcome.js'
+import { OutcomeError, type OutcomeReason } from '../outcome.js'
 import { checkpointSchema, evidenceRefSchema, evidenceSchema, identitySchema, stateSchema, terminalSchema, turnSchema } from './attemptSchema.js'
 import type { LoopAttempt, LoopAttemptStoreOptions, LoopCheckpoint, LoopEvidence, LoopEvidenceRef, LoopState, LoopTerminal } from './types.js'
 
@@ -12,6 +12,18 @@ const maxBytes = 256 * 1024
 const decoder = new TextDecoder('utf-8', { fatal: true })
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
 const digest = (value: Buffer): string => createHash('sha256').update(value).digest('hex')
+
+export class LoopIdentityError extends OutcomeError {
+  readonly taskId: string
+  readonly consumedIterations: number
+
+  constructor(message: string, reason: OutcomeReason, state: Pick<LoopState, 'taskId' | 'consumedIterations'>) {
+    super(message, reason)
+    this.name = 'LoopIdentityError'
+    this.taskId = state.taskId
+    this.consumedIterations = state.consumedIterations
+  }
+}
 
 function recovery(message: string, cause?: unknown): OutcomeError {
   return new OutcomeError(message, { code: 'recovery_required', scope: 'session' }, { cause })
@@ -101,8 +113,8 @@ export class LoopAttemptStore {
         const raw: unknown = JSON.parse(decoder.decode(readBytes(path)))
         state = stateSchema.parse(raw)
         if (!isDeepStrictEqual(raw, state)) throw new Error('Unexpected loop ledger fields')
-        if (state.workspace !== identity.workspace || state.sessionId !== identity.sessionId) throw new Error('Loop workspace or session identity changed')
-        if (state.goalHash !== identity.goalHash || state.definitionHash !== identity.definitionHash) throw new OutcomeError('Loop goal or acceptance definition changed', { code: 'acceptance_invalidated' })
+        if (state.workspace !== identity.workspace || state.sessionId !== identity.sessionId) throw new LoopIdentityError('Loop workspace or session identity changed', { code: 'recovery_required', scope: 'session' }, state)
+        if (state.goalHash !== identity.goalHash || state.definitionHash !== identity.definitionHash) throw new LoopIdentityError('Loop goal or acceptance definition changed', { code: 'acceptance_invalidated' }, state)
       }
       const store = new LoopAttemptStore(sessionDir, root, lease, state)
       store.assertOwned()
@@ -208,7 +220,7 @@ export class LoopAttemptStore {
     for (const path of [this.root, join(this.root, 'evidence'), join(this.root, 'attempts'), join(this.root, 'writer.lock.owners')]) directory(path)
   }
 
-  private assertOwned(): void {
+  assertOwned(): void {
     try {
       if (this.closed || this.failure) throw this.failure ?? new Error('Loop store is closed')
       this.assertDirectories()

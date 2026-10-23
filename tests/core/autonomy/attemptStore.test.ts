@@ -131,6 +131,7 @@ it.each(['goalHash', 'definitionHash', 'sessionId', 'workspace'] as const)('reje
   store.close()
   const changed = { ...options.identity, [key]: key === 'workspace' ? tmpdir() : 'changed' }
   await expect(open({ ...options, mode: 'resume', identity: changed })).rejects.toMatchObject({ outcomeReason: { code: key === 'goalHash' || key === 'definitionHash' ? 'acceptance_invalidated' : 'recovery_required' } })
+  await expect(open({ ...options, mode: 'resume', identity: changed })).rejects.toMatchObject({ taskId: store.snapshot().taskId, consumedIterations: 0 })
 })
 
 it('keeps stored limits, stagnation and previous checkpoint without completing a pending attempt', async () => {

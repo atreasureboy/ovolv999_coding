@@ -2,7 +2,7 @@ import { isDeepStrictEqual } from 'node:util'
 import { realpathSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { AgentService, AgentServiceError } from './agentService.js'
-import type { AgentEvent } from './agentEvents.js'
+import type { AgentEvent, AgentThreadSnapshot } from './agentEvents.js'
 import { ExecutionEngine } from './engine.js'
 import { bindEngineSession } from './engineSession.js'
 import type { EngineObserver } from './engine/observer.js'
@@ -20,6 +20,10 @@ export interface AgentSessionClientOptions {
   onEvent?: (event: AgentEvent) => void | Promise<void>
   deadlineMs?: number
   finalizationGraceMs?: number
+}
+
+export interface AgentTurnLifecycle {
+  onEvent?: (event: AgentEvent) => void | Promise<void>
 }
 
 export class AgentSessionClient {
@@ -53,6 +57,11 @@ export class AgentSessionClient {
   getHistory(): OpenAIMessage[] { return structuredClone(this.history) }
   getModelWindow(): OpenAIMessage[] { return structuredClone(this.modelWindow) }
 
+  async snapshot(): Promise<AgentThreadSnapshot> {
+    await this.initialize()
+    return this.service.snapshot(this.identity!)
+  }
+
   initialize(): Promise<void> {
     if (this.disposed) return Promise.reject(new AgentServiceError('client_disposed', 'Session client is disposed'))
     this.ready ??= this.initializeSession()
@@ -79,7 +88,7 @@ export class AgentSessionClient {
     }
   }
 
-  runTurn(text: string, images?: readonly { path: string; dataUrl: string }[], onPromptSubmit?: (signal: AbortSignal) => unknown): Promise<{ result: TurnResult; newHistory: OpenAIMessage[] }> {
+  runTurn(text: string, images?: readonly { path: string; dataUrl: string }[], onPromptSubmit?: (signal: AbortSignal) => unknown, lifecycle?: AgentTurnLifecycle): Promise<{ result: TurnResult; newHistory: OpenAIMessage[] }> {
     const submittedImages = images ? structuredClone([...images]) : undefined
     if (!this.operation) this.cancelledBeforeStart = false
     return this.exclusive(async () => {
@@ -100,7 +109,8 @@ export class AgentSessionClient {
       let terminal = false
       try {
         for await (const event of this.service.subscribe(threadId, before.lastSequence, { signal: delivery.signal })) {
-          if (this.options.onEvent) await this.deliver(event, delivery.signal)
+          if (lifecycle?.onEvent) await this.deliver(event, delivery.signal, lifecycle.onEvent)
+          if (this.options.onEvent) await this.deliver(event, delivery.signal, this.options.onEvent)
           if (event.type === 'turn.finished' && event.turnId === this.active.turnId) { terminal = true; break }
         }
         if (!terminal) throw failure instanceof Error ? failure : new Error('Session event stream ended before its durable result')
@@ -241,12 +251,12 @@ export class AgentSessionClient {
     return process.platform === 'win32' ? resolve(left).toLowerCase() === resolve(right).toLowerCase() : resolve(left) === resolve(right)
   }
 
-  private async deliver(event: AgentEvent, signal: AbortSignal): Promise<void> {
+  private async deliver(event: AgentEvent, signal: AbortSignal, callback: (event: AgentEvent) => void | Promise<void>): Promise<void> {
     signal.throwIfAborted()
     let abort!: () => void
     try {
       await Promise.race([
-        Promise.resolve().then(() => this.options.onEvent!(event)),
+        Promise.resolve().then(() => callback(event)),
         new Promise<never>((_resolve, reject) => { abort = () => reject(new Error('Event delivery cancelled', { cause: signal.reason })); signal.addEventListener('abort', abort, { once: true }) }),
       ])
     } finally { signal.removeEventListener('abort', abort) }

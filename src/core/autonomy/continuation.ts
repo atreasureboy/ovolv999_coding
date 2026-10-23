@@ -40,7 +40,7 @@ export function decideContinuation(state: LoopState, observation: LoopObservatio
     decision: { action: 'stop' as const, status, ...(reason ? { reason } : {}), detail }, stagnation,
   })
   if (observation.cancelled || observation.status === 'cancelled' || verification.commands.some(command => command.cancelled)) return stop('cancelled', 'Loop execution was cancelled')
-  if (observation.status === 'interrupted') return stop('interrupted', 'Loop execution was interrupted')
+  if (observation.status === 'interrupted') return stop('interrupted', 'Loop execution was interrupted', observation.reason)
   const recovery = observation.recoveryRequired || observation.unfinishedResources.length || verification.unfinishedResources?.length || verification.commands.some(command => command.unfinishedResources?.length)
   const reason = selectOutcomeReason(
     observation.reason?.code === 'acceptance_failed' ? undefined : observation.reason,

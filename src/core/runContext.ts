@@ -138,7 +138,7 @@ export function initializeRunStore(run: RunContext): void {
   run.store = new RunStore(runtimeStateRoot(), { runId: run.runId, parentRunId: run.parentRunId, workspace: run.workspace.cwd })
 }
 
-export async function withWorkspaceAccess<T>(cwd: string, familyId: string, write: boolean, signal: AbortSignal, operation: () => Promise<T>): Promise<T> {
+export async function withWorkspaceAccess<T>(cwd: string, familyId: string, write: boolean, signal: AbortSignal, operation: (assertOwned: () => void) => Promise<T>): Promise<T> {
   const key = workspaceIdentity(cwd)
   const gate = gates.get(key) ?? { active: new Set<Lease>(), waiters: new Set<() => void>() }
   gates.set(key, gate)
@@ -203,7 +203,7 @@ export async function withWorkspaceAccess<T>(cwd: string, familyId: string, writ
     }
     owned.assertOwned()
     operationStarted = true
-    const result = await scope.run(operation)
+    const result = await scope.run(() => operation(owned.assertOwned))
     owned.assertOwned()
     return result
   } catch (error) {

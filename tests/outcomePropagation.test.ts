@@ -7,6 +7,7 @@ import { runSingleTask } from '../bin/ovogogogo.js'
 import { runLoop } from '../src/core/loopEngine.js'
 import { Renderer } from '../src/ui/renderer.js'
 import { createSessionDir } from '../src/core/sessionManager.js'
+import { AgentSessionClient } from '../src/core/agentSessionClient.js'
 
 const oldExitCode = process.exitCode
 afterEach(() => { process.exitCode = oldExitCode })
@@ -58,6 +59,7 @@ describe('actual command failure propagation', () => {
 
   it('blocks stale command evidence in Loop despite a stale DONE marker', async () => {
     const { cwd, renderer, engine } = fixture()
+    const client = new AgentSessionClient({ engine, observer: renderer, cwd })
     const turn = vi.spyOn(engine, 'runTurn')
     const loopDir = join(cwd, '.loop')
     mkdirSync(loopDir)
@@ -65,14 +67,16 @@ describe('actual command failure propagation', () => {
     writeFileSync(join(loopDir, 'ACCEPTANCE.md'), '- [ ] A1: check `node check.cjs`')
     writeFileSync(join(loopDir, 'DONE.flag'), 'old accepted run')
     try {
-      const result = await runLoop(engine, renderer, { cwd, loopDir, maxIters: 1 })
+      const result = await runLoop(client, renderer, { cwd, loopDir, maxIters: 1 })
       expect(existsSync(join(cwd, 'check-ran.txt'))).toBe(true)
       expect(result.status).toBe('blocked')
       expect((await turn.mock.results[0].value).result.outcomeReason).toEqual({ code: 'acceptance_invalidated' })
       expect(readFileSync(join(loopDir, 'DONE.flag'), 'utf8')).toBe('old accepted run')
-      expect(JSON.parse(readFileSync(join(loopDir, 'OUTCOME.json'), 'utf8')).status).toBe('blocked')
+      expect(result.outcomeReason).toEqual({ code: 'recovery_required', scope: 'operation' })
+      expect(existsSync(join(loopDir, 'OUTCOME.json'))).toBe(false)
+      expect(JSON.parse(readFileSync(join(client.sessionDir, 'loop-controller', 'state.json'), 'utf8')).current.phase).toBe('settled')
     } finally {
-      await engine.dispose()
+      await client.dispose()
       renderer.destroy()
     }
   })

@@ -36,7 +36,7 @@ import { createInkApprovalHost, createTerminalApprovalHost } from '../src/cli/ap
 import { recordBackgroundOutcome } from '../src/core/backgroundSession.js'
 import { resolveContextWindow } from '../src/core/compact.js'
 import { ExecutionEngine } from '../src/core/engine.js'
-import type { AgentSessionClient } from '../src/core/agentSessionClient.js'
+import { AgentSessionClient } from '../src/core/agentSessionClient.js'
 import { EpisodicMemory } from '../src/core/episodicMemory.js'
 import { EventLog } from '../src/core/eventLog.js'
 import { getCurrentMode, getVerbosityPrompt } from '../src/core/modes.js'
@@ -581,13 +581,16 @@ async function main(): Promise<void> {
     }
     if (loop) {
       const { runLoop } = await import('../src/core/loopEngine.js')
+      const { createAgentEventRenderer } = await import('../src/ui/agentEventRenderer.js')
+      const client = new AgentSessionClient({ engine, observer: inkRendererInstance ?? renderer, cwd, sessionDir, history: resumedHistory, onEvent: createAgentEventRenderer(renderer) })
+      bindClient(client)
       renderer.info('Loop mode activated — reading .loop/ configuration')
-      const outcome = await runLoop(engine, renderer, {
+      const outcome = await runLoop(client, renderer, {
         cwd,
         loopDir: join(cwd, '.loop'),
         maxIters: loopMaxIters,
         signal: lifecycleController.signal,
-        sessionDir,
+        onPromptSubmit: (text, signal) => hookRunner.runUserPromptSubmit(text, signal),
       })
       process.exitCode = outcomeExitCode(outcome.status)
       recordBackgroundOutcome(outcome.status, outcome.verification)

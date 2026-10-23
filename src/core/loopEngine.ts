@@ -1,19 +1,21 @@
-import { readFileSync, writeFileSync, existsSync } from 'fs'
-import { join } from 'path'
-import { randomUUID, createHash } from 'crypto'
-import type { ExecutionEngine } from './engine.js'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
+import type { AgentSessionClient } from './agentSessionClient.js'
+import { AgentServiceError } from './agentService.js'
 import type { Renderer } from '../ui/renderer.js'
-import { normalizeOutcome } from './outcome.js'
-import type { OutcomeStatus, VerificationEvidence } from './outcome.js'
-import { createVerificationPlan, detectVerifyCommands, executeVerification, captureArtifactVersion } from './verification.js'
-import { withWorkspaceAccess } from './runContext.js'
+import { OutcomeError, outcomeReasonStatus, type OutcomeReason, type OutcomeStatus, type VerificationEvidence } from './outcome.js'
+import { LoopAttemptStore, LoopIdentityError } from './autonomy/attemptStore.js'
+import { FrozenLoop, assertLoopSession, readStagnationLimit } from './autonomy/loopController.js'
+import type { LoopState } from './autonomy/types.js'
 
-interface LoopConfig {
+export interface LoopConfig {
   cwd: string
   loopDir: string
   maxIters: number
+  maxItersExplicit?: boolean
+  resume?: boolean
   signal?: AbortSignal
-  sessionDir?: string
+  onPromptSubmit?: (text: string, signal: AbortSignal) => unknown
 }
 
 export interface LoopResult {
@@ -21,110 +23,121 @@ export interface LoopResult {
   verification: VerificationEvidence
   iterations: number
   runId: string
+  outcomeReason?: OutcomeReason
+  detail?: string
 }
 
-function tryRead(path: string): string {
-  try { return readFileSync(path, 'utf8') } catch { return '' }
-}
-
-function parseAcceptance(content: string): Array<{ id: string; command: string }> {
-  return content.split('\n').flatMap(line => {
-    const match = line.match(/^\s*-\s*\[.\]\s*(A\d+):\s*.*?`([^`]+)`/)
-    return match ? [{ id: match[1], command: match[2] }] : []
-  })
-}
-
-export async function runLoop(engine: ExecutionEngine, renderer: Renderer, config: LoopConfig): Promise<LoopResult> {
+export async function runLoop(client: AgentSessionClient, renderer: Renderer, config: LoopConfig): Promise<LoopResult> {
   const { cwd, loopDir, signal } = config
-  const runId = randomUUID()
-  const maxIters = Number.isSafeInteger(config.maxIters) && config.maxIters > 0 ? config.maxIters : 12
-  let verification: VerificationEvidence = { status: 'not_run', workspace: cwd, runId, commands: [], output: '' }
-  const finish = (status: OutcomeStatus, iterations: number): LoopResult => {
-    const outcome = { status, verification, iterations, runId }
-    if (existsSync(loopDir)) writeFileSync(join(loopDir, 'OUTCOME.json'), JSON.stringify(outcome, null, 2))
-    return outcome
+  const maxIterations = Number.isSafeInteger(config.maxIters) && config.maxIters > 0 ? config.maxIters : 12
+  let store: LoopAttemptStore | undefined
+  let restoreEngine: (() => void) | undefined
+  let rejectedIdentity: Pick<LoopState, 'taskId' | 'consumedIterations'> | undefined
+  let verification: VerificationEvidence = { status: 'not_run', workspace: cwd, commands: [], output: '' }
+  const finish = (status: OutcomeStatus, detail: string, outcomeReason?: OutcomeReason): LoopResult => {
+    const state = store?.snapshot() ?? rejectedIdentity
+    return { status, verification, iterations: state?.consumedIterations ?? 0, runId: state?.taskId ?? '', detail, ...(outcomeReason ? { outcomeReason } : {}) }
   }
-  if (!existsSync(loopDir)) {
-    renderer.error(`Loop configuration directory is missing: ${loopDir}`)
-    return finish('blocked', 0)
+  const stopped = (state: LoopState): LoopResult | undefined => {
+    const decision = state.current?.checkpoint?.decision
+    if (decision?.action === 'stop') return finish(decision.status, decision.detail, decision.reason)
+    return undefined
   }
-  const goal = tryRead(join(loopDir, 'GOAL.md'))
-  const acceptanceRaw = tryRead(join(loopDir, 'ACCEPTANCE.md'))
-  const acceptanceItems = parseAcceptance(acceptanceRaw)
-  if (!goal.trim() || !acceptanceItems.length) {
-    renderer.error('Loop requires a goal and at least one executable acceptance check.')
-    verification = { ...verification, status: 'not_applicable', output: 'No executable acceptance definition.' }
-    return finish('blocked', 0)
-  }
-  const plan = createVerificationPlan(cwd, [...acceptanceItems.map(item => item.command), ...detectVerifyCommands(cwd)], config.sessionDir ? [config.sessionDir] : [])
-  const goalHash = createHash('sha256').update(goal).update(acceptanceRaw).digest('hex')
-  const abort = (): void => engine.abort()
-  signal?.addEventListener('abort', abort, { once: true })
+  const interrupt = (): void => { void client.interrupt().catch(() => {}) }
+  signal?.addEventListener('abort', interrupt, { once: true })
+  let output: LoopResult
   try {
-    for (let iter = 1; iter <= maxIters; iter++) {
-      if (signal?.aborted) return finish('cancelled', iter - 1)
-      if (existsSync(join(loopDir, 'PARKED.flag'))) {
-        renderer.warn('PARKED flag detected; task is blocked.')
-        return finish('blocked', iter - 1)
+    output = await (async (): Promise<LoopResult> => {
+      if (!existsSync(loopDir)) return finish('blocked', 'Loop configuration directory is missing')
+      await client.initialize()
+      const engineConfig = client.engine.getConfig()
+      const originalPolicy = engineConfig.artifactPolicy, originalPlan = engineConfig.frozenVerificationPlan
+      restoreEngine = () => { engineConfig.artifactPolicy = originalPolicy; engineConfig.frozenVerificationPlan = originalPlan }
+      const stagnationLimit = readStagnationLimit(loopDir)
+      let frozen: FrozenLoop
+      try { frozen = new FrozenLoop(client, cwd, loopDir) } catch (error) {
+        if (error instanceof OutcomeError && error.outcomeReason.code === 'verification_unavailable') verification = { ...verification, status: 'not_applicable', output: error.message }
+        throw error
       }
-      if (tryRead(join(loopDir, 'GOAL.md')) !== goal || tryRead(join(loopDir, 'ACCEPTANCE.md')) !== acceptanceRaw) {
-        renderer.error('Frozen goal or acceptance definition changed; restart with reviewed criteria.')
-        return finish('blocked', iter - 1)
-      }
-      renderer.info(`Loop iteration ${iter}/${maxIters}`)
-      const prompt = [
-        'Execute one iteration toward the frozen goal below.',
-        'Read .loop/STATE.md and project conventions, make the required changes, and report their actual status.',
-        'Do not modify GOAL.md or ACCEPTANCE.md. DONE.flag is only a request for independent acceptance.',
-        'The controller independently executes the frozen acceptance checks and project checks.',
-        'If blocked, explain why in STATE.md. Do not claim completion based on a marker or model stop.',
-        `Run identity: ${runId}`,
-        'STATE.md:', tryRead(join(loopDir, 'STATE.md')),
-        'GOAL.md:', goal, 'ACCEPTANCE.md:', acceptanceRaw,
-      ].join('\n\n')
-      try {
-        const { result } = await engine.runTurn(prompt, [])
-        const status = signal?.aborted ? 'cancelled' : normalizeOutcome(result)
-        if (status !== 'completed') {
-          verification = result.verification ?? verification
-          renderer.warn(`Iteration ended with status ${status}`)
-          if (status !== 'failed' || iter === maxIters) return finish(status, iter)
-          continue
+      store = await LoopAttemptStore.open({ sessionDir: client.sessionDir, mode: config.resume ? 'resume' : 'create',
+        identity: { workspace: frozen.plan.workspace, sessionId: client.threadId!, goalHash: frozen.goalHash, definitionHash: frozen.plan.definitionHash },
+        maxIterations, stagnationLimit, signal,
+      })
+      let state = store.snapshot()
+      if (config.resume && state.current && state.current.phase !== 'checkpointed') return finish('blocked', 'Incomplete submission requires explicit recovery; no attempt was replayed or refunded', { code: 'recovery_required', scope: 'session' })
+      if (signal?.aborted) return finish('cancelled', 'Loop execution was cancelled')
+      if (existsSync(join(loopDir, 'PARKED.flag'))) return finish('blocked', 'PARKED flag detected')
+      if (config.resume) {
+        if (maxIterations !== state.maxIterations) {
+          if (config.maxItersExplicit) return finish('blocked', 'Explicit iteration limit conflicts with the saved task', { code: 'recovery_required', scope: 'session' })
+          renderer.warn(`Using saved Loop iteration limit ${state.maxIterations}; configured default ${maxIterations} was ignored`)
         }
-      } catch (error) {
-        renderer.error(`Iteration failed: ${(error as Error).message}`)
-        if (signal?.aborted) return finish('cancelled', iter)
-        if (iter === maxIters) return finish('failed', iter)
-        continue
+        const snapshot = await client.snapshot()
+        assertLoopSession(state, snapshot)
+        const checkpoint = state.current?.checkpoint
+        if (checkpoint) {
+          verification = store.readEvidence(checkpoint.evidence)
+          if (checkpoint.decision.action === 'stop' && checkpoint.decision.status === 'completed') {
+            const unchanged = await frozen.guarded(state, signal ?? new AbortController().signal, async assertOwned => {
+              store!.assertOwned()
+              const matches = frozen.matches() && await frozen.capture(signal) === checkpoint.artifactVersion
+              assertOwned(); store!.assertOwned()
+              return matches
+            })
+            if (unchanged) return stopped(state)!
+            const validated = await frozen.checkpoint(store, snapshot, { stopped: true, reason: 'stop_sequence', status: 'completed', output: '' }, signal, true)
+            verification = validated.verification
+            state = validated.state
+          }
+          const terminal = stopped(state)
+          if (terminal) return terminal
+        }
       }
-      if (tryRead(join(loopDir, 'GOAL.md')) !== goal || tryRead(join(loopDir, 'ACCEPTANCE.md')) !== acceptanceRaw) {
-        renderer.error('Frozen goal or acceptance definition changed during execution.')
-        return finish('blocked', iter)
-      }
-      try {
-        verification = await withWorkspaceAccess(cwd, runId, true, signal ?? new AbortController().signal, async () =>
-          executeVerification({ cwd, plan, signal, runId, executionProfile: engine.getConfig?.().executionProfile, executionPolicy: engine.getConfig?.().executionPolicy, artifactVersion: await captureArtifactVersion(cwd, plan.excludedPaths, { signal }) }),
+      for (;;) {
+        state = store.snapshot()
+        if (signal?.aborted) return finish('cancelled', 'Loop execution was cancelled')
+        if (existsSync(join(loopDir, 'PARKED.flag'))) return finish('blocked', 'PARKED flag detected')
+        if (!frozen.matches()) return finish('blocked', 'Frozen goal or acceptance changed; create a reviewed task', { code: 'acceptance_invalidated' })
+        if (state.consumedIterations >= state.maxIterations) return finish('limit_reached', 'Loop iteration limit reached')
+        assertLoopSession(state, await client.snapshot())
+        const context = await frozen.context(store, signal ?? new AbortController().signal)
+        await client.replaceModelWindow(context.messages)
+        if (signal?.aborted) return finish('cancelled', 'Loop execution was cancelled before submission')
+        state = store.prepare(store.snapshot().revision)
+        const attemptId = state.current!.id
+        renderer.info(`Loop iteration ${state.consumedIterations}/${state.maxIterations}`)
+        const { result } = await client.runTurn(context.prompt, undefined,
+          config.onPromptSubmit ? hookSignal => config.onPromptSubmit!(context.prompt, hookSignal) : undefined,
+          { onEvent: event => {
+            const current = store!.snapshot()
+            if (event.type === 'turn.started') store!.dispatch(attemptId, current.revision, { threadId: event.threadId, turnId: event.turnId })
+            if (event.type === 'turn.finished') store!.settle(attemptId, current.revision, {
+              threadId: event.threadId, turnId: event.turnId, finishedSequence: event.sequence, historyRevision: event.historyRevision,
+              status: event.status, reason: event.result.reason, ...(event.result.outcomeReason ? { outcomeReason: event.result.outcomeReason } : {}),
+              unfinishedResources: event.result.unfinishedResources ?? [],
+            })
+          } },
         )
-      } catch (error) {
-        verification = { ...verification, status: 'not_run', output: String(error) }
-        if (signal?.aborted) return finish('cancelled', iter)
-        return finish((error as Error).name === 'WorkspaceUnavailableError' ? 'blocked' : 'failed', iter)
-      }
-      renderer.info(verification.output)
-      if (signal?.aborted) return finish('cancelled', iter)
-      if (verification.status === 'passed') {
-        if (tryRead(join(loopDir, 'GOAL.md')) !== goal || tryRead(join(loopDir, 'ACCEPTANCE.md')) !== acceptanceRaw) {
-          verification = { ...verification, status: 'failed', output: `${verification.output}\nFrozen goal or acceptance changed during verification.` }
-          return finish('blocked', iter)
+        const committed = await frozen.checkpoint(store, await client.snapshot(), result, signal)
+        verification = committed.verification
+        renderer.info(verification.output)
+        const terminal = stopped(committed.state)
+        if (terminal) {
+          if (terminal.status === 'completed') renderer.success('Independent Loop acceptance passed for the current artifact')
+          return terminal
         }
-        writeFileSync(join(loopDir, 'DONE.flag'), JSON.stringify({ runId, goalHash, artifactVersion: verification.artifactVersion, definitionHash: verification.definitionHash, iteration: iter, acceptedAt: new Date().toISOString() }, null, 2))
-        renderer.success('Acceptance checks and project checks passed for the current artifact.')
-        return finish('completed', iter)
       }
-      renderer.warn('Acceptance failed; current artifacts are retained.')
-    }
-    return finish('limit_reached', maxIters)
+    })()
+  } catch (error) {
+    if (error instanceof LoopIdentityError) rejectedIdentity = { taskId: error.taskId, consumedIterations: error.consumedIterations }
+    const reason: OutcomeReason = error instanceof OutcomeError ? error.outcomeReason : { code: 'recovery_required', scope: error instanceof AgentServiceError ? 'session' : 'workspace' }
+    const detail = error instanceof Error ? error.message : String(error)
+    renderer.error(detail)
+    output = finish(signal?.aborted ? 'cancelled' : reason.code === 'verification_unavailable' ? 'blocked' : outcomeReasonStatus(reason), detail, reason)
   } finally {
-    signal?.removeEventListener('abort', abort)
+    signal?.removeEventListener('abort', interrupt)
+    restoreEngine?.()
   }
+  try { store?.close() } catch (error) { output = finish('blocked', error instanceof Error ? error.message : String(error), { code: 'recovery_required', scope: 'session' }) }
+  return output
 }

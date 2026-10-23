@@ -12,6 +12,7 @@ import { createModelGateway } from './modelGateway.js'
 import { getEffortPrompt, isEffortLevel, type EffortLevel } from './effort.js'
 import { runHookOperation } from './hookLifecycle.js'
 import { createHash, randomUUID } from 'crypto'
+import { isDeepStrictEqual } from 'node:util'
 import { join, resolve } from 'node:path'
 import { UsageLedger } from './usageLedger.js'
 import { createLoopArtifactPolicy } from './artifactPolicy.js'
@@ -875,12 +876,14 @@ export class ExecutionEngine {
       initializeRunStore(run)
       this.turnEvents.message('user:' + run.runId, userMessage, 'user')
       const planMode = this.isPlanMode()
-      const verificationPlan = createVerificationPlan(this.config.cwd, undefined, [
+      const frozenPlan = this.config.frozenVerificationPlan
+      const verificationPlan = frozenPlan ? createVerificationPlan(this.config.cwd, frozenPlan.commands, frozenPlan.excludedPaths, frozenPlan.checks, this.config.artifactPolicy) : createVerificationPlan(this.config.cwd, undefined, [
         ...(this.config.verificationExcludedPaths ?? []),
         ...(!this.config.artifactPolicy && this.config.sessionDir ? [this.config.sessionDir] : []),
         getBudgetPath(this.config.budgetRoot ?? this.config.cwd),
         `${getBudgetPath(this.config.budgetRoot ?? this.config.cwd)}.lock.owners`,
       ], undefined, this.config.artifactPolicy)
+      if (frozenPlan && !isDeepStrictEqual(verificationPlan, frozenPlan)) throw new OutcomeError('Frozen verification plan no longer matches this engine workspace or policy', { code: 'acceptance_invalidated' })
       const startingArtifact = await runOperation(
         run,
         'artifact:snapshot',
