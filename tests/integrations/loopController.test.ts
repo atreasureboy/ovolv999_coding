@@ -337,7 +337,7 @@ it('discards session-bound Loop policy when switching to a different service ses
   expect(result.result.verification?.status).toBe('not_applicable')
 })
 
-it('resumes only a complete continue checkpoint and keeps its frozen threshold', async () => {
+it('rejects changed thresholds on a complete continue checkpoint without resetting it', async () => {
   const f = await setup({ check: "if (!require('fs').existsSync('fixed.txt')) process.exit(1)", respond: (index, res, cwd) => { if (index === 2) writeFileSync(join(cwd, 'fixed.txt'), 'fixed'); reply(res) } })
   const read = LoopAttemptStore.prototype.readEvidence
   const interrupt = vi.spyOn(LoopAttemptStore.prototype, 'readEvidence').mockImplementation(function (this: LoopAttemptStore, reference) {
@@ -350,12 +350,14 @@ it('resumes only a complete continue checkpoint and keeps its frozen threshold',
   interrupt.mockRestore()
   writeFileSync(join(f.loopDir, 'config.json'), '{"stagnationLimit":1}')
   await f.client.dispose()
+  const before = state(f.sessionDir)
   const resumed = await runLoop(f.createClient(), f.renderer, { ...f.config, resume: true })
-  expect(resumed.status).toBe('completed')
+  expect(resumed.status).toBe('blocked')
   expect(resumed.runId).toBe(first.runId)
-  expect(resumed.iterations).toBe(2)
+  expect(resumed.iterations).toBe(1)
   expect(state(f.sessionDir).stagnationLimit).toBe(3)
-  expect(f.requests).toHaveLength(2)
+  expect(state(f.sessionDir)).toEqual(before)
+  expect(f.requests).toHaveLength(1)
 })
 
 it('does not resubmit while a deadline-cancelled tool still owns a real child process', async () => {

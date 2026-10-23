@@ -2,16 +2,19 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
-import { getMetadataPath, startBackgroundSession, stopSession } from '../../src/core/backgroundSession.js'
+import { getMetadataPath, loadMetadata, startBackgroundSession, stopSession } from '../../src/core/backgroundSession.js'
 import { resolveExecutionPolicy } from '../../src/core/executionPolicy.js'
+import { inspectProcessIdentity } from '../../src/core/processIdentity.js'
 
 const fixtures: Array<{ cwd: string; sessionId?: string }> = []
 
 afterEach(async () => {
   for (const fixture of fixtures.splice(0)) {
     if (fixture.sessionId) {
+      const supervisor = loadMetadata(fixture.sessionId)?.supervisorIdentity
       const result = await stopSession(fixture.sessionId, 0)
       if (result.status !== 'stopped') throw new Error('Background environment fixture still owns resources')
+      if (supervisor) await vi.waitFor(async () => expect(['dead', 'mismatch']).toContain(await inspectProcessIdentity(supervisor)), { timeout: 5000 })
     }
     rmSync(fixture.cwd, { recursive: true, force: true })
   }

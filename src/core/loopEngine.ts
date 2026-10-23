@@ -68,6 +68,7 @@ export async function runLoop(client: AgentSessionClient, renderer: Renderer, co
       if (signal?.aborted) return finish('cancelled', 'Loop execution was cancelled')
       if (existsSync(join(loopDir, 'PARKED.flag'))) return finish('blocked', 'PARKED flag detected')
       if (config.resume) {
+        if (stagnationLimit !== state.stagnationLimit) return finish('blocked', 'Loop stagnation threshold conflicts with the saved task', { code: 'recovery_required', scope: 'session' })
         if (maxIterations !== state.maxIterations) {
           if (config.maxItersExplicit) return finish('blocked', 'Explicit iteration limit conflicts with the saved task', { code: 'recovery_required', scope: 'session' })
           renderer.warn(`Using saved Loop iteration limit ${state.maxIterations}; configured default ${maxIterations} was ignored`)

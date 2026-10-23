@@ -14,8 +14,8 @@ OPTIONS
   -m, --model <model>       LLM model  (env: OVOGO_MODEL, default: ${defaultModel})
   --max-iter <n>            Think-Act-Observe max cycles  (env: OVOGO_MAX_ITER, default: 200)
   --cwd <path>              Working directory  (env: OVOGO_CWD, default: cwd, supports ~/)
-  --loop                    Activate loop mode (reads .loop/ configuration)
-  --loop-max-iters <n>      Cap on loop iterations  (env: OVOGO_LOOP_MAX_ITERS, default: 12)
+  --loop                    Foreground Loop; executable .loop/ acceptance, 10 minutes per turn
+  --loop-max-iters <n>      Cumulative Loop cap (default: 12); explicit resume conflicts are rejected
   -c, --continue            Resume the most recent session under <cwd>/sessions/
   -r, --resume <ref>        Resume a specific session by name, prefix, dir, or history.json
   --ink                     Launch with Ink/React UI (full component tree, live autocomplete)
@@ -95,6 +95,16 @@ EXAMPLES
   echo "refactor the tool registry" | ovolv999
   ovolv999 --continue                          # resume latest session
   ovolv999 --resume session_2026-07-14_120000  # resume by name
-  ovolv999 --loop --loop-max-iters 20          # activate loop mode
+  ovolv999 --loop --loop-max-iters 20          # create a foreground Loop task
+  ovolv999 --loop --resume session_2026-07-14_120000
+  ovolv999 --loop --continue                   # latest session must have a Loop ledger
+
+LOOP RECOVERY
+  .loop/GOAL.md and .loop/ACCEPTANCE.md freeze the task; checks use - [ ] A1: ... \`command\`.
+  .loop/config.json: { "stagnationLimit": 3 } (same failure and unchanged artifact).
+  Resume retains cumulative attempts, stagnation, saved cap and project budgets.
+  An incomplete prepared/dispatched/settled submission needs manual recovery:
+  preserve the session and operation evidence, inspect possible effects, then create a reviewed task.
+  No automatic replay/refund and no background Loop in this batch; --bg runs a single task.
 `)
 }

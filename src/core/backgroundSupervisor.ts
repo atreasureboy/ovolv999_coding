@@ -83,7 +83,7 @@ async function supervise(request: LaunchRequest): Promise<void> {
         if (await inspectProcessIdentity(worker) === 'matching') throw error
       }
     }
-    if (readyRequested && !ready && !exited) {
+    if (readyRequested && !ready) {
       ready = true
       await updateMetadataAsync(request.id, { status: 'running' })
       notify({ type: 'ready', pid: worker.pid })

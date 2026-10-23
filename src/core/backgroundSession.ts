@@ -210,6 +210,12 @@ export function recordBackgroundOutcome(outcome: OutcomeStatus, verification?: V
   updateMetadata(id, { outcome, verification })
 }
 
+export async function recordBackgroundOutcomeAsync(outcome: OutcomeStatus, verification?: VerificationEvidence): Promise<void> {
+  const id = process.env.OVOGV999_SESSION_ID
+  if (!id) return
+  await updateMetadataAsync(id, { outcome, verification })
+}
+
 // ── Liveness ────────────────────────────────────────────────────────────────
 
 /**

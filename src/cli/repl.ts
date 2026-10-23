@@ -253,7 +253,7 @@ export async function runRepl(
           renderer.warn('The turn is blocked. Review retained records before continuing.')
           break
         }
-        if (result.result.reason === 'interrupted' || result.result.reason === 'error' || status === 'limit_reached') {
+        if (status !== 'cancelled' && (result.result.reason === 'interrupted' || result.result.reason === 'error' || status === 'limit_reached')) {
           renderer.writeInterruptPrompt()
           awaitingInput = true
           const { text: feedback, eof } = await input.readLine('')

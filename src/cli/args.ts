@@ -10,6 +10,7 @@ export interface Args {
   version: boolean
   loop: boolean
   loopMaxIters: number
+  loopMaxItersExplicit: boolean
   continueSession: boolean
   resumeSession?: string
   ink: boolean
@@ -45,6 +46,7 @@ export function parseArgs(argv: string[]): Args {
   let loop = false
   let loopMaxIters = parseInt(process.env.OVOGO_LOOP_MAX_ITERS ?? '12', 10)
   if (isNaN(loopMaxIters) || loopMaxIters <= 0) loopMaxIters = 12
+  let loopMaxItersExplicit = false
   let continueSession = false
   let resumeSession: string | undefined
   let ink = false
@@ -79,6 +81,7 @@ export function parseArgs(argv: string[]): Args {
         break
       case '--loop-max-iters':
         loopMaxIters = positiveInteger(arg, args[++i])
+        loopMaxItersExplicit = true
         break
       case '--continue':
       case '-c':
@@ -119,6 +122,7 @@ export function parseArgs(argv: string[]): Args {
     version,
     loop,
     loopMaxIters,
+    loopMaxItersExplicit,
     continueSession,
     resumeSession,
     ink,

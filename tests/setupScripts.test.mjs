@@ -30,8 +30,11 @@ if(args[0]==='run'&&args[1]==='build'){if(process.env.SETUP_FIXTURE_FAIL)process
 afterEach(() => { rmSync(cwd, { recursive: true, force: true }) })
 
 function run(extra = {}) {
+  const env = { ...process.env, PATH: `${join(cwd, 'mockbin')};${dirname(process.execPath)};${process.env.PATH ?? process.env.Path ?? ''}`, OPENAI_API_KEY: 'fixture-key', ...extra }
+  for (const key of Object.keys(env)) if (key.toLowerCase() === 'npm_execpath') delete env[key]
+  env.npm_execpath = join(cwd, 'mockbin', 'pnpm.cjs')
   try { return execFileSync('cmd.exe', ['/d', '/c', join(cwd, 'setup.bat')], { cwd, input: '\n', timeout: 10000,
-    env: { ...process.env, PATH: `${join(cwd, 'mockbin')};${dirname(process.execPath)};${process.env.PATH ?? process.env.Path ?? ''}`, OPENAI_API_KEY: 'fixture-key', ...extra },
+    env,
     windowsHide: true, encoding: 'utf8' }) } catch (error) { throw new Error(`${error.message}\n${error.stdout}\n${error.stderr}`, { cause: error }) }
 }
 function calls() { return existsSync(join(cwd, 'calls.jsonl')) ? readFileSync(join(cwd, 'calls.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line)) : [] }

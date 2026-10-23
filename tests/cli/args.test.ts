@@ -57,6 +57,14 @@ describe('CLI arguments', () => {
 
   it('retains positive numeric-prefix parsing for existing callers', () => {
     expect(parse('--max-iter', '4suffix').maxIter).toBe(4)
+    expect(parse('--loop-max-iters', '4suffix')).toMatchObject({ loopMaxIters: 4, loopMaxItersExplicit: true })
+  })
+
+  it('distinguishes an explicit Loop limit from environment and default values', () => {
+    expect(parse()).toMatchObject({ loopMaxIters: 12, loopMaxItersExplicit: false })
+    vi.stubEnv('OVOGO_LOOP_MAX_ITERS', '9')
+    expect(parse('--loop')).toMatchObject({ loopMaxIters: 9, loopMaxItersExplicit: false })
+    expect(parse('--loop-max-iters', '9')).toMatchObject({ loopMaxIters: 9, loopMaxItersExplicit: true })
   })
 
   it('accepts supported pipe formats and rejects unknown formats', () => {

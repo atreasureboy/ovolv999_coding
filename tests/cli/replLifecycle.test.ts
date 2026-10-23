@@ -253,6 +253,8 @@ describe('terminal session resource ownership', () => {
     io.readLine.mockResolvedValueOnce({ text: 'start', eof: false }).mockResolvedValueOnce({ text: '', eof: true })
     await runRepl(state, engine, config, renderer, cwd, new Map(), { runUserPromptSubmit: () => {} })
     expect(interruptedDuringTurn).toBe(true)
+    expect(io.readLine).toHaveBeenCalledTimes(2)
+    expect(renderer.writeInterruptPrompt).not.toHaveBeenCalled()
     expect(io.readlines[0].listenerCount('SIGINT')).toBe(0)
     await engine.dispose()
   })

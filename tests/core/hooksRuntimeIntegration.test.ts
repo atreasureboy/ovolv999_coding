@@ -44,7 +44,7 @@ it('persists /hooks configuration and applies its denial after constructing a ne
   }, renderer, client)
   engines.push(engine)
   const { result, newHistory } = await engine.runTurn('write protected file', [])
-  expect(result.status).toBe('blocked')
+  expect(result).toMatchObject({ status: 'failed', outcomeReason: { code: 'permission_denied', source: 'hook' } })
   expect(existsSync(join(cwd, 'protected.txt'))).toBe(false)
   expect(newHistory.find(message => message.role === 'tool')?.content).toContain('protected file')
 })

@@ -10,7 +10,7 @@ let runtime: string
 beforeAll(() => {
   runtime = mkdtempSync(join(tmpdir(), 'ovo-budget-timezone-'))
   writeFileSync(join(runtime, 'package.json'), '{"type":"module"}')
-  for (const name of ['budget', 'persistedData', 'persistenceLock', 'processIdentity']) {
+  for (const name of ['budget', 'persistedData', 'persistenceLock', 'processIdentity', 'outcome']) {
     const source = readFileSync(new URL(`../src/core/${name}.ts`, import.meta.url), 'utf8')
     writeFileSync(join(runtime, `${name}.js`), transpileModule(source, { compilerOptions: { module: ModuleKind.ESNext, target: 9 } }).outputText)
   }

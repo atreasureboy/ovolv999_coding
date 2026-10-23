@@ -29,7 +29,7 @@ export const DANGEROUS_SESSION_ROOTS: ReadonlySet<string> = new Set([
   '/run',
   '/srv',
 ])
-export function resolveResumePath(cwd: string, input: string): string {
+export function resolveResumePath(cwd: string, input: string, options: { allowLoopLedger?: boolean } = {}): string {
   assertNonEmptyString(input, 'resume input')
   if (!input.includes('/') && !input.includes('\\')) {
     return resolveSessionPath(cwd, input)
@@ -57,6 +57,7 @@ export function resolveResumePath(cwd: string, input: string): string {
     }
     const historyPath = join(normalized, 'history.json')
     if (!existsSync(historyPath)) {
+      if (options.allowLoopLedger && existsSync(join(normalized, 'loop-controller', 'state.json'))) return normalized
       throw new SessionNotFoundError(`Session directory missing history.json: ${normalized}`)
     }
     try {

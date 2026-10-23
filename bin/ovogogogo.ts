@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createHash } from 'crypto'
-import { realpathSync } from 'fs'
+import { existsSync, readdirSync, realpathSync } from 'fs'
 import { homedir } from 'os'
 import { join, resolve } from 'path'
 import { fileURLToPath, pathToFileURL } from 'url'
@@ -37,6 +37,7 @@ import { recordBackgroundOutcome } from '../src/core/backgroundSession.js'
 import { resolveContextWindow } from '../src/core/compact.js'
 import { ExecutionEngine } from '../src/core/engine.js'
 import { AgentSessionClient } from '../src/core/agentSessionClient.js'
+import { AGENT_FINALIZATION_GRACE_MS, AGENT_TURN_DEADLINE_MS } from '../src/core/agentService.js'
 import { EpisodicMemory } from '../src/core/episodicMemory.js'
 import { EventLog } from '../src/core/eventLog.js'
 import { getCurrentMode, getVerbosityPrompt } from '../src/core/modes.js'
@@ -113,6 +114,7 @@ async function main(): Promise<void> {
     version,
     loop,
     loopMaxIters,
+    loopMaxItersExplicit,
     continueSession,
     resumeSession,
     ink,
@@ -298,7 +300,7 @@ async function main(): Promise<void> {
   let resumedHistory: OpenAIMessage[] = []
   if (resumeSession) {
     try {
-      sessionDir = resolveResumePath(cwd, resumeSession)
+      sessionDir = resolveResumePath(cwd, resumeSession, { allowLoopLedger: loop })
     } catch (err: unknown) {
       if (err instanceof AmbiguousSessionError) {
         renderer.error(err.message)
@@ -311,17 +313,32 @@ async function main(): Promise<void> {
       }
       throw err
     }
+    if (loop && !existsSync(join(sessionDir, 'loop-controller', 'state.json'))) {
+      renderer.error('Selected session has no Loop ledger; use --loop to create a new task')
+      process.exit(2)
+    }
     claimSessionOwnership(sessionDir)
     resumedHistory = loadSession(sessionDir)
     renderer.info(`Resumed session: ${sessionDir} (${resumedHistory.length} messages)`)
   } else if (continueSession) {
-    const latest = findLatestSession(cwd)
+    const sessionsDir = join(cwd, 'sessions')
+    const latest = loop
+      ? (existsSync(sessionsDir) ? readdirSync(sessionsDir).filter(name => name.startsWith('session_')).sort().reverse().map(name => join(sessionsDir, name))[0] : undefined)
+      : findLatestSession(cwd)
     if (latest) {
+      if (loop && !existsSync(join(latest, 'loop-controller', 'state.json'))) {
+        renderer.error('Latest session has no Loop ledger; select a Loop session with --resume')
+        process.exit(2)
+      }
       sessionDir = latest
       claimSessionOwnership(sessionDir)
       resumedHistory = loadSession(sessionDir)
       renderer.info(`Continued session: ${sessionDir} (${resumedHistory.length} messages)`)
     } else {
+      if (loop) {
+        renderer.error('No previous Loop session found; use --loop to create a new task')
+        process.exit(2)
+      }
       sessionDir = createSessionDir(cwd)
       renderer.info(`No previous session found — starting new: ${sessionDir}`)
     }
@@ -582,16 +599,19 @@ async function main(): Promise<void> {
     if (loop) {
       const { runLoop } = await import('../src/core/loopEngine.js')
       const { createAgentEventRenderer } = await import('../src/ui/agentEventRenderer.js')
-      const client = new AgentSessionClient({ engine, observer: inkRendererInstance ?? renderer, cwd, sessionDir, history: resumedHistory, onEvent: createAgentEventRenderer(renderer) })
+      const client = new AgentSessionClient({ engine, observer: inkRendererInstance ?? renderer, cwd, sessionDir, history: resumedHistory, onEvent: createAgentEventRenderer(renderer), deadlineMs: AGENT_TURN_DEADLINE_MS, finalizationGraceMs: AGENT_FINALIZATION_GRACE_MS })
       bindClient(client)
-      renderer.info('Loop mode activated — reading .loop/ configuration')
+      renderer.info('Loop mode activated — reading .loop/ configuration · 每轮最多 10 分钟')
       const outcome = await runLoop(client, renderer, {
         cwd,
         loopDir: join(cwd, '.loop'),
         maxIters: loopMaxIters,
+        maxItersExplicit: loopMaxItersExplicit,
+        resume: Boolean(resumeSession || continueSession),
         signal: lifecycleController.signal,
         onPromptSubmit: (text, signal) => hookRunner.runUserPromptSubmit(text, signal),
       })
+      renderer.info(`Loop ${outcome.status} · 累计轮数 ${outcome.iterations} · ${outcome.detail ?? outcome.outcomeReason?.code ?? 'Stopped'}`)
       process.exitCode = outcomeExitCode(outcome.status)
       recordBackgroundOutcome(outcome.status, outcome.verification)
       updateProgressLog(cwd, outcome.status, outcome.verification.output.slice(0, 100))

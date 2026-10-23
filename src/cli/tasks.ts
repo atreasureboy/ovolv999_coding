@@ -1,4 +1,4 @@
-import { recordBackgroundOutcome } from '../core/backgroundSession.js'
+import { recordBackgroundOutcomeAsync } from '../core/backgroundSession.js'
 import type { ExecutionEngine } from '../core/engine.js'
 import { AgentSessionClient } from '../core/agentSessionClient.js'
 import type { OutcomeStatus, VerificationEvidence } from '../core/outcome.js'
@@ -45,7 +45,7 @@ export async function runSingleTask(
     }
   }
   process.exitCode = outcomeExitCode(status)
-  recordBackgroundOutcome(status, verification)
+  await recordBackgroundOutcomeAsync(status, verification)
   updateProgressLog(
     cwd,
     status,

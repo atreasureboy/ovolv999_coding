@@ -147,6 +147,21 @@ describe('CLI3 #2: resolveResumePath structural validation', () => {
     expect(() => resolveResumePath(cwd, stray)).toThrow(/parent directory/)
   })
 
+  it('allows a selected incomplete Loop ledger without history only with the Loop option', () => {
+    const incomplete = join(sessionsDir, 'session_incomplete')
+    mkdirSync(join(incomplete, 'loop-controller'), { recursive: true })
+    writeFileSync(join(incomplete, 'loop-controller', 'state.json'), '{}')
+    expect(() => resolveResumePath(cwd, incomplete)).toThrow(/missing history/)
+    expect(resolveResumePath(cwd, incomplete, { allowLoopLedger: true })).toBe(incomplete)
+    const empty = join(sessionsDir, 'session_no_ledger')
+    mkdirSync(empty)
+    expect(() => resolveResumePath(cwd, empty, { allowLoopLedger: true })).toThrow(/missing history/)
+    const invalid = join(cwd, 'not_a_session')
+    mkdirSync(join(invalid, 'loop-controller'), { recursive: true })
+    writeFileSync(join(invalid, 'loop-controller', 'state.json'), '{}')
+    expect(() => resolveResumePath(cwd, invalid, { allowLoopLedger: true })).toThrow(/session_/)
+  })
+
   it('rejects a file whose basename is NOT history.json', () => {
     const wrong = join(realSessionDir, 'notes.txt')
     writeFileSync(wrong, 'hello', 'utf8')
