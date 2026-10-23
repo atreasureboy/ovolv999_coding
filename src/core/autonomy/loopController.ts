@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync } from 'node:fs'
 import { join } from 'node:path'
 import type { AgentSessionClient } from '../agentSessionClient.js'
 import type { AgentThreadSnapshot } from '../agentEvents.js'
@@ -15,6 +15,7 @@ import { buildLoopContext, sanitizeLoopEvidence } from './context.js'
 import { decideContinuation, type LoopObservation } from './continuation.js'
 import type { LoopAttemptStore } from './attemptStore.js'
 import type { LoopCheckpoint, LoopState } from './types.js'
+import { LoopReceiptPublisher } from './receiptPublisher.js'
 
 export function readLoopNote(path: string): string {
   try { return readFileSync(path, 'utf8') } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return ''; throw error }
@@ -49,6 +50,7 @@ export class FrozenLoop {
   readonly goalHash: string
   readonly plan: VerificationPlan
   private readonly knownSecrets = new Set<string>()
+  private readonly receipts: LoopReceiptPublisher
 
   get secrets(): readonly string[] {
     this.knownSecrets.add(this.client.engine.getConfig().apiKey)
@@ -65,6 +67,7 @@ export class FrozenLoop {
     if (!this.goal.trim() || !commands.length) throw new OutcomeError('Loop requires a goal and executable acceptance checks', { code: 'verification_unavailable' })
     const config = client.engine.getConfig()
     const policy = createLoopArtifactPolicy({ workspace: cwd, loopDir, sessionDir: client.sessionDir, budgetPath: getBudgetPath(config.budgetRoot ?? cwd), runtimeRoot: runtimeStateRoot(), usageRoot: config.usageLedger?.getRoot(), eventLogPath: config.eventLog?.getFilePath() })
+    this.receipts = new LoopReceiptPublisher(policy.loopDir)
     config.artifactPolicy = policy
     this.plan = createVerificationPlan(cwd, [...commands, ...detectVerifyCommands(cwd)], [], undefined, policy)
     config.frozenVerificationPlan = this.plan
@@ -139,11 +142,9 @@ export class FrozenLoop {
       const decision = checkpoint.decision
       const compatibility = { runId: state.taskId, taskId: state.taskId, checkpointRevision: state.revision + 1, goalHash: state.goalHash, artifactVersion, definitionHash: state.definitionHash, iteration: state.consumedIterations }
       if (checkpoint.acceptedAt) {
-        guard()
-        writeFileSync(join(this.loopDir, 'DONE.flag'), JSON.stringify({ ...compatibility, acceptedAt: checkpoint.acceptedAt }, null, 2))
+        this.receipts.publish('DONE.flag', JSON.stringify({ ...compatibility, acceptedAt: checkpoint.acceptedAt }, null, 2), guard)
       }
-      guard()
-      writeFileSync(join(this.loopDir, 'OUTCOME.json'), JSON.stringify({ ...compatibility, status: decision.action === 'stop' ? decision.status : 'failed', iterations: state.consumedIterations, verification: observed.verification, ...(decision.action === 'stop' ? { outcomeReason: decision.reason, detail: decision.detail } : {}) }, null, 2))
+      this.receipts.publish('OUTCOME.json', JSON.stringify({ ...compatibility, status: decision.action === 'stop' ? decision.status : 'failed', iterations: state.consumedIterations, verification: observed.verification, ...(decision.action === 'stop' ? { outcomeReason: decision.reason, detail: decision.detail } : {}) }, null, 2), guard)
       guard()
       const versionsMatch = this.matches() && await this.capture(localSignal) === artifactVersion
       if (!versionsMatch && (decision.action === 'continue' || checkpoint.acceptedAt)) throw new OutcomeError('Artifact or definition changed before authoritative checkpoint publication', { code: 'acceptance_invalidated' })

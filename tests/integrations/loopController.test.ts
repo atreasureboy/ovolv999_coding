@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { existsSync, linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
 import { runLoop } from '../../src/core/loopEngine.js'
@@ -23,6 +23,67 @@ const fixtures: Awaited<ReturnType<typeof loopFixture>>[] = []
 afterEach(async () => { for (const fixture of fixtures.splice(0).reverse()) await fixture.close(); vi.restoreAllMocks(); vi.unstubAllEnvs() })
 async function setup(options: Parameters<typeof loopFixture>[0] = {}) { const fixture = await loopFixture(options); fixtures.push(fixture); return fixture }
 const state = (sessionDir: string): LoopState => JSON.parse(readFileSync(join(sessionDir, 'loop-controller', 'state.json'), 'utf8')) as LoopState
+
+it('publishes guarded receipts through an existing junction workspace alias', async () => {
+  const f = await setup()
+  const alias = join(f.base, 'workspace-alias')
+  symlinkSync(f.cwd, alias, 'junction')
+  const result = await runLoop(f.client, f.renderer, { ...f.config, cwd: alias, loopDir: join(alias, '.loop') })
+  expect(result.status, JSON.stringify(result)).toBe('completed')
+  expect(result.iterations).toBe(1)
+  expect(f.requests).toHaveLength(1)
+  expect(state(f.sessionDir).current?.checkpoint?.decision).toMatchObject({ action: 'stop', status: 'completed' })
+  expect(JSON.parse(readFileSync(join(f.loopDir, 'DONE.flag'), 'utf8')).taskId).toBe(result.runId)
+  expect(JSON.parse(readFileSync(join(f.loopDir, 'OUTCOME.json'), 'utf8')).status).toBe('completed')
+})
+
+it.each([
+  ['DONE.flag', 'completed', 4],
+  ['OUTCOME.json', 'completed', 4],
+  ['OUTCOME.json', 'limit', 1],
+  ['OUTCOME.json', 'failed', 4],
+  ['OUTCOME.json', 'continue', 4],
+] as const)('preserves outside hardlink bytes at %s on the %s publication path', async (leaf, path, maxIters) => {
+  const f = await setup({ check: path === 'completed' || path === 'failed' ? 'process.exit(0)' : "console.error('receipt fixture failure'); process.exit(1)",
+    ...(path === 'failed' ? { respond: (_index: number, response: ServerResponse) => { response.writeHead(400, { 'Content-Type': 'application/json' }); response.end(JSON.stringify({ error: { message: 'receipt fixture provider failure', type: 'invalid_request_error' } })) } } : {}),
+  })
+  const target = join(f.base, 'outside-receipt.txt')
+  const sentinel = Buffer.from('unrelated outside workspace bytes\u0000\u00ff')
+  writeFileSync(target, sentinel)
+  linkSync(target, join(f.loopDir, leaf))
+  expect(lstatSync(target).nlink).toBe(2)
+  const result = await runLoop(f.client, f.renderer, { ...f.config, maxIters })
+  expect(readFileSync(target)).toEqual(sentinel)
+  expect(result.status).toBe('blocked')
+  expect(result.outcomeReason?.code).toBe('recovery_required')
+  expect(state(f.sessionDir).current?.phase).toBe('settled')
+  expect(state(f.sessionDir).current?.checkpoint).toBeUndefined()
+  if (path === 'failed') expect(state(f.sessionDir).current?.terminal?.status).toBe('failed')
+  expect(f.requests).toHaveLength(1)
+  const resumed = await runLoop(f.client, f.renderer, { ...f.config, maxIters, resume: true })
+  expect(resumed.outcomeReason?.code).toBe('recovery_required')
+  expect(resumed.iterations).toBe(1)
+  expect(f.requests).toHaveLength(1)
+  expect(readFileSync(target)).toEqual(sentinel)
+})
+
+it.for(['DONE.flag', 'OUTCOME.json'] as const)('preserves outside symlink bytes at %s when file symlinks are permitted', async (leaf, context) => {
+  const f = await setup()
+  const target = join(f.base, 'outside-receipt.txt')
+  writeFileSync(target, 'unrelated outside workspace bytes')
+  try { symlinkSync(target, join(f.loopDir, leaf), 'file') } catch (error) {
+    if (['EPERM', 'EACCES', 'ENOSYS'].includes((error as NodeJS.ErrnoException).code ?? '')) {
+      context.skip(`File symlink unavailable: ${(error as NodeJS.ErrnoException).code}`)
+      return
+    }
+    throw error
+  }
+  const result = await runLoop(f.client, f.renderer, f.config)
+  expect(readFileSync(target, 'utf8')).toBe('unrelated outside workspace bytes')
+  expect(result.status).toBe('blocked')
+  expect(result.outcomeReason?.code).toBe('recovery_required')
+  expect(state(f.sessionDir).current?.phase).toBe('settled')
+})
 
 it('feeds independent failure receipts to the next real request while retaining canonical history', async () => {
   const f = await setup({ history: Array.from({ length: 20 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user', content: `old ${index}` })),
@@ -272,6 +333,28 @@ it('preserves the settled obligation after evidence persistence fails', async ()
   const resumed = await runLoop(f.client, f.renderer, { ...f.config, resume: true })
   expect(resumed.outcomeReason?.code).toBe('recovery_required')
   expect(resumed.iterations).toBe(1)
+  expect(f.requests).toHaveLength(1)
+})
+
+it.each(['DONE.flag', 'OUTCOME.json'] as const)('retains settled authority when ownership fails before staged %s rename', async leaf => {
+  const f = await setup()
+  const assertOwned = LoopAttemptStore.prototype.assertOwned
+  let lost = false
+  vi.spyOn(LoopAttemptStore.prototype, 'assertOwned').mockImplementation(function (this: LoopAttemptStore) {
+    assertOwned.call(this)
+    if (readdirSync(f.loopDir).some(name => name.endsWith('.tmp')) && (leaf === 'DONE.flag' || existsSync(join(f.loopDir, 'DONE.flag')))) {
+      lost = true
+      throw new Error('receipt publication ownership lost')
+    }
+  })
+  const result = await runLoop(f.client, f.renderer, f.config)
+  expect(lost).toBe(true)
+  expect(result.status).toBe('blocked')
+  expect(result.outcomeReason?.code).toBe('recovery_required')
+  expect(state(f.sessionDir).current?.phase).toBe('settled')
+  expect(state(f.sessionDir).current?.checkpoint).toBeUndefined()
+  expect(existsSync(join(f.loopDir, leaf))).toBe(false)
+  expect(readdirSync(f.loopDir).filter(name => name.endsWith('.tmp'))).toEqual([])
   expect(f.requests).toHaveLength(1)
 })
 
