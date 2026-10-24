@@ -99,13 +99,13 @@ Tests on this host run on Windows with unrestricted child/process identity acces
 
 The approved batch adds no background Loop, cron, DAG scheduler, general knowledge graph, Web console or second task-level token/cost account. Project budgets and outstanding reservations remain authoritative. Cancellation adds no model finalization request. Uncertain prepared/dispatched/settled attempts retain counts and do not replay or refund.
 
-## Final verification receipt, 2026-10-23
+## Historical Task 6 verification receipt, 2026-10-23 (superseded by F1 verification below)
 
 The final full command `npx vitest run --maxWorkers=2` exited 0: 330 test files passed; 5354 tests passed and 14 were skipped (5368 total), 382.82 seconds. The first full run is retained as failure evidence: 324 files passed/6 failed, 5346 tests passed/8 failed/14 skipped, exit 1, 403.83 seconds. All six originally failed files subsequently passed 108 tests in a serial gate before the final full pass. The required expanded CLI/service/background gate passed 203 tests in 9 files, 92.62 seconds. Counts overlap and must not be summed.
 
 Fresh `npx tsc --noEmit` exited 0 in 5.45 seconds; `npm run build` exited 0 in 4.80 seconds. The exact mandated `npm run test:package` exited 1 in 0.63 seconds because the unchanged smoke helper explicitly requires the pinned pnpm path. The supported `pnpm run test:package` exited 0: 24 scenarios passed in 88.661 seconds, including genuine pack/install/installed-CLI validation. Expected negative scenarios retained their 1/2 exit codes. Package smoke's preexisting substituted background fixture remains unchanged; genuine production worker integration is independently established by the new compiled CLI acceptance.
 
-Tarball SHA256: `087c3eeeeaad48f40a52c9e5c12c62408390e879f91208c73e5e23de2465d1cd`. Source SHA256: `9e9654ffe897e64ddda62392e7870eb13d94c9f7037847c2e55d3df94482e76e`. Precommit build identity deliberately records base `3fadf55fd1d79716c175380a1f194aca6cf3ca31`, `sourceDirty: true` and the complete current source hash. No remote publication occurred. Independent Task 6 and whole-branch review remain required.
+Tarball SHA256: `087c3eeeeaad48f40a52c9e5c12c62408390e879f91208c73e5e23de2465d1cd`. Source SHA256: `9e9654ffe897e64ddda62392e7870eb13d94c9f7037847c2e55d3df94482e76e`. Precommit build identity deliberately records base `3fadf55fd1d79716c175380a1f194aca6cf3ca31`, `sourceDirty: true` and the complete current source hash. No remote publication occurred. This is the historical pre-F1 Task 6 receipt; Task 6 independent review later passed, the broad review found F1, and the current final result is recorded below.
 
 ## Final whole-change finding and sole fix wave, 2026-10-23
 
@@ -125,4 +125,166 @@ The complete final-source `node node_modules/vitest/vitest.mjs run --maxWorkers=
 
 Fresh supported pinned `pnpm run test:package` exited 0: **24 scenarios passed, 93.430s**; the copied package receipt records passed:true and the same final source SHA256. Actual packed tarball SHA256 `362f7475d87d04a79aaf7fe43a262f69287e9b08c26da1f0281b8bae26255185` was independently recomputed from `.artifacts/release-package-ad0ALb/ovogogogo-0.1.0.tgz`. Pack/prepack identity accurately records base `6a49eaf42f9c2139e547ab8b869cd02c53f2e110` / sourceDirty:true, builtAt `2026-10-23T15:19:45.551Z`, Node v24.20.0, Windows x64 protocol 1 native SHA256 `ad1f8988aae23a65ddf86fd023e7b47c9b4f5ded93efe857775cdb8e6cfdb37a`. Expected negative package cases retain their 1/2 exits; ordinary cases exited 0. The unchanged npm-wrapper refusal was not repeated. The package smoke's existing substituted background worker is not misrepresented as a new production-worker proof; that separate genuine compatibility remains covered by the full CLI suite. No publication occurred.
 
-All latest 30 controller rulings above match the progress record exactly, including rationale and cost. Scoped independent re-review remains pending. These implementation results do not claim that re-review passed, do not alter final plan checkboxes, and do not authorize publication. Detailed RED/GREEN commands and retained logs are in `.superpowers/sdd/2026-10-22-artex-loop-controller/final-fix-report.md`; final delivery bookkeeping follows the independent gate.
+All 30 controller rulings above are preserved exactly in chronological order, including rationale and cost; ordinal/content parity was verified during 2026-10-25 bookkeeping. The completed [sole scoped independent re-review](../reviews/2026-10-25-artex-loop-controller-final-fix-review.md) confirms F1 ADDRESSED with no new Critical/Important/Minor breakage and no remaining actionable findings. The original broad review remains unchanged. All six independent task reviews and the sole final fix gate are complete; plan task checkboxes now record that completed state. No publication is authorized by review or claimed here. The essential execution evidence and receipt are retained below so delivery does not depend on temporary scratch files.
+
+## Final durable receipt and review closure, 2026-10-25
+
+Implementation/test evidence dates remain 2026-10-23; review and delivery bookkeeping date is 2026-10-25 Asia/Shanghai. Final implementation commit: `76653f1eb9e53ab8d69dd22f1c807fc96be29e67`, parent `6a49eaf42f9c2139e547ab8b869cd02c53f2e110`, branch `codex/module-refinement`. The six independently reviewed task commit chains are recorded in the [completed plan](../plans/2026-10-22-artex-loop-controller.md). The [scoped final review](../reviews/2026-10-25-artex-loop-controller-final-fix-review.md) is a verbatim preserved report; SHA256 `05131a2b3c1da90541be1b861f1f53b713fa5647b6c6ab2a0dd263f3d7c576dd`. F1 is ADDRESSED; no remaining actionable finding and no new Critical/Important/Minor finding. This closes the only final implementation fix wave; the prior broad review's original With fixes verdict is historical and unchanged.
+
+| Final-source command / retained provenance | Actual result |
+| --- | --- |
+| `node node_modules/vitest/vitest.mjs run tests/core/autonomy/receiptPublisher.test.ts tests/integrations/loopController.test.ts tests/core/autonomy/attemptStore.test.ts tests/core/loopAcceptanceAtomicity.test.ts tests/core/loopWorkspaceAudit.test.ts tests/loopOutcome.test.ts --maxWorkers=2`; final-fix-focused-canonical-final.log | Exit 0; 6 files, 108 passed / 2 actual EPERM skipped, 110 total; 45.02s. |
+| `node node_modules/typescript/bin/tsc --noEmit`; final-fix-typecheck-canonical-final.log | Exit 0, no diagnostics; 5.88s. |
+| `node node_modules/vitest/vitest.mjs run --maxWorkers=2`; final-fix-suite-canonical-final.log | Exit 1; 329 files passed / 2 failed; 5372 passed / 3 failed / 16 skipped, 5391 total; 415.33s. |
+| `node node_modules/vitest/vitest.mjs run tests/runtimeFixes.test.ts tests/runtime3.test.ts --maxWorkers=1`; final-fix-runtime-serial.log | Exit 0; 2 files / 29 passed; 19.97s. Named diagnosis only. |
+| `node node_modules/vitest/vitest.mjs run --maxWorkers=1`; final-fix-suite-serial-final.log | Exit 0; all 331 files passed; 5375 passed / 16 skipped, 5391 total; 738.45s. Complete final-source full suite. |
+| `npm run build`; final-fix-build-final.log | Exit 0; 5.07s; source SHA256 matches the full package receipt below. |
+| `pnpm run test:package`; final-fix-package-final.log | Exit 0; 24 scenarios passed; 93.430s; genuine pack, frozen production install and installed CLI. |
+
+The three parallel failures retain their original 5000ms deadlines: runtimeFixes.test.ts:170 second runTurn in flight (5276ms), runtime3.test.ts:117 null literal args (5459ms), runtime3.test.ts:129 valid object args (5001ms). Shared fixed /tmp fixtures and .artifacts/test-runtime with actual engine persistence/artifact I/O are consistent with interference, but the exact cause is unproven. No timeout was raised, no unrelated fixture was changed, and named-file passes do not substitute for the complete serial full run. No source/test change followed the final full/typecheck/package gates.
+
+Concise raw full-suite summaries, retained from the named original logs:
+
+```text
+final-fix-suite-canonical-final.log
+Test Files  2 failed | 329 passed (331)
+Tests  3 failed | 5372 passed | 16 skipped (5391)
+Duration  415.33s
+final-fix-runtime-serial.log
+Test Files  2 passed (2)
+Tests  29 passed (29)
+Duration  19.97s
+final-fix-suite-serial-final.log
+Test Files  331 passed (331)
+Tests  5375 passed | 16 skipped (5391)
+Duration  738.45s
+```
+
+The historical Task 6 exact `npm run test:package` refusal remains exit 1, 0.63s, before packing: **Run this script with pnpm run so the pinned package manager is available**. The fixed pnpm path is required through npm_execpath. It was not repeated in the F1 wave and is not a passing npm gate. Final package scenarios ask-failure/auto-failure expect exit 2; jsonl-schema-preflight/jsonl-structured-invalid expect exit 1; the other 20 expect exit 0. Their successful expectations, timings and complete packed identity are retained verbatim as JSON below. Standalone build uses native SHA256 `cd4d48cf9c4a258c7518680377d0e89bef2ffc9a5f578b0575e8fb21837d72c8`; prepack freshly rebuilds the same source and its distinct actual packed native hash is in the receipt. The build identity uses precommit base/sourceDirty:true accurately, not an assertion that the tarball was built after the fix commit. Tarball provenance: `C:/Users/zhhqzs/Desktop/project/ovolv999_coding/.artifacts/release-package-ad0ALb/ovogogogo-0.1.0.tgz`; actual SHA256 was independently recomputed and matched the receipt.
+
+```json
+{
+  "passed": true,
+  "platform": "win32",
+  "node": "v24.20.0",
+  "durationMs": 93430,
+  "identity": {
+    "schemaVersion": 1,
+    "version": "0.1.0",
+    "gitCommit": "6a49eaf42f9c2139e547ab8b869cd02c53f2e110",
+    "sourceDirty": true,
+    "sourceSha256": "4b5ad6400ab8fc25cbbbf2a1cb6b54121e82e3c90bb5d0096e21ecc3616411ec",
+    "builtAt": "2026-10-23T15:19:45.551Z",
+    "node": "v24.20.0",
+    "executionHost": {
+      "platform": "win32",
+      "architecture": "x64",
+      "protocolVersion": 1,
+      "sha256": "ad1f8988aae23a65ddf86fd023e7b47c9b4f5ded93efe857775cdb8e6cfdb37a"
+    }
+  },
+  "tarballSha256": "362f7475d87d04a79aaf7fe43a262f69287e9b08c26da1f0281b8bae26255185",
+  "cases": {
+    "pack": {
+      "exitCode": 0,
+      "durationMs": 5221
+    },
+    "install-frozen-runtime": {
+      "exitCode": 0,
+      "durationMs": 22260
+    },
+    "installed-command-shim": {
+      "exitCode": 0,
+      "durationMs": 3220
+    },
+    "--help": {
+      "exitCode": 0,
+      "durationMs": 224
+    },
+    "--version": {
+      "exitCode": 0,
+      "durationMs": 230
+    },
+    "installed-esm-slash-commands": {
+      "exitCode": 0,
+      "durationMs": 117
+    },
+    "installed-runtime-status": {
+      "exitCode": 0,
+      "durationMs": 227
+    },
+    "raw-pipe": {
+      "exitCode": 0,
+      "durationMs": 263
+    },
+    "single-task": {
+      "exitCode": 0,
+      "durationMs": 1055
+    },
+    "stdin-task": {
+      "exitCode": 0,
+      "durationMs": 1069
+    },
+    "resume-installed-session": {
+      "exitCode": 0,
+      "durationMs": 1056
+    },
+    "ask-failure": {
+      "exitCode": 2,
+      "durationMs": 1035
+    },
+    "auto-failure": {
+      "exitCode": 2,
+      "durationMs": 1898
+    },
+    "read-edit-verify": {
+      "exitCode": 0,
+      "durationMs": 1860
+    },
+    "jsonl-read-edit-verify": {
+      "exitCode": 0,
+      "durationMs": 1812
+    },
+    "jsonl-schema-preflight": {
+      "exitCode": 1,
+      "durationMs": 230
+    },
+    "jsonl-structured-invalid": {
+      "exitCode": 1,
+      "durationMs": 998
+    },
+    "jsonl-structured-valid": {
+      "exitCode": 0,
+      "durationMs": 1072
+    },
+    "installed-acp-agent": {
+      "exitCode": 0,
+      "durationMs": 1836
+    },
+    "installed-schema-compatibility": {
+      "exitCode": 0,
+      "durationMs": 455
+    },
+    "installed-acp-stdio": {
+      "exitCode": 0,
+      "durationMs": 47
+    },
+    "installed-background-start": {
+      "exitCode": 0,
+      "durationMs": 2253
+    },
+    "installed-background-stop": {
+      "exitCode": 0,
+      "durationMs": 9125
+    },
+    "installed-coding-evaluation": {
+      "exitCode": 0,
+      "durationMs": 35836
+    }
+  }
+}
+```
+
+Both real file-symlink attempts returned EPERM, with exact log label `[File symlink unavailable: EPERM]` for DONE and OUTCOME. The selected verbose skip probe exited 0 in 1.14s with 55 skipped (2 actual permission skips / 53 filtered), not a passing symlink execution. Real hardlink/junction evidence executed successfully. Compatibility markers remain non-authoritative and DONE can exist if later OUTCOME/state publication fails. The ledger prevents completion/replay from those markers alone. No unrestricted hostile filesystem, directory-fsync or whole-machine power-loss guarantee is claimed.
+
+First-batch boundaries remain complete-checkpoint resume only, retained consumed attempts on uncertainty, existing project budgets/reservations, and no background Loop, DAG, cron, general knowledge graph or duplicate task-cost account. Windows IPC enters the actual SIGINT handler but does not prove native console Ctrl+C delivery; short injected service deadlines establish that path while actual CLI keeps the ten-minute default and 3000ms grace. Package smoke retains its substituted background fixture; genuine worker compatibility is established separately through compiled CLI tests. Fixed loopback-provider evidence makes no real-model quality claim or second-platform claim. No current-batch push, merge or package publication occurred. Documentation bookkeeping ran no test/build/package command.

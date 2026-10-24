@@ -196,13 +196,13 @@ flowchart TD
 | CLI/参数/路径/服务/账本/后台专项 9 文件 | 203 项通过，退出 0，92.62 秒。 |
 | 首次全量及故障诊断 | 324 文件通过、6 文件失败；5346 项通过、8 失败、14 跳过，退出 1，403.83 秒。完整保留失败记录，修复真实 REPL 取消分支及夹具依赖、环境、精确结果断言和物理资源清理。 |
 | 原失败 6 文件串行复验 | 108 项通过，退出 0，24.37 秒；不提高原有测试或产品超时。原 artifact-policy 清理 EPERM 在未修改该文件时复验通过。 |
-| 最终 `npx vitest run --maxWorkers=2` | 330 文件全部通过；5354 项通过、14 跳过，共 5368 项，退出 0，382.82 秒。此数为全项目权威计数，其他专项计数有重叠，不累加。 |
+| Task 6 当时最终 `npx vitest run --maxWorkers=2`（F1 前历史结果） | 330 文件全部通过；5354 项通过、14 跳过，共 5368 项，退出 0，382.82 秒。此数为 Task 6 当时全项目计数，后被下述最终 F1 源码验证取代；专项计数有重叠，不累加。 |
 | 最终 `npx tsc --noEmit` | 退出 0，5.45 秒。 |
 | `npm run build` | 退出 0，4.80 秒，包含 Windows 原生 execution host。 |
 | 指定 `npm run test:package` | 退出 1，0.63 秒；现有脚本明确要求固定 pnpm 的 `npm_execpath`，在打包前拒绝 npm 入口。没有改变默认 smoke 行为。 |
 | 项目支持的 `pnpm run test:package` | 退出 0，24 个验收场景通过，88.661 秒；实际打包、冻结生产依赖安装和已安装 CLI 验证完成。预期失败场景分别保留退出 1/2。 |
 
-此次包收据的 tarball SHA256 为 `087c3eeeeaad48f40a52c9e5c12c62408390e879f91208c73e5e23de2465d1cd`；源码 SHA256 为 `9e9654ffe897e64ddda62392e7870eb13d94c9f7037847c2e55d3df94482e76e`。验证在提交前完成，因此构建身份如实记录上一个提交 `3fadf55` 和 `sourceDirty: true`，并以完整源码哈希绑定本次实际内容。未发布或推送该包。
+此次 Task 6 历史包收据（已被最终 F1 包身份取代）的 tarball SHA256 为 `087c3eeeeaad48f40a52c9e5c12c62408390e879f91208c73e5e23de2465d1cd`；源码 SHA256 为 `9e9654ffe897e64ddda62392e7870eb13d94c9f7037847c2e55d3df94482e76e`。验证在提交前完成，因此构建身份如实记录上一个提交 `3fadf55` 和 `sourceDirty: true`，并以完整源码哈希绑定本次实际内容。未发布或推送该包。
 
 真实跨进程验收覆盖：第二轮实际收到持久失败命令/退出状态/诊断并修复；三次停滞、仅 STATE/时间戳变化及有效代码进展；完整且已释放工作区所有权的失败检查点恢复；项目请求预算沿用且拒绝时不再发 HTTP；prepared 确认前、真实非幂等追加后 receipt 前、turn.finished 后 checkpoint 前三类死亡；次数不退还、请求不补投、副作用不重复；最新普通/无会话/最新未完成会话选择；工作区、目标、验收、阈值和显式上限冲突；更改已完成产物后的实际重新验收；headless 审批、取消 130、服务限额 124；实际后台单任务 outcome、退出和锁释放。
 
@@ -210,4 +210,28 @@ flowchart TD
 
 本批只支持完整检查点之间恢复；prepared/dispatched/settled 不确定性保留次数并要求人工恢复。保留项目预算和未结 reservation，没有新增任务总费用账户、后台 Loop、cron、依赖 DAG、知识图或 Web 控制台。新进程验收在 Windows 执行，未宣称第二平台或整机断电持久性；固定本地 provider 验证不能推断真实模型质量提升。权限不允许的文件 symlink 场景未在此主机执行，junction/hardlink 路径已有覆盖。
 
-全部 29 项控制器裁决、成本、实际证据和能力边界保存在[持久交付决策记录](../decisions/2026-10-22-artex-loop-controller.md)。任务 6 和整分支独立审查仍是最终交付关卡；实现者自审和上述测试不代替独立审查。
+Task 6 当时的 29 项控制器裁决及最后 F1 修复裁决合计 30 项，完整原文、理由、成本、证据和能力边界保存在[持久交付决策记录](../decisions/2026-10-22-artex-loop-controller.md)。任务 6 独立审查及最终整分支审查、唯一修复复核的实际完成状态见下节。
+
+### 2026-10-25 最终 F1 复核与交付（执行证据保留 2026-10-23 日期）
+
+六项任务独立审查均已完成；Task 6 实现提交为 `6a49eaf42f9c2139e547ab8b869cd02c53f2e110`。原[整分支审查](../reviews/2026-10-23-artex-loop-controller-final-review.md)只有 Important F1，保留原始 With fixes 判定和所有 Declined-to-judge 内容。唯一修复提交 `76653f1eb9e53ab8d69dd22f1c807fc96be29e67` 使用独立 receipt publisher 完成有所有权保护、不跟随链接的同目录 staged/fsync/rename 发布，保留权威 checkpoint 最后提交。[唯一局部独立复核](../reviews/2026-10-25-artex-loop-controller-final-fix-review.md)确认 **F1 ADDRESSED**、无新增 Critical/Important/Minor 问题、无剩余可执行发现。
+
+以下为最终 canonical-binding 源码的实际验证；上面的 Task 6 结果及包身份均为历史证据。F1 最初全量曾通过 331 文件、5374 项、16 跳过，430.92 秒，但随后实际 junction workspace alias RED 证明兼容性问题；完成同波次 canonical policy.loopDir 修正后必须使用新的全量及包结果，不能沿用旧通过结果。
+
+| 最终验证 | 实际结果 |
+| --- | --- |
+| 六文件 focused `--maxWorkers=2` | 退出 0；108 通过、2 项实际 EPERM 跳过，共 110 项，45.02 秒。 |
+| `node node_modules/typescript/bin/tsc --noEmit` | 退出 0，无诊断，5.88 秒。 |
+| 替换并行全量 `node node_modules/vitest/vitest.mjs run --maxWorkers=2` | 退出 1；329 文件通过、2 失败；5372 通过、3 超时、16 跳过，共 5391 项，415.33 秒。 |
+| 仅原失败两文件串行诊断 `tests/runtimeFixes.test.ts tests/runtime3.test.ts --maxWorkers=1` | 退出 0；2 文件、29 通过，19.97 秒；这是指定文件诊断，不能当作全量通过。 |
+| 后续完整串行全量 `node node_modules/vitest/vitest.mjs run --maxWorkers=1` | 退出 0；331 文件全部通过，5375 通过、16 跳过，共 5391 项，738.45 秒。 |
+| 新鲜 `npm run build` | 退出 0，5.07 秒。 |
+| 支持的固定 `pnpm run test:package` | 退出 0；24 场景，93.430 秒；真实打包、冻结生产依赖安装与已安装 CLI 验证。 |
+
+三个并行失败均为原 5000ms 超时：runtimeFixes.test.ts:170 第二次并发 runTurn（5276ms）、runtime3.test.ts:117 null literal args（5459ms）、runtime3.test.ts:129 valid object args（5001ms）。这两个既有文件使用固定 /tmp 工作区及共享 .artifacts/test-runtime，实际 engine 持久化与扫描仍在运行；共享 I/O/负载干扰与结果一致，但精确原因未证实。没有提高超时或修改无关夹具。完整串行通过不抹去并行红灯，也不宣称并行稳定性已修复；计数有重叠，不累加。
+
+指定 npm 包入口的历史拒绝原文为 **Run this script with pnpm run so the pinned package manager is available**，退出 1、0.63 秒；既有 smoke 要求 npm_execpath 为固定 pnpm 路径。本波次未重跑该拒绝，不能宣称 npm 包关卡通过。支持的固定 pnpm 最终 24 场景均符合预期：ask/auto 负例退出 2，schema/structured-invalid 负例退出 1，其余 20 场景退出 0。
+
+最终 source SHA256 `4b5ad6400ab8fc25cbbbf2a1cb6b54121e82e3c90bb5d0096e21ecc3616411ec`；tarball `.artifacts/release-package-ad0ALb/ovogogogo-0.1.0.tgz` 实际重算 SHA256 `362f7475d87d04a79aaf7fe43a262f69287e9b08c26da1f0281b8bae26255185` 与收据一致。包身份完整记录版本 0.1.0、schemaVersion 1、提交前 base `6a49eaf42f9c2139e547ab8b869cd02c53f2e110`、sourceDirty:true、builtAt `2026-10-23T15:19:45.551Z`、Node v24.20.0、Windows x64 native protocol 1、packed native SHA256 `ad1f8988aae23a65ddf86fd023e7b47c9b4f5ded93efe857775cdb8e6cfdb37a`。单独构建的 native SHA256 `cd4d48cf9c4a258c7518680377d0e89bef2ffc9a5f578b0575e8fb21837d72c8` 与随后 prepack 新构建的实际包字节不同，未混同；源码哈希相同。完整 24 场景 JSON 收据及原始汇总摘录持久保存在决策记录，不依赖临时执行目录。
+
+最终串行全量、类型检查和包关卡后没有源码/测试变更。两项真实文件 symlink 创建返回 EPERM 并跳过，不能用通过的 hardlink/junction 代替；其余跳过按全量原值保留。兼容 DONE/OUTCOME 始终不是恢复权威；较晚发布失败时可能已有 DONE，但不会因此完成或重放。第一批能力边界与上述 IPC、短注入服务期限、Windows、固定 provider、包后台替身限制保持原定义；不承诺任意指令恢复、敌对整机文件系统、目录 fsync 或断电持久性。没有新增后台 Loop、DAG、cron、通用知识图或重复任务费用账户，不宣称真实模型质量提升。本次文档收尾没有重复测试、构建或包验收，也没有 push、merge 或发布。
